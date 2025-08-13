@@ -55,8 +55,98 @@ const struct vfsops ext4fs_vfsops = {
 	.vfs_checkexp	= ufs_check_export,
 };
 
-int ext4fs_init(struct vfsconf *vfsconf)
+int
+ext4fs_mount(struct mount *mp, const char *path, void *data,
+	struct nameidata *ndp, struct proc *p)
 {
-	(void) vfsconf;
-	return 0;
+	(void)mp;
+	(void)path;
+	(void)data;
+	(void)ndp;
+	(void)p;
+	printf("ext4fs_mount: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
+{
+	(void)mp;
+	(void)mntflags;
+	(void)p;
+	printf("ext4fs_unmount: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
+{
+	(void)mp;
+	(void)sbp;
+	(void)p;
+	printf("ext4fs_statfs: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred, struct proc *p)
+{
+	(void)mp;
+	(void)waitfor;
+	(void)stall;
+	(void)cred;
+	(void)p;
+	printf("ext4fs_sync: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
+{
+	(void)mp;
+	(void)ino;
+	(void)vpp;
+	printf("ext4fs_vget: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
+{
+	(void)mp;
+	(void)fhp;
+	(void)vpp;
+	printf("ext4fs_fhtovp: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_vptofh(struct vnode *vp, struct fid *fhp)
+{
+	(void)vp;
+	(void)fhp;
+	printf("ext4fs_vptofh: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_init(struct vfsconf *vfsp)
+{
+	(void)vfsp;
+	printf("ext4fs_init: initializing ext4fs filesystem\n");
+	return (0);
+}
+
+int
+ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+    void *newp, size_t newlen, struct proc *p)
+	(void)name;
+	(void)namelen;
+	(void)oldp;
+	(void)oldlenp;
+	(void)newp;
+	(void)newlen;
+	(void)p;
+	printf("ext4fs_sysctl: not implemented\n");
+	return (EOPNOTSUPP);
 }
