@@ -1,4 +1,4 @@
-/* $OpenBSD: pmap.c,v 1.111 2025/02/14 18:36:04 kettenis Exp $ */
+/* $OpenBSD: pmap.c,v 1.113 2025/07/12 08:35:32 kettenis Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  *
@@ -614,6 +614,12 @@ pmap_enter(pmap_t pm, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	pmap_lock(pm);
 	pted = pmap_vp_lookup(pm, va, NULL);
 	if (pted && PTED_VALID(pted)) {
+		if ((pted->pted_pte & PTE_RPGN) == (pa & PTE_RPGN) &&
+		    (pted->pted_va & PROT_MASK) == (prot & PROT_MASK) &&
+		    (pted->pted_va & PMAP_CACHE_BITS) == cache) {
+			pmap_unlock(pm);
+			return 0;
+		}
 		pmap_remove_pted(pm, pted);
 		/* we lost our pted if it was user */
 		if (pm != pmap_kernel())
@@ -869,7 +875,7 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 	}
 	pted->pted_va |= cache;
 
-	pted->pted_va |= prot & (PROT_READ|PROT_WRITE|PROT_EXEC);
+	pted->pted_va |= prot & PROT_MASK;
 
 	if (flags & PMAP_WIRED) {
 		pted->pted_va |= PTED_VA_WIRED_M;
@@ -877,7 +883,7 @@ pmap_fill_pte(pmap_t pm, vaddr_t va, paddr_t pa, struct pte_desc *pted,
 	}
 
 	pted->pted_pte = pa & PTE_RPGN;
-	pted->pted_pte |= flags & (PROT_READ|PROT_WRITE|PROT_EXEC);
+	pted->pted_pte |= flags & PROT_MASK;
 }
 
 /*
@@ -1497,14 +1503,39 @@ pmap_deactivate(struct proc *p)
 
 	KASSERT(p == curproc);
 
+	if (pm->pm_active == 0)
+		return;
+
 	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
 	__asm volatile("isb");
 
-	if (atomic_dec_int_nv(&pm->pm_active) > 0)
-		return;
+	atomic_dec_int(&pm->pm_active);
+}
+
+void
+pmap_purge(struct proc *p)
+{
+	pmap_t pm = p->p_vmspace->vm_map.pmap;
+
+	KASSERT(p->p_p->ps_threadcnt == 0);
+	KASSERT(p == curproc);
+
+	/*
+	 * There is a theoretical chance that our sibling threads are
+	 * still making their way through the tail end of exit1().
+	 * Make absolutely sure they have made it past the point where
+	 * they disable their userland page tables.
+	 */
+	while (pm->pm_active != 1)
+		CPU_BUSY_CYCLE();
+
+	WRITE_SPECIALREG(ttbr0_el1, pmap_kernel()->pm_pt0pa);
+	__asm volatile("isb");
 
 	cpu_tlb_flush_asid_all((uint64_t)pm->pm_asid << 48);
 	cpu_tlb_flush_asid_all((uint64_t)(pm->pm_asid | ASID_USER) << 48);
+	pm->pm_pt0pa = pmap_kernel()->pm_pt0pa;
+	pm->pm_active = 0;
 }
 
 /*

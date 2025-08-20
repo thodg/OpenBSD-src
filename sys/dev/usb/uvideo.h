@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvideo.h,v 1.64 2025/02/26 20:50:46 kirill Exp $ */
+/*	$OpenBSD: uvideo.h,v 1.68 2025/08/16 08:13:11 kirill Exp $ */
 
 /*
  * Copyright (c) 2007 Robert Nagy <robert@openbsd.org>
@@ -53,6 +53,9 @@
 #define UDESCSUB_VS_FORMAT_FRAME_BASED			0x10
 #define UDESCSUB_VS_FRAME_FRAME_BASED			0x11
 #define UDESCSUB_VS_FORMAT_STREAM_BASED			0x12
+#define UDESCSUB_VS_FORMAT_H264				0x13
+#define UDESCSUB_VS_FRAME_H264				0x14
+#define UDESCSUB_VS_FORMAT_H264_SIMULCAST		0x15
 
 /* Table A-8: Video Class-Specific Request Codes */
 #define RC_UNDEFINED					0x00
@@ -272,7 +275,7 @@ struct usb_video_color_matching_descr {
 	uByte	bMatrixCoefficients;
 } __packed;
 
-/* Table 4-47: Video Probe and Commit Controls */
+/* Table 4-75: Video Probe and Commit Controls */
 struct usb_video_probe_commit {
 	uWord	bmHint;
 	uByte	bFormatIndex;
@@ -290,6 +293,12 @@ struct usb_video_probe_commit {
 	uByte	bPreferedVersion;
 	uByte	bMinVersion;
 	uByte	bMaxVersion;
+	uByte	bUsage;
+	uByte	bBitDepthLuma;
+	uByte	bmSettings;
+	uByte	bMaxNumberOfRefFramesPlus1;
+	uWord	bmRateControlModes;
+	uByte	bmLayoutPerStream[8];
 } __packed;
 
 /*
@@ -437,20 +446,90 @@ struct usb_video_format_mjpeg_desc {
 	uByte	bCopyProtect;
 } __packed;
 
-/* Table 3-2: Video Frame Descriptor (same for mjpeg and uncompressed)*/
 struct usb_video_frame_desc {
 	uByte	bLength;
 	uByte	bDescriptorType;
 	uByte	bDescriptorSubtype;
 	uByte	bFrameIndex;
-	uByte	bmCapabilities;
-	uWord	wWidth;
-	uWord	wHeight;
-	uDWord	dwMinBitRate;
-	uDWord	dwMaxBitRate;
-	uDWord	dwMaxVideoFrameBufferSize;
-	uDWord	dwDefaultFrameInterval;
-	uByte	bFrameIntervalType;
+	union {
+	    /*
+	     * Table 3-2: Video Frame Descriptor
+	     * (same for mjpeg and uncompressed)
+	     */
+	    struct {
+		uByte	bmCapabilities;
+		uWord	wWidth;
+		uWord	wHeight;
+		uDWord	dwMinBitRate;
+		uDWord	dwMaxBitRate;
+		uDWord	dwMaxVideoFrameBufferSize;
+		uDWord	dwDefaultFrameInterval;
+		uByte	bFrameIntervalType;
+	    } uc;
+
+	    /*
+	     * Table 3-2 Frame Based Payload Video Frame Descriptors */
+	    struct {
+		uByte	bmCapabilities;
+		uWord	wWidth;
+		uWord	wHeight;
+		uDWord	dwMinBitRate;
+		uDWord	dwMaxBitRate;
+		uDWord	dwDefaultFrameInterval;
+		uByte	bFrameIntervalType;
+		uDWord	dwBytesPerLine;
+	    } fb;
+
+	    /* Table 3-2: H.264 Payload Video Frame Descriptor */
+	    struct {
+		uWord	wWidth;
+		uWord	wHeight;
+		uWord	wSARwidth;
+		uWord	wSARheight;
+		uWord	wProfile;
+		uByte	bLevelIDC;
+		uWord	wConstrainedToolset;
+		uDWord	bmSupportedUsages;
+		uWord	bmCapabilities;
+		uDWord	bmSVCCapabilities;
+		uDWord	bmMVCCapabilities;
+		uDWord	dwMinBitRate;
+		uDWord	dwMaxBitRate;
+		uDWord	dwDefaultFrameInterval;
+		uByte	bNumFrameIntervals;
+	    } h264;
+
+	} u;
+
+#define UVIDEO_FRAME_MIN_LEN(frm)						\
+	(offsetof(struct usb_video_frame_desc, u) +				\
+		(								\
+		((frm)->bDescriptorSubtype == UDESCSUB_VS_FRAME_H264) ?		\
+			sizeof(((struct usb_video_frame_desc *)0)->u.h264) :	\
+		 ((frm)->bDescriptorSubtype == UDESCSUB_VS_FRAME_FRAME_BASED) ?	\
+			sizeof(((struct usb_video_frame_desc *)0)->u.fb) :	\
+			sizeof(((struct usb_video_frame_desc *)0)->u.uc)	\
+		)								\
+	)
+
+#define UVIDEO_FRAME_FIELD(frm, field)					\
+	(								\
+	((frm)->bDescriptorSubtype == UDESCSUB_VS_FRAME_H264) ?		\
+		(frm)->u.h264.field :					\
+	((frm)->bDescriptorSubtype == UDESCSUB_VS_FRAME_FRAME_BASED) ?	\
+		(frm)->u.fb.field :					\
+		(frm)->u.uc.field					\
+	)
+
+#define UVIDEO_FRAME_NUM_INTERVALS(frm)					\
+	(								\
+	((frm)->bDescriptorSubtype == UDESCSUB_VS_FRAME_H264) ?		\
+		(frm)->u.h264.bNumFrameIntervals :			\
+	((frm)->bDescriptorSubtype == UDESCSUB_VS_FRAME_FRAME_BASED) ?	\
+		(frm)->u.fb.bFrameIntervalType :			\
+		(frm)->u.uc.bFrameIntervalType				\
+	)
+
 	/* uDWord ivals[]; frame intervals, length varies */
 } __packed;
 
@@ -471,6 +550,53 @@ struct usb_video_format_uncompressed_desc {
 	uByte	bAspectRatioY;
 	uByte	bmInterlaceFlags;
 	uByte	bCopyProtect;
+} __packed;
+
+/* Table 3-1: H.264 Payload Video Format Descriptor */
+struct usb_video_format_h264_desc {
+	uByte	bLength;
+	uByte	bDescriptorType;
+	uByte	bDescriptorSubtype;
+	uByte	bFormatIndex;
+	uByte	bNumFrameDescriptors;
+	uByte	bDefaultFrameIndex;
+	uByte	bMaxCodecConfigDelay;
+	uByte	bmSupportedSliceModes;
+	uByte	bmSupportedSyncFrameTypes;
+	uByte	bResolutionScaling;
+	uByte	_reserved1;
+	uByte	bmSupportedRateControlModes;
+	uWord	wMaxMBperSecOneResolutionNoScalability;
+	uWord	wMaxMBperSecTwoResolutionsNoScalability;
+	uWord	wMaxMBperSecOneResolutionTemporalQualityScalability;
+	uWord	wMaxMBperSecTwoResolutionsTemporalQualityScalability;
+	uWord	wMaxMBperSecThreeResolutionsTemporalQualityScalablity;
+	uWord	wMaxMBperSecFourResolutionsTemporalQualityScalability;
+	uWord	wMaxMBperSecOneResolutionsTemporalSpatialScalability;
+	uWord	wMaxMBperSecTwoResolutionsTemporalSpatialScalability;
+	uWord	wMaxMBperSecThreeResolutionsTemporalSpatialScalability;
+	uWord	wMaxMBperSecFourResolutionsTemporalSpatialScalability;
+	uWord	wMaxMBperSecOneResolutionFullScalability;
+	uWord	wMaxMBperSecTwoResolutionsFullScalability;
+	uWord	wMaxMBperSecThreeResolutionsFullScalability;
+	uWord	wMaxMBperSecFourResolutionsFullScalability;
+} __packed;
+
+/* Table 3-1: Frame Based Payload Video Format Descriptor */
+struct usb_video_format_frame_based_desc {
+	uByte	bLength;
+	uByte	bDescriptorType;
+	uByte	bDescriptorSubtype;
+	uByte	bFormatIndex;
+	uByte	bNumFrameDescriptors;
+	uByte	guidFormat[16];
+	uByte	bBitsPerPixel;
+	uByte	bDefaultFrameIndex;
+	uByte	bAspectRatioX;
+	uByte	bAspectRatioY;
+	uByte	bmInterlaceFlags;
+	uByte	bCopyProtect;
+	uByte	bVariableSize;
 } __packed;
 
 /*
@@ -503,6 +629,43 @@ struct uvideo_format_desc {
 			uByte	bmInterlaceFlags;
 			uByte	bCopyProtect;
 		} uc;
+
+		/* frame based */
+		struct {
+			uByte	guidFormat[16];
+			uByte	bBitsPerPixel;
+			uByte	bDefaultFrameIndex;
+			uByte	bAspectRatioX;
+			uByte	bAspectRatioY;
+			uByte	bmInterlaceFlags;
+			uByte	bCopyProtect;
+			uByte	bVariableSize;
+		} fb;
+
+		/* h264 */
+		struct {
+			uByte	bDefaultFrameIndex;
+			uByte	bMaxCodecConfigDelay;
+			uByte	bmSupportedSliceModes;
+			uByte	bmSupportedSyncFrameTypes;
+			uByte	bResolutionScaling;
+			uByte	_reserved1;
+			uByte	bmSupportedRateControlModes;
+			uDWord	wMaxMBperSecOneResolutionNoScalability;
+			uDWord	wMaxMBperSecTwoResolutionsNoScalability;
+			uDWord	wMaxMBperSecOneResolutionTemporalQualityScalability;
+			uDWord	wMaxMBperSecTwoResolutionsTemporalQualityScalability;
+			uDWord	wMaxMBperSecThreeResolutionsTemporalQualityScalablity;
+			uDWord	wMaxMBperSecFourResolutionsTemporalQualityScalability;
+			uDWord	wMaxMBperSecOneResolutionsTemporalSpatialScalability;
+			uDWord	wMaxMBperSecTwoResolutionsTemporalSpatialScalability;
+			uDWord	wMaxMBperSecThreeResolutionsTemporalSpatialScalability;
+			uDWord	wMaxMBperSecFourResolutionsTemporalSpatialScalability;
+			uDWord	wMaxMBperSecOneResolutionFullScalability;
+			uDWord	wMaxMBperSecTwoResolutionsFullScalability;
+			uDWord	wMaxMBperSecThreeResolutionsFullScalability;
+			uDWord	wMaxMBperSecFourResolutionsFullScalability;
+		} h264;
 	} u;
 } __packed;
 
@@ -540,6 +703,7 @@ struct uvideo_frame_buffer {
 	int		 sample;
 	uint8_t		 fid;
 	uint8_t		 error;
+	uint8_t		 mmap_q_full;
 	int		 offset;
 	int		 buf_size;
 	uint8_t		*buf;

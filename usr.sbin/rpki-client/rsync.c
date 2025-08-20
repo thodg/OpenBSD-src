@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsync.c,v 1.57 2025/02/11 14:44:52 claudio Exp $ */
+/*	$OpenBSD: rsync.c,v 1.59 2025/08/01 13:46:06 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <netinet/in.h>
+#include <assert.h>
 #include <err.h>
 #include <errno.h>
 #include <poll.h>
@@ -391,9 +392,9 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 		while ((b = io_buf_get(msgq)) != NULL) {
 			/* Read host and module. */
 			io_read_buf(b, &id, sizeof(id));
-			io_read_str(b, &dst);
-			io_read_str(b, &compdst);
-			io_read_str(b, &uri);
+			io_read_opt_str(b, &dst);
+			io_read_opt_str(b, &compdst);
+			io_read_opt_str(b, &uri);
 
 			ibuf_free(b);
 
@@ -401,6 +402,8 @@ proc_rsync(char *prog, char *bind_addr, int fd)
 				rsync_new(id, uri, dst, compdst);
 				npending++;
 			} else {
+				assert(compdst == NULL);
+				assert(uri == NULL);
 				TAILQ_FOREACH(s, &states, entry)
 					if (s->id == id)
 						break;

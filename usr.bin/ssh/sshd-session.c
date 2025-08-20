@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd-session.c,v 1.12 2025/03/12 22:43:44 djm Exp $ */
+/* $OpenBSD: sshd-session.c,v 1.14 2025/08/18 03:43:01 djm Exp $ */
 /*
  * SSH2 implementation:
  * Privilege Separation:
@@ -422,7 +422,6 @@ get_hostkey_by_type(int type, int nid, int need_private, struct ssh *ssh)
 	for (i = 0; i < options.num_host_key_files; i++) {
 		switch (type) {
 		case KEY_RSA_CERT:
-		case KEY_DSA_CERT:
 		case KEY_ECDSA_CERT:
 		case KEY_ED25519_CERT:
 		case KEY_ECDSA_SK_CERT:
@@ -1099,6 +1098,8 @@ main(int ac, char **av)
 		fatal("Unable to create connection");
 	the_active_state = ssh;
 	ssh_packet_set_server(ssh);
+	ssh_packet_set_qos(ssh, options.ip_qos_interactive,
+	    options.ip_qos_bulk);
 
 	check_ip_options(ssh);
 

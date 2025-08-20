@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.h,v 1.101 2024/10/17 05:37:54 jsg Exp $	*/
+/*	$OpenBSD: nd6.h,v 1.103 2025/08/14 08:50:25 mvs Exp $	*/
 /*	$KAME: nd6.h,v 1.95 2002/06/08 11:31:06 itojun Exp $	*/
 
 /*
@@ -110,9 +110,6 @@ extern int nd6_umaxtries;
 extern int nd6_mmaxtries;
 extern int nd6_maxnudhint;
 extern int nd6_gctimer;
-extern int nd6_debug;
-
-#define nd6log(x)	do { if (nd6_debug) log x; } while (0)
 
 struct nd_opts {
 	struct nd_opt_hdr *nd_opts_src_lladdr;
@@ -128,7 +125,7 @@ struct	rtentry *nd6_lookup(const struct in6_addr *, int, struct ifnet *,
     u_int);
 void nd6_llinfo_settimer(const struct llinfo_nd6 *, unsigned int);
 void nd6_purge(struct ifnet *);
-void nd6_nud_hint(struct rtentry *);
+void nd6_nud_hint(struct rtentry *, int);
 void nd6_rtrequest(struct ifnet *, int, struct rtentry *);
 int nd6_ioctl(u_long, caddr_t, struct ifnet *);
 void nd6_cache_lladdr(struct ifnet *, const struct in6_addr *, char *,

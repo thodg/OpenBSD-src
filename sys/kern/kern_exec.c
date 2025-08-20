@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_exec.c,v 1.262 2025/02/17 10:07:10 claudio Exp $	*/
+/*	$OpenBSD: kern_exec.c,v 1.266 2025/08/15 04:21:00 guenther Exp $	*/
 /*	$NetBSD: kern_exec.c,v 1.75 1996/02/09 18:59:28 christos Exp $	*/
 
 /*-
@@ -441,6 +441,9 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	 */
 	single_thread_set(p, SINGLE_EXIT);
 
+	/* Clear profiling state in new image */
+	prof_exec(pr);
+
 	/*
 	 * Prepare vmspace for remapping. Note that uvmspace_exec can replace
 	 * ps_vmspace!
@@ -528,7 +531,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	}
 
 	stopprofclock(pr);	/* stop profiling */
-	fdcloseexec(p);		/* handle close on exec */
+	fdprepforexec(p);	/* handle close on exec and close on fork */
 	execsigs(p);		/* reset caught signals */
 	TCB_SET(p, NULL);	/* reset the TCB address */
 	pr->ps_kbind_addr = 0;	/* reset the kbind bits */
@@ -547,10 +550,13 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	if (otvp)
 		vrele(otvp);
 
+	p->p_p->ps_iflags &= ~(PSI_NOBTCFI | PSI_PROFILE | PSI_WXNEEDED);
 	if (pack.ep_flags & EXEC_NOBTCFI)
-		atomic_setbits_int(&p->p_p->ps_flags, PS_NOBTCFI);
-	else
-		atomic_clearbits_int(&p->p_p->ps_flags, PS_NOBTCFI);
+		p->p_p->ps_iflags |= PSI_NOBTCFI;
+	if (pack.ep_flags & EXEC_PROFILE)
+		p->p_p->ps_iflags |= PSI_PROFILE;
+	if (pack.ep_flags & EXEC_WXNEEDED)
+		p->p_p->ps_iflags |= PSI_WXNEEDED;
 
 	atomic_setbits_int(&pr->ps_flags, PS_EXEC);
 	if (pr->ps_flags & PS_PPWAIT) {
@@ -699,7 +705,7 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	/* reset CPU time usage for the thread, but not the process */
 	timespecclear(&p->p_tu.tu_runtime);
 	p->p_tu.tu_uticks = p->p_tu.tu_sticks = p->p_tu.tu_iticks = 0;
-	p->p_tu.tu_gen = 0;
+	pc_lock_init(&p->p_tu.tu_pcl);
 
 	memset(p->p_name, 0, sizeof p->p_name);
 
@@ -744,11 +750,6 @@ sys_execve(struct proc *p, void *v, register_t *retval)
 	p->p_descfd = 255;
 	if ((pack.ep_flags & EXEC_HASFD) && pack.ep_fd < 255)
 		p->p_descfd = pack.ep_fd;
-
-	if (pack.ep_flags & EXEC_WXNEEDED)
-		atomic_setbits_int(&p->p_p->ps_flags, PS_WXNEEDED);
-	else
-		atomic_clearbits_int(&p->p_p->ps_flags, PS_WXNEEDED);
 
 	atomic_clearbits_int(&pr->ps_flags, PS_INEXEC);
 	single_thread_clear(p);

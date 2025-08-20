@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.c,v 1.287 2025/02/17 20:31:25 bluhm Exp $	*/
+/*	$OpenBSD: nd6.c,v 1.300 2025/08/14 08:50:25 mvs Exp $	*/
 /*	$KAME: nd6.c,v 1.280 2002/06/08 19:52:07 itojun Exp $	*/
 
 /*
@@ -38,7 +38,6 @@
 #include <sys/socket.h>
 #include <sys/sockio.h>
 #include <sys/time.h>
-#include <sys/kernel.h>
 #include <sys/pool.h>
 #include <sys/errno.h>
 #include <sys/ioctl.h>
@@ -54,7 +53,6 @@
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
-#include <netinet/ip_ipsp.h>
 
 #include <netinet6/in6_var.h>
 #include <netinet/ip6.h>
@@ -75,23 +73,17 @@
 #define ND6_RECALC_REACHTM_INTERVAL (60 * 120) /* 2 hours */
 
 /* timer values */
-int	nd6_timer_next	= -1;	/* at which uptime nd6_timer runs */
+time_t	nd6_timer_next	= -1;	/* at which uptime nd6_timer runs */
 time_t	nd6_expire_next	= -1;	/* at which uptime nd6_expire runs */
-int	nd6_delay	= 5;	/* delay first probe time 5 second */
-int	nd6_umaxtries	= 3;	/* maximum unicast query */
-int	nd6_mmaxtries	= 3;	/* maximum multicast query */
+int	nd6_delay	= 5;	/* [a] delay first probe time 5 second */
+int	nd6_umaxtries	= 3;	/* [a] maximum unicast query */
+int	nd6_mmaxtries	= 3;	/* [a] maximum multicast query */
 int	nd6_gctimer	= (60 * 60 * 24); /* 1 day: garbage collection timer */
 
 /* preventing too many loops in ND option parsing */
 int nd6_maxndopt = 10;	/* max # of ND options allowed */
 
-int nd6_maxnudhint = 0;	/* max # of subsequent upper layer hints */
-
-#ifdef ND6_DEBUG
-int nd6_debug = 1;
-#else
-int nd6_debug = 0;
-#endif
+int nd6_maxnudhint = 0;	/* [a] max # of subsequent upper layer hints */
 
 /* llinfo_nd6 live time, rt_llinfo and RTF_LLINFO are protected by nd6_mtx */
 struct mutex nd6_mtx = MUTEX_INITIALIZER(IPL_SOFTNET);
@@ -107,7 +99,7 @@ void nd6_slowtimo(void *);
 void nd6_expire(void *);
 void nd6_expire_timer(void *);
 void nd6_invalidate(struct rtentry *);
-void nd6_free(struct rtentry *, int);
+void nd6_free(struct rtentry *, struct ifnet *ifp, int);
 int nd6_llinfo_timer(struct rtentry *, int);
 
 struct timeout nd6_timer_to;
@@ -194,17 +186,11 @@ nd6_options(void *opt, int icmp6len, struct nd_opts *ndopts)
 
 		switch (nd_opt->nd_opt_type) {
 		case ND_OPT_SOURCE_LINKADDR:
-			if (ndopts->nd_opts_src_lladdr != NULL)
-				nd6log((LOG_INFO, "duplicated ND6 option found "
-				    "(type=%d)\n", nd_opt->nd_opt_type));
-			else
+			if (ndopts->nd_opts_src_lladdr == NULL)
 				ndopts->nd_opts_src_lladdr = nd_opt;
 			break;
 		case ND_OPT_TARGET_LINKADDR:
-			if (ndopts->nd_opts_tgt_lladdr != NULL)
-				nd6log((LOG_INFO, "duplicated ND6 option found "
-				    "(type=%d)\n", nd_opt->nd_opt_type));
-			else
+			if (ndopts->nd_opts_tgt_lladdr == NULL)
 				ndopts->nd_opts_tgt_lladdr = nd_opt;
 			break;
 		case ND_OPT_MTU:
@@ -219,16 +205,12 @@ nd6_options(void *opt, int icmp6len, struct nd_opts *ndopts)
 			 * Unknown options must be silently ignored,
 			 * to accommodate future extension to the protocol.
 			 */
-			nd6log((LOG_DEBUG,
-			    "nd6_options: unsupported option %d - "
-			    "option ignored\n", nd_opt->nd_opt_type));
 			break;
 		}
 
 		i++;
 		if (i > nd6_maxndopt) {
 			icmp6stat_inc(icp6s_nd_toomanyopt);
-			nd6log((LOG_INFO, "too many loop in nd opt\n"));
 			break;
 		}
 	}
@@ -314,7 +296,7 @@ nd6_llinfo_timer(struct rtentry *rt, int i_am_router)
 
 	switch (ln->ln_state) {
 	case ND6_LLINFO_INCOMPLETE:
-		if (ln->ln_asked < nd6_mmaxtries) {
+		if (ln->ln_asked < atomic_load_int(&nd6_mmaxtries)) {
 			ln->ln_asked++;
 			nd6_llinfo_settimer(ln, RETRANS_TIMER / 1000);
 			nd6_ns_output(ifp, NULL, &dst->sin6_addr,
@@ -347,7 +329,7 @@ nd6_llinfo_timer(struct rtentry *rt, int i_am_router)
 			} else
 				atomic_sub_int(&ln_hold_total, len);
 
-			nd6_free(rt, i_am_router);
+			nd6_free(rt, ifp, i_am_router);
 			ln = NULL;
 		}
 		break;
@@ -363,7 +345,7 @@ nd6_llinfo_timer(struct rtentry *rt, int i_am_router)
 	case ND6_LLINFO_PURGE:
 		/* Garbage Collection(RFC 2461 5.3) */
 		if (!ND6_LLINFO_PERMANENT(ln)) {
-			nd6_free(rt, i_am_router);
+			nd6_free(rt, ifp, i_am_router);
 			ln = NULL;
 		}
 		break;
@@ -378,13 +360,13 @@ nd6_llinfo_timer(struct rtentry *rt, int i_am_router)
 		break;
 
 	case ND6_LLINFO_PROBE:
-		if (ln->ln_asked < nd6_umaxtries) {
+		if (ln->ln_asked < atomic_load_int(&nd6_umaxtries)) {
 			ln->ln_asked++;
 			nd6_llinfo_settimer(ln, RETRANS_TIMER / 1000);
 			nd6_ns_output(ifp, &dst->sin6_addr, &dst->sin6_addr,
 			    &ln->ln_saddr6, 0);
 		} else {
-			nd6_free(rt, i_am_router);
+			nd6_free(rt, ifp, i_am_router);
 			ln = NULL;
 		}
 		break;
@@ -494,7 +476,7 @@ nd6_purge(struct ifnet *ifp)
 		    rt->rt_gateway->sa_family == AF_LINK) {
 			sdl = satosdl(rt->rt_gateway);
 			if (sdl->sdl_index == ifp->if_index)
-				nd6_free(rt, i_am_router);
+				nd6_free(rt, ifp, i_am_router);
 		}
 	}
 }
@@ -577,13 +559,6 @@ nd6_lookup(const struct in6_addr *addr6, int create, struct ifnet *ifp,
 	if ((rt->rt_flags & RTF_GATEWAY) || (rt->rt_flags & RTF_LLINFO) == 0 ||
 	    rt->rt_gateway->sa_family != AF_LINK || rt->rt_llinfo == NULL ||
 	    (ifp != NULL && rt->rt_ifidx != ifp->if_index)) {
-		if (create) {
-			char addr[INET6_ADDRSTRLEN];
-			nd6log((LOG_DEBUG, "%s: failed to lookup %s (if=%s)\n",
-			    __func__,
-			    inet_ntop(AF_INET6, addr6, addr, sizeof(addr)),
-			    ifp ? ifp->if_xname : "unspec"));
-		}
 		rtfree(rt);
 		return (NULL);
 	}
@@ -663,15 +638,12 @@ nd6_invalidate(struct rtentry *rt)
  * Free an nd6 llinfo entry.
  */
 void
-nd6_free(struct rtentry *rt, int i_am_router)
+nd6_free(struct rtentry *rt, struct ifnet *ifp, int i_am_router)
 {
 	struct llinfo_nd6 *ln = (struct llinfo_nd6 *)rt->rt_llinfo;
 	struct in6_addr in6 = satosin6(rt_key(rt))->sin6_addr;
-	struct ifnet *ifp;
 
 	NET_ASSERT_LOCKED_EXCLUSIVE();
-
-	ifp = if_get(rt->rt_ifidx);
 
 	if (!i_am_router) {
 		if (ln->ln_router) {
@@ -694,8 +666,6 @@ nd6_free(struct rtentry *rt, int i_am_router)
 	 */
 	if (!ISSET(rt->rt_flags, RTF_STATIC|RTF_CACHED))
 		rtdeletemsg(rt, ifp, ifp->if_rdomain);
-
-	if_put(ifp);
 }
 
 /*
@@ -704,7 +674,7 @@ nd6_free(struct rtentry *rt, int i_am_router)
  * XXX cost-effective methods?
  */
 void
-nd6_nud_hint(struct rtentry *rt)
+nd6_nud_hint(struct rtentry *rt, int maxnudhint)
 {
 	struct llinfo_nd6 *ln;
 	struct ifnet *ifp;
@@ -736,7 +706,7 @@ nd6_nud_hint(struct rtentry *rt)
 	 * it is possible we have false information.
 	 */
 	ln->ln_byhint++;
-	if (ln->ln_byhint > nd6_maxnudhint)
+	if (ln->ln_byhint > maxnudhint)
 		goto out;
 
 	ln->ln_state = ND6_LLINFO_REACHABLE;
@@ -854,8 +824,7 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 		 * cause re-entering rtable related routines triggering
 		 * lock-order-reversal problems.
 		 */
-		if (ip6_neighborgcthresh >= 0 &&
-		    nd6_inuse >= ip6_neighborgcthresh) {
+		if (nd6_inuse >= atomic_load_int(&ip6_neighborgcthresh)) {
 			int i;
 
 			for (i = 0; i < 10; i++) {
@@ -910,14 +879,7 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 			llsol.s6_addr8[12] = 0xff;
 
 			KERNEL_LOCK();
-			if (in6_addmulti(&llsol, ifp, &error)) {
-				char addr[INET6_ADDRSTRLEN];
-				nd6log((LOG_ERR, "%s: failed to join "
-				    "%s (errno=%d)\n", ifp->if_xname,
-				    inet_ntop(AF_INET6, &llsol,
-					addr, sizeof(addr)),
-				    error));
-			}
+			in6_addmulti(&llsol, ifp, &error);
 			KERNEL_UNLOCK();
 		}
 		break;
@@ -1087,7 +1049,7 @@ nd6_cache_lladdr(struct ifnet *ifp, const struct in6_addr *from, char *lladdr,
 		return;
 	if ((rt->rt_flags & (RTF_GATEWAY | RTF_LLINFO)) != RTF_LLINFO) {
 fail:
-		nd6_free(rt, i_am_router);
+		nd6_free(rt, ifp, i_am_router);
 		rtfree(rt);
 		return;
 	}
@@ -1335,7 +1297,7 @@ nd6_resolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 	if (ln->ln_state == ND6_LLINFO_STALE) {
 		ln->ln_asked = 0;
 		ln->ln_state = ND6_LLINFO_DELAY;
-		nd6_llinfo_settimer(ln, nd6_delay);
+		nd6_llinfo_settimer(ln, atomic_load_int(&nd6_delay));
 	}
 
 	/*

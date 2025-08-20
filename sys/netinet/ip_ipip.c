@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ipip.c,v 1.106 2025/03/02 21:28:32 bluhm Exp $ */
+/*	$OpenBSD: ip_ipip.c,v 1.111 2025/07/18 08:39:14 mvs Exp $ */
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -53,20 +53,16 @@
 #include <net/if_types.h>
 #include <net/if_var.h>
 #include <net/route.h>
-#include <net/netisr.h>
 #include <net/bpf.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <netinet/in_pcb.h>
+#include <netinet/ip6.h>
+#include <netinet/ip_ipsp.h>
 #include <netinet/ip_var.h>
 #include <netinet6/ip6_var.h>
 #include <netinet/ip_ecn.h>
 #include <netinet/ip_ipip.h>
-
-#ifdef MROUTING
-#include <netinet/ip_mroute.h>
-#endif
 
 #if NPF > 0
 #include <net/pfvar.h>
@@ -80,7 +76,7 @@
 #ifdef ENCDEBUG
 #define DPRINTF(fmt, args...)						\
 	do {								\
-		if (encdebug)						\
+		if (atomic_load_int(&encdebug))				\
 			printf("%s: " fmt "\n", __func__, ## args);	\
 	} while (0)
 #else
@@ -387,7 +383,7 @@ ipip_output(struct mbuf **mp, struct tdb *tdb)
 		ipo->ip_v = IPVERSION;
 		ipo->ip_hl = 5;
 		ipo->ip_len = htons(m->m_pkthdr.len);
-		ipo->ip_ttl = ip_defttl;
+		ipo->ip_ttl = atomic_load_int(&ip_defttl);
 		ipo->ip_sum = 0;
 		ipo->ip_src = tdb->tdb_src.sin.sin_addr;
 		ipo->ip_dst = tdb->tdb_dst.sin.sin_addr;
@@ -487,7 +483,7 @@ ipip_output(struct mbuf **mp, struct tdb *tdb)
 		ip6o->ip6_vfc &= ~IPV6_VERSION_MASK;
 		ip6o->ip6_vfc |= IPV6_VERSION;
 		ip6o->ip6_plen = htons(m->m_pkthdr.len - sizeof(*ip6o));
-		ip6o->ip6_hlim = ip6_defhlim;
+		ip6o->ip6_hlim = atomic_load_int(&ip6_defhlim);
 		in6_embedscope(&ip6o->ip6_src, &tdb->tdb_src.sin6, NULL, NULL);
 		in6_embedscope(&ip6o->ip6_dst, &tdb->tdb_dst.sin6, NULL, NULL);
 
@@ -574,6 +570,7 @@ ipe4_input(struct mbuf **mp, struct tdb *tdb, int hlen, int proto,
 }
 #endif	/* IPSEC */
 
+#ifndef SMALL_KERNEL
 int
 ipip_sysctl_ipipstat(void *oldp, size_t *oldlenp, void *newp)
 {
@@ -606,3 +603,4 @@ ipip_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 	}
 	/* NOTREACHED */
 }
+#endif /* SMALL_KERNEL */

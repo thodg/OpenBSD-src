@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.743 2025/04/22 05:31:49 deraadt Exp $
+#	$OpenBSD: files,v 1.746 2025/07/13 05:45:21 dlg Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -23,6 +23,7 @@ define	onewirebus {}
 define	video {}
 define	intrmap {}
 define	fdt {[early = 0]}
+define	xcall
 
 # filesystem firmware loading attribute
 define firmload
@@ -110,9 +111,6 @@ define	edid
 file	dev/videomode/edid.c		edid
 file    dev/videomode/vesagtf.c         edid
 file    dev/videomode/videomode.c       edid
-
-# ACPI / FDT qualcomm devices
-device qcscm
 
 # Attribute for devices that read/write an IEEE 802.3u MII bus using the
 # bit-bang method.
@@ -561,6 +559,9 @@ device	qcgpio
 # Qualcomm I2C controller
 device	qciic: i2cbus
 
+# Qualcomm Secure Channel Manager
+device	qcscm
+
 # UFS HC
 device	ufshci: scsi
 file	dev/ic/ufshci.c			ufshci needs-flag
@@ -739,6 +740,7 @@ file kern/kern_intrmap.c		intrmap
 file kern/kern_sensors.c
 file kern/kern_sig.c
 file kern/kern_smr.c
+file kern/kern_softintr.c
 file kern/kern_subr.c
 file kern/kern_sysctl.c
 file kern/kern_synch.c
@@ -749,6 +751,7 @@ file kern/kern_uuid.c
 file kern/kern_watchdog.c		!small_kernel
 file kern/kern_task.c
 file kern/kern_srp.c
+file kern/kern_xcall.c			xcall			needs-flag
 file kern/kern_xxx.c
 file kern/sched_bsd.c
 file kern/subr_autoconf.c

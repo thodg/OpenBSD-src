@@ -1,12 +1,13 @@
-#	$OpenBSD: Makefile,v 1.11 2025/03/08 20:09:35 tb Exp $
+#	$OpenBSD: Makefile,v 1.13 2025/08/03 08:29:39 jsing Exp $
 
-.ifdef EOPENSSL33
-LDADD +=	-Wl,-rpath,/usr/local/lib/eopenssl33 -L/usr/local/lib/eopenssl33
-CFLAGS +=	-I/usr/local/include/eopenssl33/
+.ifdef EOPENSSL35
+LDADD +=	-Wl,-rpath,/usr/local/lib/eopenssl35 -L/usr/local/lib/eopenssl35
+CFLAGS +=	-I/usr/local/include/eopenssl35/
 CFLAGS +=	-DOPENSSL_SUPPRESS_DEPRECATED
 .endif
 
 PROGS +=	ectest
+PROGS +=	ec_arithmetic
 PROGS +=	ec_asn1_test
 PROGS +=	ec_point_conversion
 

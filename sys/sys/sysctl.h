@@ -1,4 +1,4 @@
-/*	$OpenBSD: sysctl.h,v 1.241 2025/02/14 13:29:00 ratchov Exp $	*/
+/*	$OpenBSD: sysctl.h,v 1.246 2025/07/31 09:05:11 mvs Exp $	*/
 /*	$NetBSD: sysctl.h,v 1.16 1996/04/09 20:55:36 cgd Exp $	*/
 
 /*
@@ -75,7 +75,7 @@ struct ctlname {
 #define	CTL_UNSPEC	0		/* unused */
 #define	CTL_KERN	1		/* "high kernel": proc, limits */
 #define	CTL_VM		2		/* virtual memory */
-#define	CTL_FS		3		/* file system, mount type is next */
+/* gap for CTL_FS	3		*/
 #define	CTL_NET		4		/* network, see socket.h */
 #define	CTL_DEBUG	5		/* debugging parameters */
 #define	CTL_HW		6		/* generic cpu/io */
@@ -89,7 +89,7 @@ struct ctlname {
 	{ 0, 0 }, \
 	{ "kern", CTLTYPE_NODE }, \
 	{ "vm", CTLTYPE_NODE }, \
-	{ "fs", CTLTYPE_NODE }, \
+	{ "gap", 0 }, \
 	{ "net", CTLTYPE_NODE }, \
 	{ "debug", CTLTYPE_NODE }, \
 	{ "hw", CTLTYPE_NODE }, \
@@ -896,28 +896,6 @@ struct kinfo_file {
 }
 
 /*
- * CTL_FS identifiers
- */
-#define	FS_POSIX	1		/* POSIX flags */
-#define	FS_MAXID	2
-
-#define	CTL_FS_NAMES { \
-	{ 0, 0 }, \
-	{ "posix", CTLTYPE_NODE }, \
-}
-
-/*
- * CTL_FS identifiers
- */
-#define	FS_POSIX_SETUID	1		/* int: always clear SGID/SUID bit when owner change */
-#define	FS_POSIX_MAXID	2
-
-#define	CTL_FS_POSIX_NAMES { \
-	{ 0, 0 }, \
-	{ "setuid", CTLTYPE_INT }, \
-}
-
-/*
  * CTL_HW identifiers
  */
 #define	HW_MACHINE		 1	/* string: machine class */
@@ -1052,6 +1030,8 @@ struct sysctl_bounded_args {
  */
 typedef int (sysctlfn)(int *, u_int, void *, size_t *, void *, size_t, struct proc *);
 
+extern struct rwlock sysctl_lock;
+
 int sysctl_vslock(void *, size_t);
 void sysctl_vsunlock(void *, size_t);
 
@@ -1062,7 +1042,6 @@ int sysctl_securelevel_int(void *, size_t *, void *, size_t, int *);
 int sysctl_int_bounded(void *, size_t *, void *, size_t, int *, int, int);
 int sysctl_bounded_arr(const struct sysctl_bounded_args *, u_int,
     int *, u_int, void *, size_t *, void *, size_t);
-int sysctl_quad(void *, size_t *, void *, size_t, int64_t *);
 int sysctl_rdquad(void *, size_t *, void *, int64_t);
 int sysctl_string(void *, size_t *, void *, size_t, char *, size_t);
 int sysctl_tstring(void *, size_t *, void *, size_t, char *, size_t);
@@ -1076,7 +1055,7 @@ struct mbuf_queue;
 int sysctl_mq(int *, u_int, void *, size_t *, void *, size_t,
     struct mbuf_queue *);
 struct rtentry;
-int sysctl_dumpentry(struct rtentry *, void *, unsigned int);
+int sysctl_dumpentry(const struct rtentry *, void *, unsigned int);
 int sysctl_rtable(int *, u_int, void *, size_t *, void *, size_t);
 int sysctl_clockrate(char *, size_t *, void *);
 #if defined(GPROF) || defined(DDBPROF)
@@ -1092,10 +1071,6 @@ int hw_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 int debug_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 		      struct proc *);
 #endif
-int fs_sysctl(int *, u_int, void *, size_t *, void *, size_t,
-		   struct proc *);
-int fs_posix_sysctl(int *, u_int, void *, size_t *, void *, size_t,
-			 struct proc *);
 int net_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 		    struct proc *);
 int cpu_sysctl(int *, u_int, void *, size_t *, void *, size_t,

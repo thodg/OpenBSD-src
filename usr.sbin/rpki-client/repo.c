@@ -1,4 +1,4 @@
-/*	$OpenBSD: repo.c,v 1.76 2025/04/08 09:28:25 claudio Exp $ */
+/*	$OpenBSD: repo.c,v 1.79 2025/08/14 15:12:00 claudio Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -301,6 +301,20 @@ repo_state(const struct repo *rp)
 		return rp->rrdp->state;
 	/* No backend so sync is by definition done. */
 	return REPO_DONE;
+}
+
+static const char *
+repo_state_string(const struct repo *rp)
+{
+	switch (repo_state(rp)) {
+	case REPO_LOADING:
+		return "loading";
+	case REPO_DONE:
+		return "done";
+	case REPO_FAILED:
+		return "failed";
+	}
+	return "unknown";
 }
 
 /*
@@ -851,9 +865,9 @@ rrdp_session_buffer(struct ibuf *b, const struct rrdp_session *s)
 
 	io_str_buffer(b, s->session_id);
 	io_simple_buffer(b, &s->serial, sizeof(s->serial));
-	io_str_buffer(b, s->last_mod);
+	io_opt_str_buffer(b, s->last_mod);
 	for (i = 0; i < sizeof(s->deltas) / sizeof(s->deltas[0]); i++)
-		io_str_buffer(b, s->deltas[i]);
+		io_opt_str_buffer(b, s->deltas[i]);
 }
 
 struct rrdp_session *
@@ -867,9 +881,9 @@ rrdp_session_read(struct ibuf *b)
 
 	io_read_str(b, &s->session_id);
 	io_read_buf(b, &s->serial, sizeof(s->serial));
-	io_read_str(b, &s->last_mod);
+	io_read_opt_str(b, &s->last_mod);
 	for (i = 0; i < sizeof(s->deltas) / sizeof(s->deltas[0]); i++)
-		io_read_str(b, &s->deltas[i]);
+		io_read_opt_str(b, &s->deltas[i]);
 
 	return s;
 }
@@ -1273,7 +1287,8 @@ repo_byid(unsigned int id)
 		if (rp->id == id)
 			return rp;
 	}
-	return NULL;
+
+	errx(1, "unknown repo with id %u", id);
 }
 
 static struct repo *
@@ -1415,6 +1430,21 @@ repo_queued(struct repo *rp, struct entity *p)
 	return 0;
 }
 
+void
+repo_printinfo(size_t qlen)
+{
+	struct repo	*rp;
+
+	warnx("%zu outstanding entities", qlen);
+
+	SLIST_FOREACH(rp, &repos, entry) {
+		if (TAILQ_EMPTY(&rp->queue))
+			continue;
+		warnx("%s: queue not empty, state %s", rp->basedir,
+		    repo_state_string(rp));
+	}
+}
+
 static void
 repo_fail(struct repo *rp)
 {
@@ -1496,6 +1526,8 @@ repo_check_timeout(int timeout)
 void
 repostats_new_files_inc(struct repo *rp, const char *file)
 {
+	assert(rp != NULL);
+
 	if (strncmp(file, ".rsync/", strlen(".rsync/")) == 0 ||
 	    strncmp(file, ".rrdp/", strlen(".rrdp/")) == 0)
 		rp->repostats.new_files++;
@@ -1507,8 +1539,8 @@ repostats_new_files_inc(struct repo *rp, const char *file)
 void
 repo_stat_inc(struct repo *rp, int talid, enum rtype type, enum stype subtype)
 {
-	if (rp == NULL)
-		return;
+	assert(rp != NULL);
+
 	rp->stats_used[talid] = 1;
 	switch (type) {
 	case RTYPE_CER:

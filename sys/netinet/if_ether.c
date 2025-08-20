@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ether.c,v 1.272 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: if_ether.c,v 1.276 2025/07/17 17:31:45 mvs Exp $	*/
 /*	$NetBSD: if_ether.c,v 1.31 1996/05/11 12:59:58 mycroft Exp $	*/
 
 /*
@@ -45,7 +45,6 @@
 #include <sys/mbuf.h>
 #include <sys/socket.h>
 #include <sys/timeout.h>
-#include <sys/kernel.h>
 #include <sys/syslog.h>
 #include <sys/queue.h>
 #include <sys/pool.h>
@@ -58,7 +57,6 @@
 #include <net/netisr.h>
 
 #include <netinet/in.h>
-#include <netinet/in_var.h>
 #include <netinet/if_ether.h>
 #include <netinet/ip_var.h>
 #if NCARP > 0
@@ -386,7 +384,7 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 
 		/* refresh ARP entry when timeout gets close */
 		if (rt->rt_expire != 0 &&
-		    rt->rt_expire - arpt_keep / 8 < uptime) {
+		    rt->rt_expire - atomic_load_int(&arpt_keep) / 8 < uptime) {
 
 			mtx_enter(&arp_mtx);
 			la = (struct llinfo_arp *)rt->rt_llinfo;
@@ -449,7 +447,7 @@ arpresolve(struct ifnet *ifp, struct rtentry *rt0, struct mbuf *m,
 				refresh = 1;
 			else {
 				reject = RTF_REJECT;
-				rt->rt_expire += arpt_down;
+				rt->rt_expire += atomic_load_int(&arpt_down);
 				la->la_asked = 0;
 				la->la_refreshed = 0;
 				atomic_sub_int(&la_hold_total,
@@ -711,7 +709,7 @@ arpcache(struct ifnet *ifp, struct ether_arp *ea, struct rtentry *rt)
 	sdl->sdl_alen = sizeof(ea->arp_sha);
 	memcpy(LLADDR(sdl), ea->arp_sha, sizeof(ea->arp_sha));
 	if (rt->rt_expire)
-		rt->rt_expire = uptime + arpt_keep;
+		rt->rt_expire = uptime + atomic_load_int(&arpt_keep);
 	rt->rt_flags &= ~RTF_REJECT;
 
 	/* Notify userland that an ARP resolution has been done. */
@@ -901,6 +899,7 @@ out:
 	m_freem(m);
 }
 
+#ifdef NFSCLIENT
 /*
  * Send a RARP request for the ip address of the specified interface.
  * The request should be RFC 903-compliant.
@@ -940,7 +939,6 @@ revarprequest(struct ifnet *ifp)
 	ifp->if_output(ifp, m, &sa, NULL);
 }
 
-#ifdef NFSCLIENT
 /*
  * RARP for the ip address of the specified interface, but also
  * save the ip address of the server that sent the answer.

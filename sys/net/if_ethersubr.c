@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ethersubr.c,v 1.298 2025/03/11 15:31:03 mvs Exp $	*/
+/*	$OpenBSD: if_ethersubr.c,v 1.303 2025/07/07 02:28:50 jsg Exp $	*/
 /*	$NetBSD: if_ethersubr.c,v 1.19 1996/05/07 02:40:30 thorpej Exp $	*/
 
 /*
@@ -77,27 +77,20 @@ didn't get a copy, you may request one from <license@ipv6.nrl.navy.mil>.
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
-#include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
-#include <sys/syslog.h>
-#include <sys/timeout.h>
 #include <sys/smr.h>
 
 #include <net/if.h>
 #include <net/netisr.h>
 #include <net/route.h>
-#include <net/if_llc.h>
 #include <net/if_dl.h>
-#include <net/if_media.h>
 #include <net/if_types.h>
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
-#include <netinet/ip_ipsp.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <netinet/tcp.h>
@@ -128,7 +121,6 @@ didn't get a copy, you may request one from <license@ipv6.nrl.navy.mil>.
 #endif
 
 #ifdef INET6
-#include <netinet6/in6_var.h>
 #include <netinet6/nd6.h>
 #endif
 
@@ -1103,7 +1095,6 @@ ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
 		return;
 	}
 	ext->eh = mtod(m0, struct ether_header *);
-	ether_type = ntohs(ext->eh->ether_type);
 	hlen = sizeof(*ext->eh);
 	if (ext->paylen < hlen) {
 		DPRINTF("paylen %u, ehlen %zu", ext->paylen, hlen);
@@ -1111,6 +1102,7 @@ ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
 		return;
 	}
 	ext->paylen -= hlen;
+	ether_type = ntohs(ext->eh->ether_type);
 
 #if NVLAN > 0
 	if (ether_type == ETHERTYPE_VLAN) {
@@ -1120,7 +1112,6 @@ ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
 			return;
 		}
 		ext->evh = mtod(m0, struct ether_vlan_header *);
-		ether_type = ntohs(ext->evh->evl_proto);
 		hlen = sizeof(*ext->evh);
 		if (sizeof(*ext->eh) + ext->paylen < hlen) {
 			DPRINTF("paylen %zu, evhlen %zu",
@@ -1129,6 +1120,7 @@ ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
 			return;
 		}
 		ext->paylen = sizeof(*ext->eh) + ext->paylen - hlen;
+		ether_type = ntohs(ext->evh->evl_proto);
 	}
 #endif
 
@@ -1264,7 +1256,6 @@ ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
 
 #include <sys/socket.h>
 #include <sys/protosw.h>
-#include <sys/domain.h>
 
 /*
  * lock order is:
@@ -1341,6 +1332,8 @@ ether_frm_valid_etype(uint16_t etype)
 	switch (etype) {
 	case ETHERTYPE_LLDP:
 	case ETHERTYPE_EAPOL:
+	case ETHERTYPE_PTP:
+	case ETHERTYPE_CFM:
 		return (1);
 	}
 
@@ -1729,8 +1722,10 @@ ether_frm_send(struct socket *so, struct mbuf *m, struct mbuf *nam,
 	}
 
 	m = m_prepend(m, ETHER_ALIGN + sizeof(*eh), M_NOWAIT);
-	if (m == NULL)
+	if (m == NULL) {
+		error = ENOBUFS;
 		goto drop;
+	}
 	m_adj(m, ETHER_ALIGN);
 
 	if (txprio != IF_HDRPRIO_PACKET)
@@ -1830,7 +1825,7 @@ ether_frm_group(struct socket *so, int optname, struct mbuf *m)
 
 	soassertlocked(so);
 
-	if (m->m_len != sizeof(*fmr))
+	if (m == NULL || m->m_len != sizeof(*fmr))
 		return (EINVAL);
 
 	fmr = mtod(m, struct frame_mreq *);
@@ -1953,7 +1948,7 @@ ether_frm_setopt(struct ether_pcb *ep, int optname, struct mbuf *m)
 	if (!ISSET(ETHER_PCB_OPTS, optm))
 		return (ENOPROTOOPT);
 
-	if (m->m_len != sizeof(opt))
+	if (m == NULL || m->m_len != sizeof(opt))
 		return (EINVAL);
 
 	opt = *mtod(m, int *);
@@ -1981,7 +1976,7 @@ ether_frm_setsockopt(struct socket *so, int optname, struct mbuf *m)
 		error = ether_frm_group(so, optname, m);
 		break;
 	case FRAME_SENDPRIO:
-		if (m->m_len != sizeof(v)) {
+		if (m == NULL || m->m_len != sizeof(v)) {
 			error = EINVAL;
 			break;
 		}

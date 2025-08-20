@@ -1,4 +1,4 @@
-/* $OpenBSD: bcm2836_intr.c,v 1.15 2022/12/21 22:30:42 kettenis Exp $ */
+/* $OpenBSD: bcm2836_intr.c,v 1.17 2025/08/11 17:37:04 kettenis Exp $ */
 /*
  * Copyright (c) 2007,2009 Dale Rahn <drahn@openbsd.org>
  * Copyright (c) 2015 Patrick Wildt <patrick@blueri.se>
@@ -150,7 +150,7 @@ bcm_intc_attach(struct device *parent, struct device *self, void *aux)
 {
 	struct bcm_intc_softc *sc = (struct bcm_intc_softc *)self;
 	struct fdt_attach_args *faa = aux;
-	uint32_t reg[2];
+	uint32_t phandle, reg[2];
 	int node;
 	int i;
 
@@ -172,8 +172,9 @@ bcm_intc_attach(struct device *parent, struct device *self, void *aux)
 	 * controller, but for now it is easier to handle it together
 	 * with its BCM2835 partner.
 	 */
-	node = OF_finddevice("/soc/local_intc");
-	if (node == -1)
+	phandle = OF_getpropint(faa->fa_node, "interrupt-parent", 0);
+	node = OF_getnodebyphandle(phandle);
+	if (node == 0)
 		panic("%s: can't find ARM control logic", __func__);
 
 	if (OF_getpropintarray(node, "reg", reg, sizeof(reg)) != sizeof(reg))
@@ -626,23 +627,18 @@ bcm_intc_handle_ipi(void)
 	struct bcm_intc_softc *sc = bcm_intc;
 	int cpuno = cpu_number();
 	uint32_t mbox_val;
-	int ipi;
 
 	mbox_val = bus_space_read_4(sc->sc_iot, sc->sc_lioh,
-		ARM_LOCAL_INT_MAILBOX_CLR(cpuno));
-	ipi = ffs(mbox_val) - 1;
+	    ARM_LOCAL_INT_MAILBOX_CLR(cpuno));
 	bus_space_write_4(sc->sc_iot, sc->sc_lioh,
-	    ARM_LOCAL_INT_MAILBOX_CLR(cpuno), 1 << ipi);
-	switch (ipi) {
-	case ARM_IPI_DDB:
-		/* XXX */
+	    ARM_LOCAL_INT_MAILBOX_CLR(cpuno), mbox_val);
+
 #ifdef DDB
+	if (ISSET(mbox_val, 1 << ARM_IPI_DDB)) {
+		/* XXX */
 		db_enter();
-#endif
-		break;
-	case ARM_IPI_NOP:
-		break;
 	}
+#endif
 }
 
 void

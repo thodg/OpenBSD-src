@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_var.h,v 1.136 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: if_var.h,v 1.139 2025/07/19 16:40:40 mvs Exp $	*/
 /*	$NetBSD: if.h,v 1.23 1996/05/07 02:40:27 thorpej Exp $	*/
 
 /*
@@ -92,7 +92,9 @@ struct task;
 struct cpumem;
 
 struct netstack {
-	struct route	ns_route;
+	struct route		ns_route;
+	struct mbuf_list	ns_tcp_ml;
+	struct mbuf_list	ns_tcp6_ml;
 };
 
 /*
@@ -317,18 +319,16 @@ struct	niqueue {
 #define NIQUEUE_INITIALIZER(_len, _isr) \
     { MBUF_QUEUE_INITIALIZER((_len), IPL_NET), (_isr) }
 
-void		niq_init(struct niqueue *, u_int, u_int);
 int		niq_enqueue(struct niqueue *, struct mbuf *);
-int		niq_enlist(struct niqueue *, struct mbuf_list *);
 
 #define niq_dequeue(_q)			mq_dequeue(&(_q)->ni_q)
-#define niq_dechain(_q)			mq_dechain(&(_q)->ni_q)
 #define niq_delist(_q, _ml)		mq_delist(&(_q)->ni_q, (_ml))
 #define niq_len(_q)			mq_len(&(_q)->ni_q)
 #define niq_drops(_q)			mq_drops(&(_q)->ni_q)
 #define sysctl_niq(_n, _l, _op, _olp, _np, _nl, _niq) \
     sysctl_mq((_n), (_l), (_op), (_olp), (_np), (_nl), &(_niq)->ni_q)
 
+extern struct rwlock if_tmplist_lock;
 extern struct ifnet_head ifnetlist;
 
 void	if_start(struct ifnet *);

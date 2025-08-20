@@ -1003,7 +1003,10 @@ int drm_dev_register(struct drm_device *dev, unsigned long flags)
 	if (!driver->load)
 		drm_mode_config_validate(dev);
 
+#ifdef notyet
+	/* drm softc not allocated by devm_drm_dev_alloc() */
 	WARN_ON(!dev->managed.final_kfree);
+#endif
 
 	if (drm_dev_needs_global_mutex(dev))
 		mutex_lock(&drm_global_mutex);
@@ -1467,7 +1470,7 @@ drm_attach(struct device *parent, struct device *self, void *aux)
 		}
 	}
 
-	drmm_add_final_kfree(dev, dev);
+	drmm_add_final_kfree(dev, NULL);
 
 	printf("\n");
 	return;
@@ -1482,6 +1485,8 @@ drm_detach(struct device *self, int flags)
 {
 	struct drm_softc *sc = (struct drm_softc *)self;
 	struct drm_device *dev = sc->sc_drm;
+
+	drm_dev_put(dev);
 
 	drm_refcnt--;
 	if (drm_refcnt == 0) {
@@ -1994,34 +1999,6 @@ drm_dmamem_free(bus_dma_tag_t dmat, struct drm_dmamem *mem)
 	bus_dmamem_free(dmat, mem->segs, mem->nsegs);
 	bus_dmamap_destroy(dmat, mem->map);
 	free(mem, M_DRM, 0);
-}
-
-struct drm_dma_handle *
-drm_pci_alloc(struct drm_device *dev, size_t size, size_t align)
-{
-	struct drm_dma_handle *dmah;
-
-	dmah = malloc(sizeof(*dmah), M_DRM, M_WAITOK);
-	dmah->mem = drm_dmamem_alloc(dev->dmat, size, align, 1, size,
-	    BUS_DMA_NOCACHE, 0);
-	if (dmah->mem == NULL) {
-		free(dmah, M_DRM, sizeof(*dmah));
-		return NULL;
-	}
-	dmah->busaddr = dmah->mem->segs[0].ds_addr;
-	dmah->size = dmah->mem->size;
-	dmah->vaddr = dmah->mem->kva;
-	return (dmah);
-}
-
-void
-drm_pci_free(struct drm_device *dev, struct drm_dma_handle *dmah)
-{
-	if (dmah == NULL)
-		return;
-
-	drm_dmamem_free(dev->dmat, dmah->mem);
-	free(dmah, M_DRM, sizeof(*dmah));
 }
 
 /*

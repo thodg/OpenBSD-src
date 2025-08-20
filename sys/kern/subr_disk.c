@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_disk.c,v 1.273 2024/10/30 06:16:27 jsg Exp $	*/
+/*	$OpenBSD: subr_disk.c,v 1.278 2025/08/02 07:02:00 krw Exp $	*/
 /*	$NetBSD: subr_disk.c,v 1.17 1996/03/16 23:17:08 christos Exp $	*/
 
 /*
@@ -542,51 +542,58 @@ gpt_get_parts(struct buf *bp, void (*strat)(struct buf *), struct disklabel *lp,
 	return 0;
 }
 
+/* LE format! */
+#define GPT_UUID_UNUSED \
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, \
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
+#define GPT_UUID_MICROSOFT_BASIC_DATA \
+    { 0xa2, 0xa0, 0xd0, 0xeb, 0xe5, 0xb9, 0x33, 0x44, \
+      0x87, 0xc0, 0x68, 0xb6, 0xb7, 0x26, 0x99, 0xc7 }
+#define GPT_UUID_CHROMEOS_ROOTFS \
+    { 0x02, 0xe2, 0xb8, 0x3c, 0x7e, 0x3b, 0xdd, 0x47, \
+      0x8a, 0x3c, 0x7f, 0xf2, 0xa1, 0x3c, 0xfc, 0xec }
+#define GPT_UUID_LINUX_FILES \
+    { 0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, \
+      0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4 }
+#define GPT_UUID_MAC_OS_X_HFS \
+    { 0x00, 0x53, 0x46, 0x48, 0x00, 0x00, 0xaa, 0x11,\
+      0xaa, 0x11, 0x00, 0x30, 0x65, 0x43, 0xec, 0xac }
+#define GPT_UUID_BIOS_BOOT \
+    { 0x48, 0x61, 0x68, 0x21, 0x49, 0x64, 0x6f, 0x6e, \
+      0x74, 0x4e, 0x65, 0x65, 0x64, 0x45, 0x46, 0x49 }
+
+/* XXX Temporary LE versions needed until MI GPT boot code is adjusted. */
+#define GPT_LEUUID_EFI_SYSTEM \
+    { 0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, \
+      0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b }
+#define GPT_LEUUID_OPENBSD \
+    { 0xa0, 0xc7, 0x4c, 0x82, 0xa8, 0x36, 0xe3, 0x11, \
+      0x89, 0x0a, 0x95, 0x25, 0x19, 0xad, 0x3f, 0x61 }
+
 int
 gpt_get_fstype(const struct uuid *uuid_part)
 {
-	static int init = 0;
-	static struct uuid uuid_openbsd, uuid_msdos, uuid_chromefs,
-	    uuid_linux, uuid_hfs, uuid_unused, uuid_efi_system, uuid_bios_boot;
-	static const uint8_t gpt_uuid_openbsd[] = GPT_UUID_OPENBSD;
-	static const uint8_t gpt_uuid_msdos[] = GPT_UUID_MSDOS;
-	static const uint8_t gpt_uuid_chromerootfs[] = GPT_UUID_CHROMEROOTFS;
-	static const uint8_t gpt_uuid_linux[] = GPT_UUID_LINUX;
-	static const uint8_t gpt_uuid_hfs[] = GPT_UUID_APPLE_HFS;
-	static const uint8_t gpt_uuid_unused[] = GPT_UUID_UNUSED;
-	static const uint8_t gpt_uuid_efi_system[] = GPT_UUID_EFI_SYSTEM;
-	static const uint8_t gpt_uuid_bios_boot[] = GPT_UUID_BIOS_BOOT;
+	unsigned int		i;
+	struct partfs {
+		uint8_t gptype[16];
+		int fstype;
+	} knownfs[] = {
+		{ GPT_UUID_UNUSED,		FS_UNUSED },
+		{ GPT_LEUUID_OPENBSD,		FS_BSDFFS },
+		{ GPT_UUID_MICROSOFT_BASIC_DATA,FS_MSDOS  },
+		{ GPT_UUID_CHROMEOS_ROOTFS,	FS_EXT2FS },
+		{ GPT_UUID_LINUX_FILES,		FS_EXT2FS },
+		{ GPT_UUID_MAC_OS_X_HFS,	FS_HFS	  },
+		{ GPT_LEUUID_EFI_SYSTEM,	FS_MSDOS  },
+		{ GPT_UUID_BIOS_BOOT,		FS_BOOT   }
+	};
 
-	if (init == 0) {
-		uuid_dec_be(gpt_uuid_openbsd, &uuid_openbsd);
-		uuid_dec_be(gpt_uuid_msdos, &uuid_msdos);
-		uuid_dec_be(gpt_uuid_chromerootfs, &uuid_chromefs);
-		uuid_dec_be(gpt_uuid_linux, &uuid_linux);
-		uuid_dec_be(gpt_uuid_hfs, &uuid_hfs);
-		uuid_dec_be(gpt_uuid_unused, &uuid_unused);
-		uuid_dec_be(gpt_uuid_efi_system, &uuid_efi_system);
-		uuid_dec_be(gpt_uuid_bios_boot, &uuid_bios_boot);
-		init = 1;
+	for (i = 0; i < nitems(knownfs); i++) {
+		if (!memcmp(uuid_part, knownfs[i].gptype, sizeof(struct uuid)))
+		    return knownfs[i].fstype;
 	}
 
-	if (!memcmp(uuid_part, &uuid_unused, sizeof(struct uuid)))
-		return FS_UNUSED;
-	else if (!memcmp(uuid_part, &uuid_openbsd, sizeof(struct uuid)))
-		return FS_BSDFFS;
-	else if (!memcmp(uuid_part, &uuid_msdos, sizeof(struct uuid)))
-		return FS_MSDOS;
-	else if (!memcmp(uuid_part, &uuid_chromefs, sizeof(struct uuid)))
-		return FS_EXT2FS;
-	else if (!memcmp(uuid_part, &uuid_linux, sizeof(struct uuid)))
-		return FS_EXT2FS;
-	else if (!memcmp(uuid_part, &uuid_hfs, sizeof(struct uuid)))
-		return FS_HFS;
-	else if (!memcmp(uuid_part, &uuid_efi_system, sizeof(struct uuid)))
-		return FS_MSDOS;
-	else if (!memcmp(uuid_part, &uuid_bios_boot, sizeof(struct uuid)))
-		return FS_BOOT;
-	else
-		return FS_OTHER;
+	return FS_OTHER;
 }
 
 int
@@ -595,7 +602,6 @@ spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 {
 	struct dos_partition	 dp[NDOSPART];
 	struct gpt_header	 gh;
-	struct uuid		 gptype;
 	struct gpt_partition	*gp;
 	struct partition	*pp;
 	uint64_t		 lbaend, lbastart, labelsec;
@@ -642,9 +648,12 @@ spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 	partoff = DL_SECTOBLK(lp, lbastart);
 	obsdfound = 0;
 	for (i = 0; i < partnum; i++) {
-		if (letoh64(gp[i].gp_attrs) & GPTPARTATTR_REQUIRED) {
-			DPRINTF("spoofgpt: Skipping partition %u (REQUIRED)\n",
-			    i);
+		fstype = gpt_get_fstype(&gp[i].gp_type);
+		if (fstype == FS_UNUSED)
+			continue;
+		if (fstype == FS_OTHER) {
+			DPRINTF("spoofgpt: Skipping partition %u "
+			    "(unknown filesystem)\n", i);
 			continue;
 		}
 
@@ -656,8 +665,6 @@ spoofgpt(struct buf *bp, void (*strat)(struct buf *), const uint8_t *dosbb,
 		if (start > end)
 			continue;
 
-		uuid_dec_le(&gp[i].gp_type, &gptype);
-		fstype = gpt_get_fstype(&gptype);
 		if (obsdfound && fstype == FS_BSDFFS)
 			continue;
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_icereg.h,v 1.2 2024/11/25 12:50:47 stsp Exp $	*/
+/*	$OpenBSD: if_icereg.h,v 1.5 2025/08/19 11:46:52 stsp Exp $	*/
 
 /*  Copyright (c) 2024, Intel Corporation
  *  All rights reserved.
@@ -10900,6 +10900,11 @@ struct ice_aqc_get_phy_caps_data {
 	uint8_t extended_compliance_code;
 #define ICE_MODULE_TYPE_TOTAL_BYTE			3
 	uint8_t module_type[ICE_MODULE_TYPE_TOTAL_BYTE];
+#define ICE_SFF8024_ID_NONE				0x00
+#define ICE_SFF8024_ID_SFP				0x03
+#define ICE_SFF8024_ID_QSFP				0x0c
+#define ICE_SFF8024_ID_QSFP_PLUS			0x0d
+#define ICE_SFF8024_ID_QSFP28				0x11
 #define ICE_AQC_MOD_TYPE_BYTE0_SFP_PLUS			0xA0
 #define ICE_AQC_MOD_TYPE_BYTE0_QSFP_PLUS		0x80
 #define ICE_AQC_MOD_TYPE_IDENT				1
@@ -13588,7 +13593,7 @@ enum ice_rxdid {
 	ICE_RXDID_LAST			= 63,
 };
 
-/* Recceive Flex descriptor Dword Index */
+/* Receive Flex descriptor Dword Index */
 enum ice_flex_word {
 	ICE_RX_FLEX_DWORD_0 = 0,
 	ICE_RX_FLEX_DWORD_1,
@@ -13676,6 +13681,8 @@ enum ice_umbcast_dest_addr_types {
 
 /* for ice_32byte_rx_flex_desc.ptype_flexi_flags0 member */
 #define ICE_RX_FLEX_DESC_PTYPE_M	(0x3FF) /* 10-bits */
+#define ICE_RX_FLEX_DECS_PTYPE_MAC_IPV4_TCP 26
+#define ICE_RX_FLEX_DECS_PTYPE_MAC_IPV6_TCP 92
 
 enum ice_rx_flex_desc_flexi_flags0_bits { /* field is 6 bits long */
 	ICE_RX_FLEX_DESC_FLEXI_FLAGS0_S = 10,

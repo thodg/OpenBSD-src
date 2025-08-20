@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.23 2022/06/08 13:08:00 schwarze Exp $
+# $OpenBSD: Makefile,v 1.25 2025/07/29 14:53:09 schwarze Exp $
 
 REGRESS_TARGETS	 = one two multi comment
 REGRESS_TARGETS	+= A1 B bs_man bs_mdoc c c_man E1 e f h hneg

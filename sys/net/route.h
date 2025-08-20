@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.h,v 1.216 2025/03/16 21:58:08 bluhm Exp $	*/
+/*	$OpenBSD: route.h,v 1.218 2025/07/14 08:48:51 dlg Exp $	*/
 /*	$NetBSD: route.h,v 1.9 1996/02/13 22:00:49 christos Exp $	*/
 
 /*
@@ -40,7 +40,7 @@
  *	I	immutable after creation
  *	N	net lock
  *	X	exclusive net lock, or shared net lock + kernel lock
- *	R	art (rtable) lock
+ *	R	rtable lock
  *	r	per route entry mutex	rt_mtx
  *	L	arp/nd6/etc lock for updates, net lock for reads
  *	T	rttimer_mtx		route timer lists
@@ -117,7 +117,7 @@ struct rttimer;
 
 struct rtentry {
 	struct sockaddr	*rt_dest;	/* [I] destination */
-	SRPL_ENTRY(rtentry) rt_next;	/* [R] next mpath entry to our dst */
+	struct rtentry	*rt_next;	/* [R] next mpath entry to our dst */
 	struct sockaddr	*rt_gateway;	/* [X] gateway address */
 	struct ifaddr	*rt_ifa;	/* [N] interface addr to use */
 	caddr_t		 rt_llinfo;	/* [L] pointer to link level info or
@@ -476,7 +476,7 @@ void	 rtm_bfd(struct bfd_config *);
 void	 rtm_80211info(struct ifnet *, struct if_ieee80211_data *);
 void	 rt_maskedcopy(struct sockaddr *,
 	    struct sockaddr *, struct sockaddr *);
-struct sockaddr *rt_plen2mask(struct rtentry *, struct sockaddr_in6 *);
+struct sockaddr *rt_plen2mask(const struct rtentry *, struct sockaddr_in6 *);
 void	 rtm_send(struct rtentry *, int, int, unsigned int);
 void	 rtm_addr(int, struct ifaddr *);
 void	 rtm_miss(int, struct rt_addrinfo *, int, uint8_t, u_int, int, u_int);

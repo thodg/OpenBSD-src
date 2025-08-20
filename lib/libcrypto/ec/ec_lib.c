@@ -1,4 +1,4 @@
-/* $OpenBSD: ec_lib.c,v 1.123 2025/03/24 13:07:04 jsing Exp $ */
+/* $OpenBSD: ec_lib.c,v 1.126 2025/08/02 15:47:27 jsing Exp $ */
 /*
  * Originally written by Bodo Moeller for the OpenSSL project.
  */
@@ -68,12 +68,12 @@
 
 #include <openssl/bn.h>
 #include <openssl/ec.h>
-#include <openssl/err.h>
 #include <openssl/objects.h>
 #include <openssl/opensslv.h>
 
 #include "bn_local.h"
 #include "ec_local.h"
+#include "err_local.h"
 
 EC_GROUP *
 EC_GROUP_new(const EC_METHOD *meth)
@@ -164,6 +164,10 @@ EC_GROUP_copy(EC_GROUP *dst, const EC_GROUP *src)
 		return 0;
 
 	dst->a_is_minus3 = src->a_is_minus3;
+
+	memcpy(&dst->fm, &src->fm, sizeof(src->fm));
+	memcpy(&dst->fe_a, &src->fe_a, sizeof(src->fe_a));
+	memcpy(&dst->fe_b, &src->fe_b, sizeof(src->fe_b));
 
 	BN_MONT_CTX_free(dst->mont_ctx);
 	dst->mont_ctx = NULL;
@@ -860,6 +864,10 @@ EC_POINT_copy(EC_POINT *dst, const EC_POINT *src)
 		return 0;
 	dst->Z_is_one = src->Z_is_one;
 
+	memcpy(&dst->fe_x, &src->fe_x, sizeof(dst->fe_x));
+	memcpy(&dst->fe_y, &src->fe_y, sizeof(dst->fe_y));
+	memcpy(&dst->fe_z, &src->fe_z, sizeof(dst->fe_z));
+
 	return 1;
 }
 LCRYPTO_ALIAS(EC_POINT_copy);
@@ -894,11 +902,7 @@ EC_POINT_set_to_infinity(const EC_GROUP *group, EC_POINT *point)
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		return 0;
 	}
-
-	BN_zero(point->Z);
-	point->Z_is_one = 0;
-
-	return 1;
+	return point->meth->point_set_to_infinity(group, point);
 }
 LCRYPTO_ALIAS(EC_POINT_set_to_infinity);
 
@@ -1200,8 +1204,7 @@ EC_POINT_is_at_infinity(const EC_GROUP *group, const EC_POINT *point)
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		return 0;
 	}
-
-	return BN_is_zero(point->Z);
+	return point->meth->point_is_at_infinity(group, point);
 }
 LCRYPTO_ALIAS(EC_POINT_is_at_infinity);
 

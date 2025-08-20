@@ -1,4 +1,4 @@
-/*	$OpenBSD: sched_bsd.c,v 1.99 2025/03/10 09:28:56 claudio Exp $	*/
+/*	$OpenBSD: sched_bsd.c,v 1.104 2025/08/01 10:53:23 claudio Exp $	*/
 /*	$NetBSD: kern_synch.c,v 1.37 1996/04/22 01:38:37 christos Exp $	*/
 
 /*-
@@ -64,6 +64,7 @@ void			schedcpu(void *);
 uint32_t		decay_aftersleep(uint32_t, uint32_t);
 
 extern struct cpuset sched_idle_cpus;
+extern struct cpuset sched_all_cpus;
 
 /*
  * constants for averages over 1, 5, and 15 minutes when sampling at
@@ -120,11 +121,12 @@ update_loadavg(void *unused)
 	static struct timeout to = TIMEOUT_INITIALIZER(update_loadavg, NULL);
 	CPU_INFO_ITERATOR cii;
 	struct cpu_info *ci;
-	u_int i, nrun = 0;
+	struct cpuset set;
+	u_int i, nrun;
 
+	cpuset_complement(&set, &sched_idle_cpus, &sched_all_cpus);
+	nrun = cpuset_cardinality(&set);
 	CPU_INFO_FOREACH(cii, ci) {
-		if (!cpuset_isset(&sched_idle_cpus, ci))
-			nrun++;
 		nrun += ci->ci_schedstate.spc_nrun;
 	}
 
@@ -143,7 +145,7 @@ update_loadavg(void *unused)
  *          Note that, as ps(1) mentions, this can let percentages
  *          total over 100% (I've seen 137.9% for 3 processes).
  *
- * Note that hardclock updates p_estcpu and p_cpticks independently.
+ * Note that p_estcpu and p_cpticks are updated independently.
  *
  * We wish to decay away 90% of p_estcpu in (5 * loadavg) seconds.
  * That is, the system wants to compute a value of decay such
@@ -228,9 +230,9 @@ void
 schedcpu(void *unused)
 {
 	static struct timeout to = TIMEOUT_INITIALIZER(schedcpu, NULL);
-	fixpt_t loadfac = loadfactor(averunnable.ldavg[0]);
+	fixpt_t loadfac = loadfactor(averunnable.ldavg[0]), pctcpu;
 	struct proc *p;
-	unsigned int newcpu;
+	unsigned int newcpu, cpt;
 
 	LIST_FOREACH(p, &allproc, p_list) {
 		/*
@@ -245,27 +247,31 @@ schedcpu(void *unused)
 		 */
 		if (p->p_stat == SSLEEP || p->p_stat == SSTOP)
 			p->p_slptime++;
-		p->p_pctcpu = (p->p_pctcpu * ccpu) >> FSHIFT;
+		pctcpu = (p->p_pctcpu * ccpu) >> FSHIFT;
 		/*
 		 * If the process has slept the entire second,
 		 * stop recalculating its priority until it wakes up.
 		 */
-		if (p->p_slptime > 1)
+		if (p->p_slptime > 1) {
+			p->p_pctcpu = pctcpu;
 			continue;
+		}
 		SCHED_LOCK();
 		/*
 		 * p_pctcpu is only for diagnostic tools such as ps.
 		 */
+		cpt = READ_ONCE(p->p_cpticks);
 #if	(FSHIFT >= CCPU_SHIFT)
-		p->p_pctcpu += (stathz == 100)?
-			((fixpt_t) p->p_cpticks) << (FSHIFT - CCPU_SHIFT):
-                	100 * (((fixpt_t) p->p_cpticks)
+		pctcpu += (stathz == 100) ?
+		    (cpt - p->p_cpticks2) << (FSHIFT - CCPU_SHIFT) :
+		    100 * ((cpt - p->p_cpticks2)
 				<< (FSHIFT - CCPU_SHIFT)) / stathz;
 #else
-		p->p_pctcpu += ((FSCALE - ccpu) *
-			(p->p_cpticks * FSCALE / stathz)) >> FSHIFT;
+		pctcpu += ((FSCALE - ccpu) *
+		    ((cpt - p->p_cpticks2) * FSCALE / stathz)) >> FSHIFT;
 #endif
-		p->p_cpticks = 0;
+		p->p_pctcpu = pctcpu;
+		p->p_cpticks2 = cpt;
 		newcpu = (u_int) decay_cpu(loadfac, p->p_estcpu);
 		setpriority(p, newcpu, p->p_p->ps_nice);
 
@@ -317,7 +323,6 @@ yield(void)
 	setrunqueue(p->p_cpu, p, p->p_usrpri);
 	p->p_ru.ru_nvcsw++;
 	mi_switch();
-	SCHED_UNLOCK();
 }
 
 /*
@@ -335,7 +340,6 @@ preempt(void)
 	setrunqueue(p->p_cpu, p, p->p_usrpri);
 	p->p_ru.ru_nivcsw++;
 	mi_switch();
-	SCHED_UNLOCK();
 }
 
 void
@@ -440,7 +444,6 @@ mi_switch(void)
 	if (hold_count)
 		__mp_acquire_count(&kernel_lock, hold_count);
 #endif
-	SCHED_LOCK();
 }
 
 /*
@@ -585,6 +588,7 @@ setperf_auto(void *v)
 	CPU_INFO_ITERATOR cii;
 	struct cpu_info *ci;
 	uint64_t idle, total, allidle = 0, alltotal = 0;
+	unsigned int gen;
 
 	if (!perfpolicy_dynamic())
 		return;
@@ -609,14 +613,23 @@ setperf_auto(void *v)
 			return;
 		}
 	CPU_INFO_FOREACH(cii, ci) {
+		struct schedstate_percpu *spc;
+
 		if (!cpu_is_online(ci))
 			continue;
-		total = 0;
-		for (i = 0; i < CPUSTATES; i++) {
-			total += ci->ci_schedstate.spc_cp_time[i];
-		}
+
+		spc = &ci->ci_schedstate;
+		pc_cons_enter(&spc->spc_cp_time_lock, &gen);
+		do {
+			total = 0;
+			for (i = 0; i < CPUSTATES; i++) {
+				total += spc->spc_cp_time[i];
+			}
+			idle = spc->spc_cp_time[CP_IDLE];
+		} while (pc_cons_leave(&spc->spc_cp_time_lock, &gen) != 0);
+
 		total -= totalticks[j];
-		idle = ci->ci_schedstate.spc_cp_time[CP_IDLE] - idleticks[j];
+		idle -= idleticks[j];
 		if (idle < total / 3)
 			speedup = 1;
 		alltotal += total;

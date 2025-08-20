@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_gif.c,v 1.139 2025/03/02 21:28:31 bluhm Exp $	*/
+/*	$OpenBSD: if_gif.c,v 1.141 2025/07/07 02:28:50 jsg Exp $	*/
 /*	$KAME: if_gif.c,v 1.43 2001/02/20 08:51:07 itojun Exp $	*/
 
 /*
@@ -35,23 +35,19 @@
 #include <sys/mbuf.h>
 #include <sys/socket.h>
 #include <sys/sockio.h>
-#include <sys/syslog.h>
 #include <sys/queue.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_types.h>
-#include <net/route.h>
 
 #include <netinet/in.h>
-#include <netinet/in_var.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 #include <netinet/ip_ipip.h>
 #include <netinet/ip_ecn.h>
 
 #ifdef INET6
-#include <netinet6/in6_var.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #endif /* INET6 */
@@ -152,7 +148,7 @@ gif_clone_create(struct if_clone *ifc, int unit)
 	ifp = &sc->sc_if;
 
 	sc->sc_df = htons(0);
-	sc->sc_ttl = ip_defttl;
+	sc->sc_ttl = atomic_load_int(&ip_defttl);
 	sc->sc_txhprio = IF_HDRPRIO_PAYLOAD;
 	sc->sc_rxhprio = IF_HDRPRIO_PAYLOAD;
 	sc->sc_ecn = ECN_ALLOWED;

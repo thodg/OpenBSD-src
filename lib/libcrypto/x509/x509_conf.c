@@ -1,4 +1,4 @@
-/* $OpenBSD: x509_conf.c,v 1.29 2025/03/06 07:20:01 tb Exp $ */
+/* $OpenBSD: x509_conf.c,v 1.31 2025/06/02 12:18:21 jsg Exp $ */
 /* Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project 1999.
  */
@@ -62,11 +62,11 @@
 #include <string.h>
 
 #include <openssl/conf.h>
-#include <openssl/err.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
 #include "conf_local.h"
+#include "err_local.h"
 #include "x509_local.h"
 
 static int v3_check_critical(const char **value);
@@ -242,8 +242,9 @@ v3_check_critical(const char **value)
 	if ((strlen(p) < 9) || strncmp(p, "critical,", 9))
 		return 0;
 	p += 9;
-	while (isspace((unsigned char)*p)) p++;
-		*value = p;
+	while (isspace((unsigned char)*p))
+		p++;
+	*value = p;
 	return 1;
 }
 

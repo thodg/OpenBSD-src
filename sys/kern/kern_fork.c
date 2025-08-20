@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_fork.c,v 1.269 2025/03/10 09:28:56 claudio Exp $	*/
+/*	$OpenBSD: kern_fork.c,v 1.278 2025/08/18 04:15:35 dlg Exp $	*/
 /*	$NetBSD: kern_fork.c,v 1.29 1996/02/09 18:59:34 christos Exp $	*/
 
 /*
@@ -58,6 +58,7 @@
 #include <sys/atomic.h>
 #include <sys/unistd.h>
 #include <sys/tracepoint.h>
+#include <sys/witness.h>
 
 #include <sys/syscallargs.h>
 
@@ -115,7 +116,7 @@ int
 sys___tfork(struct proc *p, void *v, register_t *retval)
 {
 	struct sys___tfork_args /* {
-		syscallarg(const struct __tfork) *param;
+		syscallarg(const struct __tfork *) param;
 		syscallarg(size_t) psize;
 	} */ *uap = v;
 	size_t psize = SCARG(uap, psize);
@@ -193,11 +194,11 @@ process_initialize(struct process *pr, struct proc *p)
 	/* new thread and new process */
 	KASSERT(p->p_ucred->cr_refcnt.r_refs >= 2);
 
+	prof_fork(pr);
+
 	LIST_INIT(&pr->ps_children);
 	LIST_INIT(&pr->ps_orphans);
-	LIST_INIT(&pr->ps_ftlist);
 	LIST_INIT(&pr->ps_sigiolst);
-	TAILQ_INIT(&pr->ps_tslpqueue);
 
 	rw_init(&pr->ps_lock, "pslock");
 	mtx_init(&pr->ps_mtx, IPL_HIGH);
@@ -237,6 +238,9 @@ process_new(struct proc *p, struct process *parent, int flags)
 	pr->ps_pptr = parent;
 	pr->ps_ppid = parent->ps_pid;
 
+	WITNESS_SETCHILD(&pr->ps_mtx.mtx_lock_obj,
+	    &parent->ps_mtx.mtx_lock_obj);
+
 	/* bump references to the text vnode (for sysctl) */
 	pr->ps_textvp = parent->ps_textvp;
 	if (pr->ps_textvp)
@@ -245,9 +249,7 @@ process_new(struct proc *p, struct process *parent, int flags)
 	/* copy unveil if unveil is active */
 	unveil_copy(parent, pr);
 
-	pr->ps_flags = parent->ps_flags &
-	    (PS_SUGID | PS_SUGIDEXEC | PS_PLEDGE | PS_EXECPLEDGE |
-	    PS_WXNEEDED | PS_CHROOT);
+	pr->ps_flags = parent->ps_flags & PS_FLAGS_INHERITED_ON_FORK;
 	if (parent->ps_session->s_ttyvp != NULL)
 		pr->ps_flags |= parent->ps_flags & PS_CONTROLT;
 
@@ -483,10 +485,16 @@ fork1(struct proc *curp, int flags, void (*func)(void *), void *arg,
 	pr->ps_acflag = AFORK;
 	atomic_clearbits_int(&pr->ps_flags, PS_EMBRYO);
 
-	if ((flags & FORK_IDLE) == 0)
-		fork_thread_start(p, curp, flags);
-	else
+	/*
+	 * Idle threads are just assigned to the CPU but not added
+	 * to any runqueue.
+	 */
+	if ((flags & FORK_IDLE)) {
 		p->p_cpu = arg;
+		/* for consistency mark idle procs as pegged */
+		atomic_setbits_int(&p->p_flag, P_CPUPEG);
+	} else
+		fork_thread_start(p, curp, flags);
 
 	free(newptstat, M_SUBPROC, sizeof(*newptstat));
 

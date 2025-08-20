@@ -139,7 +139,6 @@ extern int target_flags;			/* -m compiler switches */
 #define MASK_MEMCPY		0x00002000 /* Always use memcpy for movstr */
 #define MASK_EITHER_LARGE_SHIFT	(MASK_TRAP_LARGE_SHIFT | \
 				 MASK_HANDLE_LARGE_SHIFT)
-#define MASK_OMIT_LEAF_FRAME_POINTER 0x00004000 /* omit leaf frame pointers */
 
 
 #define TARGET_88100   		 ((target_flags & MASK_88000) == MASK_88100)
@@ -154,7 +153,6 @@ extern int target_flags;			/* -m compiler switches */
 #define TARGET_MEMCPY		  (target_flags & MASK_MEMCPY)
 
 #define TARGET_EITHER_LARGE_SHIFT (target_flags & MASK_EITHER_LARGE_SHIFT)
-#define TARGET_OMIT_LEAF_FRAME_POINTER (target_flags & MASK_OMIT_LEAF_FRAME_POINTER)
 
 #define TARGET_DEFAULT	(MASK_CHECK_ZERO_DIV)
 #define CPU_DEFAULT MASK_88100
@@ -181,10 +179,6 @@ extern int target_flags;			/* -m compiler switches */
     N_("Do not force serialization on volatile memory access") },	\
   { "serialize-volatile",		-MASK_NO_SERIALIZE_VOLATILE,	\
     N_("Force serialization on volatile memory access") },		\
-  { "omit-leaf-frame-pointer",		 MASK_OMIT_LEAF_FRAME_POINTER,	\
-    N_("Do not save the frame pointer in leaf functions") },		\
-  { "no-omit-leaf-frame-pointer",	-MASK_OMIT_LEAF_FRAME_POINTER,	\
-    N_("Save the frame pointer in leaf functions") },			\
   { "memcpy",				 MASK_MEMCPY,			\
     N_("Force all memory copies to use memcpy()") },			\
   { "no-memcpy",			-MASK_MEMCPY,			\
@@ -554,14 +548,7 @@ extern int target_flags;			/* -m compiler switches */
 
 /* Switch between the leaf and non-leaf orderings.  The purpose is to avoid
    write-over scoreboard delays between caller and callee.  */
-#define ORDER_REGS_FOR_LOCAL_ALLOC				\
-{								\
-  static const int leaf[] = REG_LEAF_ALLOC_ORDER;		\
-  static const int nonleaf[] = REG_ALLOC_ORDER;			\
-								\
-  memcpy (reg_alloc_order, regs_ever_live[1] ? nonleaf : leaf,	\
-	  FIRST_PSEUDO_REGISTER * sizeof (int));		\
-}
+#define ORDER_REGS_FOR_LOCAL_ALLOC m88k_order_regs_for_local_alloc ()
 
 /*** Register Classes ***/
 
@@ -919,9 +906,7 @@ enum reg_class { NO_REGS, AP_REG, XRF_REGS, GENERAL_REGS, AGRF_REGS,
    may be accessed via the stack pointer) in functions that seem suitable.
    This is computed in `reload', in reload1.c.  */
 #define FRAME_POINTER_REQUIRED						\
-((current_function_profile || !leaf_function_p ()			\
-  || !TARGET_OMIT_LEAF_FRAME_POINTER)					\
- || (write_symbols != NO_DEBUG))
+(current_function_profile || !leaf_function_p ())
 
 /* Define registers used by the epilogue and return instruction.  */
 #define EPILOGUE_USES(REGNO) \
@@ -1238,18 +1223,6 @@ enum reg_class { NO_REGS, AP_REG, XRF_REGS, GENERAL_REGS, AGRF_REGS,
 
 
 /*** Condition Code Information ***/
-
-/* C code for a data type which is used for declaring the `mdep'
-   component of `cc_status'.  It defaults to `int'.  */
-/* #define CC_STATUS_MDEP int */
-
-/* A C expression to initialize the `mdep' field to "empty".  */
-/* #define CC_STATUS_MDEP_INIT (cc_status.mdep = 0) */
-
-/* Macro to zap the normal portions of CC_STATUS, but leave the
-   machine dependent parts (ie, literal synthesis) alone.  */
-/* #define CC_STATUS_INIT_NO_MDEP \
-  (cc_status.flags = 0, cc_status.value1 = 0, cc_status.value2 = 0) */
 
 /* When using a register to hold the condition codes, the cc_status
    mechanism cannot be used.  */

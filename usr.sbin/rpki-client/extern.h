@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.239 2025/04/03 14:29:44 tb Exp $ */
+/*	$OpenBSD: extern.h,v 1.257 2025/08/14 15:12:00 claudio Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -134,10 +134,11 @@ struct cert {
 	char		*mft; /* manifest (rsync:// uri) */
 	char		*notify; /* RRDP notify (https:// uri) */
 	char		*crl; /* CRL location (rsync:// or NULL) */
+	char		*signedobj; /* rsync access location for EE certs. */
 	char		*aia; /* AIA (or NULL, for trust anchor) */
 	char		*aki; /* AKI (or NULL, for trust anchor) */
 	char		*ski; /* SKI */
-	enum cert_purpose	 purpose; /* BGPSec or CA */
+	enum cert_purpose	 purpose; /* EE, BGPsec, CA, or TA */
 	char		*pubkey; /* Subject Public Key Info */
 	X509		*x509; /* the cert */
 	time_t		 notbefore; /* cert's Not Before */
@@ -228,10 +229,8 @@ struct mft {
 	char		*path; /* relative path to directory of the MFT */
 	struct mftfile	*files; /* file and hash */
 	char		*seqnum; /* manifestNumber */
-	char		*aia; /* AIA */
 	char		*aki; /* AKI */
 	char		*sia; /* SIA signedObject */
-	char		*ski; /* SKI */
 	char		*crl; /* CRL file name */
 	unsigned char	 mfthash[SHA256_DIGEST_LENGTH];
 	unsigned char	 crlhash[SHA256_DIGEST_LENGTH];
@@ -269,13 +268,7 @@ struct roa {
 	size_t		 num_ips;
 	int		 talid; /* ROAs are covered by which TAL */
 	int		 valid; /* validated resources */
-	char		*aia; /* AIA */
-	char		*aki; /* AKI */
-	char		*sia; /* SIA signedObject */
-	char		*ski; /* SKI */
 	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 notbefore; /* EE cert's Not Before */
-	time_t		 notafter; /* EE cert's Not After */
 	time_t		 expires; /* when the signature path expires */
 };
 
@@ -296,12 +289,7 @@ struct rsc {
 	size_t		 num_ases;
 	struct rscfile	*files; /* FileAndHashes in the RSC */
 	size_t		 num_files;
-	char		*aia; /* AIA */
-	char		*aki; /* AKI */
-	char		*ski; /* SKI */
 	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 notbefore; /* EE cert's Not Before */
-	time_t		 notafter; /* Not After of the RSC EE */
 	time_t		 expires; /* when the signature path expires */
 };
 
@@ -322,13 +310,7 @@ struct spl {
 	struct spl_pfx	*prefixes;
 	size_t		 num_prefixes;
 	int		 talid;
-	char		*aia;
-	char		*aki;
-	char		*sia;
-	char		*ski;
 	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 notbefore; /* EE cert's Not Before */
-	time_t		 notafter; /* EE cert's Not After */
 	time_t		 expires; /* when the certification path expires */
 	int		 valid;
 };
@@ -347,20 +329,14 @@ struct takey {
 };
 
 /*
- * A Signed TAL (TAK) draft-ietf-sidrops-signed-tal-12
+ * A Signed TAL (TAK), RFC 9691.
  */
 struct tak {
 	int		 talid; /* TAK covered by what TAL */
 	struct takey	*current;
 	struct takey	*predecessor;
 	struct takey	*successor;
-	char		*aia; /* AIA */
-	char		*aki; /* AKI */
-	char		*sia; /* SIA signed Object */
-	char		*ski; /* SKI */
 	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 notbefore; /* EE cert's Not Before */
-	time_t		 notafter; /* Not After of the TAK EE */
 	time_t		 expires; /* when the signature path expires */
 };
 
@@ -378,12 +354,7 @@ struct geoip {
 struct geofeed {
 	struct geoip	*geoips; /* Prefix + location entry in the CSV */
 	size_t		 num_geoips;
-	char		*aia; /* AIA */
-	char		*aki; /* AKI */
-	char		*ski; /* SKI */
 	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 notbefore; /* EE cert's Not Before */
-	time_t		 notafter; /* Not After of the Geofeed EE */
 	time_t		 expires; /* when the signature path expires */
 	int		 valid; /* all resources covered */
 };
@@ -393,13 +364,7 @@ struct geofeed {
  */
 struct gbr {
 	char		*vcard;
-	char		*aia; /* AIA */
-	char		*aki; /* AKI */
-	char		*sia; /* SIA signedObject */
-	char		*ski; /* SKI */
 	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 notbefore; /* EE cert's Not Before */
-	time_t		 notafter; /* Not After of the GBR EE */
 	time_t		 expires; /* when the signature path expires */
 	int		 talid; /* TAL the GBR is chained up to */
 };
@@ -410,16 +375,10 @@ struct gbr {
 struct aspa {
 	int			 valid; /* contained in issuer auth */
 	int			 talid; /* TAL the ASPA is chained up to */
-	char			*aia; /* AIA */
-	char			*aki; /* AKI */
-	char			*sia; /* SIA signedObject */
-	char			*ski; /* SKI */
 	uint32_t		 custasid; /* the customerASID */
 	uint32_t		*providers; /* the providers */
 	size_t			 num_providers;
 	time_t			 signtime; /* CMS signing-time attribute */
-	time_t			 notbefore; /* EE cert's Not Before */
-	time_t			 notafter; /* notAfter of the ASPA EE cert */
 	time_t			 expires; /* when the signature path expires */
 };
 
@@ -499,6 +458,14 @@ struct brk {
  */
 RB_HEAD(brk_tree, brk);
 RB_PROTOTYPE(brk_tree, brk, entry, brkcmp);
+
+struct validation_data {
+	struct vrp_tree	vrps;
+	struct brk_tree	brks;
+	struct vap_tree	vaps;
+	struct vsp_tree	vsps;
+	struct nca_tree ncas;
+};
 
 /*
  * A single CRL
@@ -681,8 +648,28 @@ struct stats {
 
 struct ibuf;
 struct msgbuf;
+struct ibufqueue;
 
 /* global variables */
+extern ASN1_OBJECT *certpol_oid;
+extern ASN1_OBJECT *caissuers_oid;
+extern ASN1_OBJECT *carepo_oid;
+extern ASN1_OBJECT *manifest_oid;
+extern ASN1_OBJECT *signedobj_oid;
+extern ASN1_OBJECT *notify_oid;
+extern ASN1_OBJECT *roa_oid;
+extern ASN1_OBJECT *mft_oid;
+extern ASN1_OBJECT *gbr_oid;
+extern ASN1_OBJECT *bgpsec_oid;
+extern ASN1_OBJECT *cnt_type_oid;
+extern ASN1_OBJECT *msg_dgst_oid;
+extern ASN1_OBJECT *sign_time_oid;
+extern ASN1_OBJECT *rsc_oid;
+extern ASN1_OBJECT *aspa_oid;
+extern ASN1_OBJECT *tak_oid;
+extern ASN1_OBJECT *geofeed_oid;
+extern ASN1_OBJECT *spl_oid;
+
 extern int verbose;
 extern int noop;
 extern int filemode;
@@ -706,8 +693,7 @@ void		 cert_buffer(struct ibuf *, const struct cert *);
 void		 cert_free(struct cert *);
 void		 auth_tree_free(struct auth_tree *);
 struct cert	*cert_parse_ee_cert(const char *, int, X509 *);
-struct cert	*cert_parse_pre(const char *, const unsigned char *, size_t);
-struct cert	*cert_parse(const char *, struct cert *);
+struct cert	*cert_parse(const char *, const unsigned char *, size_t);
 struct cert	*ta_parse(const char *, struct cert *, const unsigned char *,
 		    size_t);
 struct cert	*cert_read(struct ibuf *);
@@ -719,8 +705,8 @@ void		 cert_remove_nca(struct nca_tree *, int, struct repo *);
 enum rtype	 rtype_from_file_extension(const char *);
 void		 mft_buffer(struct ibuf *, const struct mft *);
 void		 mft_free(struct mft *);
-struct mft	*mft_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct mft	*mft_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 struct mft	*mft_read(struct ibuf *);
 int		 mft_compare_issued(const struct mft *, const struct mft *);
 int		 mft_compare_seqnum(const struct mft *, const struct mft *);
@@ -729,42 +715,43 @@ int		 mft_seqnum_gap_present(const struct mft *, const struct mft *,
 
 void		 roa_buffer(struct ibuf *, const struct roa *);
 void		 roa_free(struct roa *);
-struct roa	*roa_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct roa	*roa_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 struct roa	*roa_read(struct ibuf *);
 void		 roa_insert_vrps(struct vrp_tree *, struct roa *,
 		    struct repo *);
 
 void		 spl_buffer(struct ibuf *, const struct spl *);
 void		 spl_free(struct spl *);
-struct spl	*spl_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct spl	*spl_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 struct spl	*spl_read(struct ibuf *);
 void		 spl_insert_vsps(struct vsp_tree *, struct spl *,
 		    struct repo *);
 
 void		 gbr_free(struct gbr *);
-struct gbr	*gbr_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct gbr	*gbr_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 
 void		 geofeed_free(struct geofeed *);
-struct geofeed	*geofeed_parse(X509 **, const char *, int, char *, size_t);
+struct geofeed	*geofeed_parse(struct cert **, const char *, int, char *,
+		    size_t);
 
 void		 rsc_free(struct rsc *);
-struct rsc	*rsc_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct rsc	*rsc_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 
 void		 takey_free(struct takey *);
 void		 tak_free(struct tak *);
-struct tak	*tak_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct tak	*tak_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 
 void		 aspa_buffer(struct ibuf *, const struct aspa *);
 void		 aspa_free(struct aspa *);
 void		 aspa_insert_vaps(char *, struct vap_tree *, struct aspa *,
 		    struct repo *);
-struct aspa	*aspa_parse(X509 **, const char *, int, const unsigned char *,
-		    size_t);
+struct aspa	*aspa_parse(struct cert **, const char *, int,
+		    const unsigned char *, size_t);
 struct aspa	*aspa_read(struct ibuf *);
 
 /* crl.c */
@@ -791,16 +778,15 @@ int		 valid_econtent_version(const char *, const ASN1_INTEGER *,
 int		 valid_aspa(const char *, struct cert *, struct aspa *);
 int		 valid_geofeed(const char *, struct cert *, struct geofeed *);
 int		 valid_uuid(const char *);
-int		 valid_ca_pkey(const char *, EVP_PKEY *);
 int		 valid_spl(const char *, struct cert *, struct spl *);
 
 /* Working with CMS. */
-unsigned char	*cms_parse_validate(X509 **, const char *,
-		    const unsigned char *, size_t,
-		    const ASN1_OBJECT *, size_t *, time_t *);
-int		 cms_parse_validate_detached(X509 **, const char *,
-		    const unsigned char *, size_t,
-		    const ASN1_OBJECT *, BIO *, time_t *);
+unsigned char	*cms_parse_validate(struct cert **, const char *, int,
+		    const unsigned char *, size_t, const ASN1_OBJECT *,
+		    size_t *, time_t *);
+int		 cms_parse_validate_detached(struct cert **, const char *, int,
+		    const unsigned char *, size_t, const ASN1_OBJECT *, BIO *,
+		    time_t *);
 
 /* Work with RFC 3779 IP addresses, prefixes, ranges. */
 
@@ -853,7 +839,7 @@ int		 constraints_validate(const char *, const struct cert *);
 void		 entity_free(struct entity *);
 void		 entity_read_req(struct ibuf *, struct entity *);
 void		 entityq_flush(struct entityq *, struct repo *);
-void		 proc_parser(int) __attribute__((noreturn));
+void		 proc_parser(int, int) __attribute__((noreturn));
 void		 proc_filemode(int) __attribute__((noreturn));
 
 /* Rsync-specific. */
@@ -889,6 +875,7 @@ struct repo	*ta_lookup(int, struct tal *);
 struct repo	*repo_lookup(int, const char *, const char *);
 struct repo	*repo_byid(unsigned int);
 int		 repo_queued(struct repo *, struct entity *);
+void		 repo_printinfo(size_t);
 void		 repo_cleanup(struct filepath_tree *, int);
 int		 repo_check_timeout(int);
 void		 repostats_new_files_inc(struct repo *, const char *);
@@ -930,9 +917,12 @@ struct ibuf	*io_new_buffer(void);
 void		 io_simple_buffer(struct ibuf *, const void *, size_t);
 void		 io_buf_buffer(struct ibuf *, const void *, size_t);
 void		 io_str_buffer(struct ibuf *, const char *);
+void		 io_opt_str_buffer(struct ibuf *, const char *);
 void		 io_close_buffer(struct msgbuf *, struct ibuf *);
+void		 io_close_queue(struct ibufqueue *, struct ibuf *);
 void		 io_read_buf(struct ibuf *, void *, size_t);
 void		 io_read_str(struct ibuf *, char **);
+void		 io_read_opt_str(struct ibuf *, char **);
 void		 io_read_buf_alloc(struct ibuf *, void **, size_t *);
 struct ibuf	*io_parse_hdr(struct ibuf *, void *, int *);
 struct ibuf	*io_buf_get(struct msgbuf *);
@@ -940,22 +930,13 @@ struct ibuf	*io_buf_get(struct msgbuf *);
 /* X509 helpers. */
 
 void		 x509_init_oid(void);
-int		 x509_cache_extensions(X509 *, const char *);
-int		 x509_get_aia(X509 *, const char *, char **);
-int		 x509_get_aki(X509 *, const char *, char **);
-int		 x509_get_sia(X509 *, const char *, char **);
-int		 x509_get_ski(X509 *, const char *, char **);
-int		 x509_get_notbefore(X509 *, const char *, time_t *);
-int		 x509_get_notafter(X509 *, const char *, time_t *);
-int		 x509_get_crl(X509 *, const char *, char **);
-char		*x509_get_pubkey(X509 *, const char *);
 char		*x509_pubkey_get_ski(X509_PUBKEY *, const char *);
-enum cert_purpose	 x509_get_purpose(X509 *, const char *);
 int		 x509_get_time(const ASN1_TIME *, time_t *);
 char		*x509_convert_seqnum(const char *, const char *,
 		    const ASN1_INTEGER *);
 int		 x509_valid_seqnum(const char *, const char *,
 		    const ASN1_INTEGER *);
+int		 x509_check_tbs_sigalg(const char *, const X509_ALGOR *);
 int		 x509_location(const char *, const char *, GENERAL_NAME *,
 		    char **);
 int		 x509_inherits(X509 *);
@@ -971,14 +952,14 @@ void		 x509_print(const X509 *);
 void		 tal_print(const struct tal *);
 void		 cert_print(const struct cert *);
 void		 crl_print(const struct crl *);
-void		 mft_print(const X509 *, const struct mft *);
-void		 roa_print(const X509 *, const struct roa *);
-void		 gbr_print(const X509 *, const struct gbr *);
-void		 rsc_print(const X509 *, const struct rsc *);
-void		 aspa_print(const X509 *, const struct aspa *);
-void		 tak_print(const X509 *, const struct tak *);
-void		 geofeed_print(const X509 *, const struct geofeed *);
-void		 spl_print(const X509 *, const struct spl *);
+void		 mft_print(const struct cert *, const struct mft *);
+void		 roa_print(const struct cert *, const struct roa *);
+void		 gbr_print(const struct cert *, const struct gbr *);
+void		 rsc_print(const struct cert *, const struct rsc *);
+void		 aspa_print(const struct cert *, const struct aspa *);
+void		 tak_print(const struct cert *, const struct tak *);
+void		 geofeed_print(const struct cert *, const struct geofeed *);
+void		 spl_print(const struct cert *, const struct spl *);
 
 /* Missing RFC 3779 API */
 IPAddrBlocks *IPAddrBlocks_new(void);
@@ -993,24 +974,13 @@ extern int	 outformats;
 #define FORMAT_JSON	0x08
 #define FORMAT_OMETRIC	0x10
 
-int		 outputfiles(struct vrp_tree *v, struct brk_tree *b,
-		    struct vap_tree *, struct vsp_tree *, struct nca_tree *,
-		    struct stats *);
+int		 outputfiles(struct validation_data *, struct stats *);
 int		 outputheader(FILE *, struct stats *);
-int		 output_bgpd(FILE *, struct vrp_tree *, struct brk_tree *,
-		    struct vap_tree *, struct vsp_tree *, struct nca_tree *,
-		    struct stats *);
-int		 output_bird(FILE *, struct vrp_tree *, struct brk_tree *,
-		    struct vap_tree *, struct vsp_tree *, struct nca_tree *,
-		    struct stats *);
-int		 output_csv(FILE *, struct vrp_tree *, struct brk_tree *,
-		    struct vap_tree *, struct vsp_tree *, struct nca_tree *,
-		    struct stats *);
-int		 output_json(FILE *, struct vrp_tree *, struct brk_tree *,
-		    struct vap_tree *, struct vsp_tree *, struct nca_tree *,
-		    struct stats *);
-int		 output_ometric(FILE *, struct vrp_tree *, struct brk_tree *,
-		    struct vap_tree *, struct vsp_tree *, struct nca_tree *,
+int		 output_bgpd(FILE *, struct validation_data *, struct stats *);
+int		 output_bird(FILE *, struct validation_data *, struct stats *);
+int		 output_csv(FILE *, struct validation_data *, struct stats *);
+int		 output_json(FILE *, struct validation_data *, struct stats *);
+int		 output_ometric(FILE *, struct validation_data *,
 		    struct stats *);
 
 void		 logx(const char *fmt, ...)

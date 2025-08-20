@@ -1,4 +1,4 @@
-/* $OpenBSD: tmux.h,v 1.1259 2025/04/02 09:31:00 nicm Exp $ */
+/* $OpenBSD: tmux.h,v 1.1267 2025/08/14 06:44:50 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -662,7 +662,7 @@ typedef u_int utf8_char;
  * characters as well. It can't be more than 32 bytes without changes to how
  * characters are stored.
  */
-#define UTF8_SIZE 21
+#define UTF8_SIZE 32
 struct utf8_data {
 	u_char	data[UTF8_SIZE];
 
@@ -675,6 +675,14 @@ enum utf8_state {
 	UTF8_MORE,
 	UTF8_DONE,
 	UTF8_ERROR
+};
+
+/* State for processing of Korean characters. */
+enum hanguljamo_state {
+	HANGULJAMO_STATE_NOT_HANGULJAMO,
+	HANGULJAMO_STATE_CHOSEONG,
+	HANGULJAMO_STATE_COMPOSABLE,
+	HANGULJAMO_STATE_NOT_COMPOSABLE
 };
 
 /* Colour flags. */
@@ -881,7 +889,8 @@ TAILQ_HEAD(style_ranges, style_range);
 enum style_default_type {
 	STYLE_DEFAULT_BASE,
 	STYLE_DEFAULT_PUSH,
-	STYLE_DEFAULT_POP
+	STYLE_DEFAULT_POP,
+	STYLE_DEFAULT_SET
 };
 
 /* Style option. */
@@ -985,7 +994,8 @@ enum pane_lines {
 	PANE_LINES_DOUBLE,
 	PANE_LINES_HEAVY,
 	PANE_LINES_SIMPLE,
-	PANE_LINES_NUMBER
+	PANE_LINES_NUMBER,
+	PANE_LINES_SPACES
 };
 
 /* Pane border indicator option. */
@@ -1528,13 +1538,15 @@ struct tty {
 #define TTY_OPENED 0x20
 #define TTY_OSC52QUERY 0x40
 #define TTY_BLOCK 0x80
-#define TTY_HAVEDA 0x100 /* Primary DA. */
+#define TTY_HAVEDA 0x100
 #define TTY_HAVEXDA 0x200
 #define TTY_SYNCING 0x400
-#define TTY_HAVEDA2 0x800 /* Secondary DA. */
+#define TTY_HAVEDA2 0x800
 #define TTY_WINSIZEQUERY 0x1000
+#define TTY_HAVEFG 0x2000
+#define TTY_HAVEBG 0x4000
 #define TTY_ALL_REQUEST_FLAGS \
-	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA)
+	(TTY_HAVEDA|TTY_HAVEDA2|TTY_HAVEXDA|TTY_HAVEFG|TTY_HAVEBG)
 	int		 flags;
 
 	struct tty_term	*term;
@@ -1990,6 +2002,7 @@ struct client {
 	struct event		 message_timer;
 
 	char			*prompt_string;
+	struct format_tree	*prompt_formats;
 	struct utf8_data	*prompt_buffer;
 	char			*prompt_last;
 	size_t			 prompt_index;
@@ -2254,6 +2267,7 @@ char		*paste_make_sample(struct paste_buffer *);
 #define FORMAT_FORCE 0x2
 #define FORMAT_NOJOBS 0x4
 #define FORMAT_VERBOSE 0x8
+#define FORMAT_LAST 0x10
 #define FORMAT_NONE 0
 #define FORMAT_PANE 0x80000000U
 #define FORMAT_WINDOW 0x40000000U
@@ -2394,6 +2408,7 @@ typedef void (*job_free_cb) (void *);
 #define JOB_KEEPWRITE 0x2
 #define JOB_PTY 0x4
 #define JOB_DEFAULTSHELL 0x8
+#define JOB_SHOWSTDERR 0x10
 struct job	*job_run(const char *, int, char **, struct environ *,
 		     struct session *, const char *, job_update_cb,
 		     job_complete_cb, job_free_cb, void *, int, int, int);
@@ -3459,6 +3474,8 @@ int		 utf8_has_zwj(const struct utf8_data *);
 int		 utf8_is_zwj(const struct utf8_data *);
 int		 utf8_is_vs(const struct utf8_data *);
 int		 utf8_is_modifier(const struct utf8_data *);
+enum hanguljamo_state hanguljamo_check_state(const struct utf8_data *,
+		    const struct utf8_data *);
 
 /* procname.c */
 char   *get_proc_name(int, char *);

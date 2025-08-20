@@ -1,11 +1,11 @@
-#	$OpenBSD: Makefile.inc,v 1.31 2024/08/12 20:56:55 guenther Exp $
+#	$OpenBSD: Makefile.inc,v 1.33 2025/07/25 18:27:56 tedu Exp $
 
 # stdio sources
 .PATH: ${LIBCSRCDIR}/stdio
 
 CFLAGS+=-DFLOATING_POINT -DPRINTF_WIDE_CHAR -DSCANF_WIDE_CHAR
 
-SRCS+=	asprintf.c clrerr.c fclose.c fdopen.c feof.c ferror.c fflush.c fgetc.c \
+SRCS+=	asprintf.c clrerr.c fclose.c fdclose.c fdopen.c feof.c ferror.c fflush.c fgetc.c \
 	fgetln.c fgetpos.c fgets.c fileno.c findfp.c flags.c fmemopen.c \
 	fopen.c fprintf.c fpurge.c fputc.c fputs.c fread.c freopen.c fscanf.c \
 	fseek.c fsetpos.c ftell.c funopen.c fvwrite.c fwalk.c fwrite.c \
@@ -22,7 +22,8 @@ SRCS+=	asprintf.c clrerr.c fclose.c fdopen.c feof.c ferror.c fflush.c fgetc.c \
 	getdelim.c getline.c dprintf.c vdprintf.c \
 	fpending.c freadahead.c freading.c freadptr.c fseterr.c fwriting.c
 
-MAN+=	fclose.3 ferror.3 fflush.3 fgetln.3 fgets.3 fgetwln.3 fmemopen.3 \
+MAN+=	fclose.3 ferror.3 fflush.3 fgetln.3 fgets.3 fgetwln.3 \
+	flockfile.3 fmemopen.3 \
 	fopen.3 __fpending.3 fputs.3 fread.3 fseek.3 funopen.3 getc.3 \
 	open_memstream.3 perror.3 printf.3 putc.3 remove.3 scanf.3 setbuf.3 \
 	setvbuf.3 stdio.3 tmpnam.3 ungetc.3 fgetws.3 fputws.3 fwide.3 getwc.3 \

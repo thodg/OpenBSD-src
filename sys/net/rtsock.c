@@ -1,4 +1,4 @@
-/*	$OpenBSD: rtsock.c,v 1.383 2025/03/29 06:33:28 claudio Exp $	*/
+/*	$OpenBSD: rtsock.c,v 1.387 2025/08/20 03:55:37 dlg Exp $	*/
 /*	$NetBSD: rtsock.c,v 1.18 1996/03/29 00:32:10 cgd Exp $	*/
 
 /*
@@ -67,11 +67,9 @@
 #include <sys/sysctl.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/domain.h>
 #include <sys/pool.h>
 #include <sys/protosw.h>
-#include <sys/srp.h>
 
 #include <net/if.h>
 #include <net/if_dl.h>
@@ -84,7 +82,6 @@
 #include <netmpls/mpls.h>
 #endif
 #ifdef IPSEC
-#include <netinet/ip_ipsp.h>
 #include <net/if_enc.h>
 #endif
 #ifdef BFD
@@ -92,7 +89,6 @@
 #endif
 
 #include <sys/stdarg.h>
-#include <sys/kernel.h>
 #include <sys/timeout.h>
 
 #define	ROUTESNDQ	8192
@@ -107,8 +103,6 @@ struct walkarg {
 };
 
 void	route_prinit(void);
-void	rcb_ref(void *, void *);
-void	rcb_unref(void *, void *);
 int	route_output(struct mbuf *, struct socket *);
 int	route_ctloutput(int, struct socket *, int, int, struct mbuf *);
 int	route_attach(struct socket *, int, int);
@@ -151,12 +145,13 @@ int		 rt_setsource(unsigned int, const struct sockaddr *);
  * Locks used to protect struct members
  *       I       immutable after creation
  *       s       solock
+ *
+ * Lock order: rtptable.rtp_lk -> solock
  */
 struct rtpcb {
 	struct socket		*rop_socket;		/* [I] */
 
-	SRPL_ENTRY(rtpcb)	rop_list;
-	struct refcnt		rop_refcnt;
+	TAILQ_ENTRY(rtpcb)	rop_list;
 	struct timeout		rop_timeout;
 	unsigned int		rop_msgfilter;		/* [s] */
 	unsigned int		rop_flagfilter;		/* [s] */
@@ -168,8 +163,7 @@ struct rtpcb {
 #define	sotortpcb(so)	((struct rtpcb *)(so)->so_pcb)
 
 struct rtptable {
-	SRPL_HEAD(, rtpcb)	rtp_list;
-	struct srpl_rc		rtp_rc;
+	TAILQ_HEAD(, rtpcb)	rtp_list;
 	struct rwlock		rtp_lk;
 	unsigned int		rtp_count;
 };
@@ -191,27 +185,10 @@ struct rtptable rtptable;
 void
 route_prinit(void)
 {
-	srpl_rc_init(&rtptable.rtp_rc, rcb_ref, rcb_unref, NULL);
 	rw_init(&rtptable.rtp_lk, "rtsock");
-	SRPL_INIT(&rtptable.rtp_list);
+	TAILQ_INIT(&rtptable.rtp_list);
 	pool_init(&rtpcb_pool, sizeof(struct rtpcb), 0,
 	    IPL_SOFTNET, PR_WAITOK, "rtpcb", NULL);
-}
-
-void
-rcb_ref(void *null, void *v)
-{
-	struct rtpcb *rop = v;
-
-	refcnt_take(&rop->rop_refcnt);
-}
-
-void
-rcb_unref(void *null, void *v)
-{
-	struct rtpcb *rop = v;
-
-	refcnt_rele_wake(&rop->rop_refcnt);
 }
 
 int
@@ -219,6 +196,8 @@ route_attach(struct socket *so, int proto, int wait)
 {
 	struct rtpcb	*rop;
 	int		 error;
+
+	soassertlocked(so);
 
 	error = soreserve(so, ROUTESNDQ, ROUTERCVQ);
 	if (error)
@@ -236,7 +215,6 @@ route_attach(struct socket *so, int proto, int wait)
 	/* Init the timeout structure */
 	timeout_set_flags(&rop->rop_timeout, rtm_senddesync_timer, so,
 	    KCLOCK_NONE, TIMEOUT_PROC | TIMEOUT_MPSAFE);
-	refcnt_init(&rop->rop_refcnt);
 
 	rop->rop_socket = so;
 	rop->rop_proto = proto;
@@ -246,10 +224,15 @@ route_attach(struct socket *so, int proto, int wait)
 	soisconnected(so);
 	so->so_options |= SO_USELOOPBACK;
 
+	/* Give up solock before taking rtp_lk for the lock ordering. */
+	soref(so); /* Take a ref for the list */
+	sounlock(so);
+
 	rw_enter(&rtptable.rtp_lk, RW_WRITE);
-	SRPL_INSERT_HEAD_LOCKED(&rtptable.rtp_rc, &rtptable.rtp_list, rop,
-	    rop_list);
+	TAILQ_INSERT_TAIL(&rtptable.rtp_list, rop, rop_list);
 	rtptable.rtp_count++;
+
+	solock(so);
 	rw_exit(&rtptable.rtp_lk);
 
 	return (0);
@@ -266,20 +249,19 @@ route_detach(struct socket *so)
 	if (rop == NULL)
 		return (EINVAL);
 
-	rw_enter(&rtptable.rtp_lk, RW_WRITE);
-
-	rtptable.rtp_count--;
-	SRPL_REMOVE_LOCKED(&rtptable.rtp_rc, &rtptable.rtp_list, rop, rtpcb,
-	    rop_list);
-	rw_exit(&rtptable.rtp_lk);
-
+	/* Give up solock before taking rtp_lk for the lock ordering. */
 	sounlock(so);
 
+	rw_enter(&rtptable.rtp_lk, RW_WRITE);
+	rtptable.rtp_count--;
+	TAILQ_REMOVE(&rtptable.rtp_list, rop, rop_list);
+	rw_exit(&rtptable.rtp_lk);
+
 	/* wait for all references to drop */
-	refcnt_finalize(&rop->rop_refcnt, "rtsockrefs");
 	timeout_del_barrier(&rop->rop_timeout);
 
 	solock(so);
+	sorele(so); /* Release the ref the list had */
 
 	so->so_pcb = NULL;
 	KASSERT((so->so_state & SS_NOFDREF) == 0);
@@ -504,7 +486,6 @@ route_input(struct mbuf *m0, struct socket *so0, sa_family_t sa_family)
 	struct rtpcb *rop;
 	struct rt_msghdr *rtm;
 	struct mbuf *m = m0;
-	struct srp_ref sr;
 
 	/* ensure that we can access the rtm_type via mtod() */
 	if (m->m_len < offsetof(struct rt_msghdr, rtm_type) + 1) {
@@ -512,7 +493,8 @@ route_input(struct mbuf *m0, struct socket *so0, sa_family_t sa_family)
 		return;
 	}
 
-	SRPL_FOREACH(rop, &sr, &rtptable.rtp_list, rop_list) {
+	rw_enter_read(&rtptable.rtp_lk);
+	TAILQ_FOREACH(rop, &rtptable.rtp_list, rop_list) {
 		/*
 		 * If route socket is bound to an address family only send
 		 * messages that match the address family. Address family
@@ -583,7 +565,7 @@ route_input(struct mbuf *m0, struct socket *so0, sa_family_t sa_family)
 next:
 		sounlock(so);
 	}
-	SRPL_LEAVE(&sr);
+	rw_exit_read(&rtptable.rtp_lk);
 
 	m_freem(m);
 }
@@ -1958,7 +1940,7 @@ rtm_proposal(struct ifnet *ifp, struct rt_addrinfo *rtinfo, int flags,
  * This is used in dumping the kernel table via sysctl().
  */
 int
-sysctl_dumpentry(struct rtentry *rt, void *v, unsigned int id)
+sysctl_dumpentry(const struct rtentry *rt, void *v, unsigned int id)
 {
 	struct walkarg		*w = v;
 	int			 error = 0, size;
@@ -2046,6 +2028,27 @@ sysctl_dumpentry(struct rtentry *rt, void *v, unsigned int id)
 	}
 	return (error);
 }
+
+#ifndef SMALL_KERNEL
+int
+sysctl_rtable_rtstat(void *oldp, size_t *oldlenp, void *newp)
+{
+	extern struct cpumem *rtcounters;
+	uint64_t counters[rts_ncounters];
+	struct rtstat rtstat;
+	uint32_t *words = (uint32_t *)&rtstat;
+	int i;
+
+	CTASSERT(sizeof(rtstat) == (nitems(counters) * sizeof(uint32_t)));
+	memset(&rtstat, 0, sizeof rtstat);
+	counters_read(rtcounters, counters, nitems(counters), NULL);
+
+	for (i = 0; i < nitems(counters); i++)
+		words[i] = (uint32_t)counters[i];
+
+	return (sysctl_rdstruct(oldp, oldlenp, newp, &rtstat, sizeof(rtstat)));
+}
+#endif /* SMALL_KERNEL */
 
 int
 sysctl_iflist(int af, struct walkarg *w)
@@ -2185,7 +2188,6 @@ sysctl_rtable(int *name, u_int namelen, void *where, size_t *given, void *new,
 	int			 i, error = EINVAL;
 	u_char			 af;
 	struct walkarg		 w;
-	struct rt_tableinfo	 tableinfo;
 	u_int			 tableid = 0;
 
 	if (new)
@@ -2214,8 +2216,7 @@ sysctl_rtable(int *name, u_int namelen, void *where, size_t *given, void *new,
 			if (af != 0 && af != i)
 				continue;
 
-			error = rtable_walk(tableid, i, NULL, sysctl_dumpentry,
-			    &w);
+			error = rtable_read(tableid, i, sysctl_dumpentry, &w);
 			if (error == EAFNOSUPPORT)
 				error = 0;
 			if (error)
@@ -2223,30 +2224,23 @@ sysctl_rtable(int *name, u_int namelen, void *where, size_t *given, void *new,
 		}
 		NET_UNLOCK_SHARED();
 		break;
-
-	case NET_RT_IFLIST:
-		NET_LOCK_SHARED();
-		error = sysctl_iflist(af, &w);
-		NET_UNLOCK_SHARED();
-		break;
-
+#ifndef SMALL_KERNEL
 	case NET_RT_STATS:
 		return (sysctl_rtable_rtstat(where, given, new));
 	case NET_RT_TABLE:
 		tableid = w.w_arg;
-		if (!rtable_exists(tableid))
+		if (rtable_exists(tableid)) {
+			struct rt_tableinfo	 tableinfo;
+
+			memset(&tableinfo, 0, sizeof tableinfo);
+			tableinfo.rti_tableid = tableid;
+			tableinfo.rti_domainid = rtable_l2(tableid);
+			error = sysctl_rdstruct(where, given, new,
+			    &tableinfo, sizeof(tableinfo));
+			return (error);
+		} else
 			return (ENOENT);
-		memset(&tableinfo, 0, sizeof tableinfo);
-		tableinfo.rti_tableid = tableid;
-		tableinfo.rti_domainid = rtable_l2(tableid);
-		error = sysctl_rdstruct(where, given, new,
-		    &tableinfo, sizeof(tableinfo));
-		return (error);
-	case NET_RT_IFNAMES:
-		NET_LOCK_SHARED();
-		error = sysctl_ifnames(&w);
-		NET_UNLOCK_SHARED();
-		break;
+#endif /* SMALL_KERNEL */
 	case NET_RT_SOURCE:
 		tableid = w.w_arg;
 		if (!rtable_exists(tableid))
@@ -2262,6 +2256,17 @@ sysctl_rtable(int *name, u_int namelen, void *where, size_t *given, void *new,
 				break;
 		}
 		break;
+	case NET_RT_IFLIST:
+		NET_LOCK_SHARED();
+		error = sysctl_iflist(af, &w);
+		NET_UNLOCK_SHARED();
+		break;
+
+	case NET_RT_IFNAMES:
+		NET_LOCK_SHARED();
+		error = sysctl_ifnames(&w);
+		NET_UNLOCK_SHARED();
+		break;
 	}
 	free(w.w_tmem, M_RTABLE, w.w_tmemsize);
 	if (where) {
@@ -2275,25 +2280,6 @@ sysctl_rtable(int *name, u_int namelen, void *where, size_t *given, void *new,
 		    PAGE_SIZE);
 	}
 	return (error);
-}
-
-int
-sysctl_rtable_rtstat(void *oldp, size_t *oldlenp, void *newp)
-{
-	extern struct cpumem *rtcounters;
-	uint64_t counters[rts_ncounters];
-	struct rtstat rtstat;
-	uint32_t *words = (uint32_t *)&rtstat;
-	int i;
-
-	CTASSERT(sizeof(rtstat) == (nitems(counters) * sizeof(uint32_t)));
-	memset(&rtstat, 0, sizeof rtstat);
-	counters_read(rtcounters, counters, nitems(counters), NULL);
-
-	for (i = 0; i < nitems(counters); i++)
-		words[i] = (uint32_t)counters[i];
-
-	return (sysctl_rdstruct(oldp, oldlenp, newp, &rtstat, sizeof(rtstat)));
 }
 
 int

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_spppsubr.c,v 1.196 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: if_spppsubr.c,v 1.198 2025/08/19 12:34:15 claudio Exp $	*/
 /*
  * Synchronous PPP link level subroutines.
  *
@@ -37,7 +37,6 @@
 #include <sys/param.h>
 
 #include <sys/systm.h>
-#include <sys/kernel.h>
 #include <sys/sockio.h>
 #include <sys/socket.h>
 #include <sys/syslog.h>
@@ -49,7 +48,6 @@
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/netisr.h>
 #include <net/if_types.h>
 #include <net/route.h>
 
@@ -64,6 +62,8 @@
 #endif
 
 #include <net/if_sppp.h>
+
+extern unsigned int	rtmap_limit;
 
 # define UNTIMEOUT(fun, arg, handle)	\
 	timeout_del(&(handle))
@@ -4240,7 +4240,7 @@ sppp_update_gw(struct ifnet *ifp)
 	u_int tid;
 
 	/* update routing table */
-	for (tid = 0; tid <= RT_TABLEID_MAX; tid++) {
+	for (tid = 0; tid <= rtmap_limit; tid++) {
 		rtable_walk(tid, AF_INET, NULL, sppp_update_gw_walker, ifp);
 	}
 }

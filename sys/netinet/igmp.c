@@ -1,4 +1,4 @@
-/*	$OpenBSD: igmp.c,v 1.86 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: igmp.c,v 1.88 2025/07/08 00:47:41 jsg Exp $	*/
 /*	$NetBSD: igmp.c,v 1.15 1996/02/13 23:41:25 christos Exp $	*/
 
 /*
@@ -91,8 +91,6 @@
 #include <netinet/ip_var.h>
 #include <netinet/igmp.h>
 #include <netinet/igmp_var.h>
-
-#include <sys/stdarg.h>
 
 #define IP_MULTICASTOPTS	0
 
@@ -676,6 +674,7 @@ igmp_sendpkt(struct ifnet *ifp, struct in_multi *inm, int type,
 	igmpstat_inc(igps_snd_reports);
 }
 
+#ifndef SMALL_KERNEL
 /*
  * Sysctl for igmp variables.
  */
@@ -714,3 +713,4 @@ igmp_sysctl_igmpstat(void *oldp, size_t *oldlenp, void *newp)
 	return (sysctl_rdstruct(oldp, oldlenp, newp,
 	    &igmpstat, sizeof(igmpstat)));
 }
+#endif /* SMALL_KERNEL */

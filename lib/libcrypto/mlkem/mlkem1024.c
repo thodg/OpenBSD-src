@@ -1,7 +1,7 @@
-/* $OpenBSD: mlkem1024.c,v 1.6 2025/01/03 08:19:24 tb Exp $ */
+/* $OpenBSD: mlkem1024.c,v 1.12 2025/08/14 15:48:48 beck Exp $ */
 /*
  * Copyright (c) 2024, Google Inc.
- * Copyright (c) 2024, Bob Beck <beck@obtuse.com>
+ * Copyright (c) 2024, 2025 Bob Beck <beck@obtuse.com>
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -20,17 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bytestring.h"
-#include "mlkem.h"
+#include <openssl/mlkem.h>
 
+#include "bytestring.h"
 #include "sha3_internal.h"
 #include "mlkem_internal.h"
 #include "constant_time.h"
 #include "crypto_internal.h"
-
-/* Remove later */
-#undef LCRYPTO_ALIAS
-#define LCRYPTO_ALIAS(A)
 
 /*
  * See
@@ -80,7 +76,6 @@ kdf(uint8_t out[MLKEM_SHARED_SECRET_BYTES], const uint8_t failure_secret[32],
 }
 
 #define DEGREE 256
-#define RANK1024 4
 
 static const size_t kBarrettMultiplier = 5039;
 static const unsigned kBarrettShift = 24;
@@ -612,6 +607,19 @@ vector_encode(uint8_t *out, const vector *a, int bits)
 	}
 }
 
+/* Encodes an entire vector as above, but adding it to a CBB */
+static int
+vector_encode_cbb(CBB *cbb, const vector *a, int bits)
+{
+	uint8_t *encoded_vector;
+
+	if (!CBB_add_space(cbb, &encoded_vector, kEncodedVectorSize))
+		return 0;
+	vector_encode(encoded_vector, a, bits);
+
+	return 1;
+}
+
 /*
  * scalar_decode parses |DEGREE * bits| bits from |in| into |DEGREE| values in
  * |out|. It returns one on success and zero if any parsed value is >=
@@ -793,10 +801,14 @@ struct public_key {
 	matrix m;
 };
 
+CTASSERT(sizeof(struct MLKEM1024_public_key) == sizeof(struct public_key));
+
 static struct public_key *
-public_key_1024_from_external(const struct MLKEM1024_public_key *external)
+public_key_1024_from_external(const MLKEM_public_key *external)
 {
-	return (struct public_key *)external;
+	if (external->rank != RANK1024)
+		return NULL;
+	return (struct public_key *)external->key_1024;
 }
 
 struct private_key {
@@ -805,33 +817,36 @@ struct private_key {
 	uint8_t fo_failure_secret[32];
 };
 
+CTASSERT(sizeof(struct MLKEM1024_private_key) == sizeof(struct private_key));
+
 static struct private_key *
-private_key_1024_from_external(const struct MLKEM1024_private_key *external)
+private_key_1024_from_external(const MLKEM_private_key *external)
 {
-	return (struct private_key *)external;
+	if (external->rank != RANK1024)
+		return NULL;
+	return (struct private_key *)external->key_1024;
 }
 
 /*
  * Calls |MLKEM1024_generate_key_external_entropy| with random bytes from
  * |RAND_bytes|.
  */
-void
+int
 MLKEM1024_generate_key(uint8_t out_encoded_public_key[MLKEM1024_PUBLIC_KEY_BYTES],
     uint8_t optional_out_seed[MLKEM_SEED_BYTES],
-    struct MLKEM1024_private_key *out_private_key)
+    MLKEM_private_key *out_private_key)
 {
 	uint8_t entropy_buf[MLKEM_SEED_BYTES];
 	uint8_t *entropy = optional_out_seed != NULL ? optional_out_seed :
 	    entropy_buf;
 
 	arc4random_buf(entropy, MLKEM_SEED_BYTES);
-	MLKEM1024_generate_key_external_entropy(out_encoded_public_key,
+	return MLKEM1024_generate_key_external_entropy(out_encoded_public_key,
 	    out_private_key, entropy);
 }
-LCRYPTO_ALIAS(MLKEM1024_generate_key);
 
 int
-MLKEM1024_private_key_from_seed(struct MLKEM1024_private_key *out_private_key,
+MLKEM1024_private_key_from_seed(MLKEM_private_key *out_private_key,
     const uint8_t *seed, size_t seed_len)
 {
 	uint8_t public_key_bytes[MLKEM1024_PUBLIC_KEY_BYTES];
@@ -839,32 +854,22 @@ MLKEM1024_private_key_from_seed(struct MLKEM1024_private_key *out_private_key,
 	if (seed_len != MLKEM_SEED_BYTES) {
 		return 0;
 	}
-	MLKEM1024_generate_key_external_entropy(public_key_bytes,
+	return MLKEM1024_generate_key_external_entropy(public_key_bytes,
 	    out_private_key, seed);
-
-	return 1;
 }
-LCRYPTO_ALIAS(MLKEM1024_private_key_from_seed);
 
 static int
 mlkem_marshal_public_key(CBB *out, const struct public_key *pub)
 {
-	uint8_t *vector_output;
-
-	if (!CBB_add_space(out, &vector_output, kEncodedVectorSize)) {
+	if (!vector_encode_cbb(out, &pub->t, kLog2Prime))
 		return 0;
-	}
-	vector_encode(vector_output, &pub->t, kLog2Prime);
-	if (!CBB_add_bytes(out, pub->rho, sizeof(pub->rho))) {
-		return 0;
-	}
-	return 1;
+	return CBB_add_bytes(out, pub->rho, sizeof(pub->rho));
 }
 
-void
+int
 MLKEM1024_generate_key_external_entropy(
     uint8_t out_encoded_public_key[MLKEM1024_PUBLIC_KEY_BYTES],
-    struct MLKEM1024_private_key *out_private_key,
+    MLKEM_private_key *out_private_key,
     const uint8_t entropy[MLKEM_SEED_BYTES])
 {
 	struct private_key *priv = private_key_1024_from_external(
@@ -875,7 +880,9 @@ MLKEM1024_generate_key_external_entropy(
 	uint8_t hashed[64];
 	vector error;
 	CBB cbb;
+	int ret = 0;
 
+	memset(&cbb, 0, sizeof(CBB));
 	memcpy(augmented_seed, entropy, 32);
 	augmented_seed[32] = RANK1024;
 	hash_g(hashed, augmented_seed, 33);
@@ -890,21 +897,28 @@ MLKEM1024_generate_key_external_entropy(
 	matrix_mult_transpose(&priv->pub.t, &priv->pub.m, &priv->s);
 	vector_add(&priv->pub.t, &error);
 
-	/* XXX - error checking. */
-	CBB_init_fixed(&cbb, out_encoded_public_key, MLKEM1024_PUBLIC_KEY_BYTES);
-	if (!mlkem_marshal_public_key(&cbb, &priv->pub)) {
-		abort();
-	}
-	CBB_cleanup(&cbb);
+	if (!CBB_init_fixed(&cbb, out_encoded_public_key,
+	    MLKEM1024_PUBLIC_KEY_BYTES))
+		goto err;
+
+	if (!mlkem_marshal_public_key(&cbb, &priv->pub))
+		goto err;
 
 	hash_h(priv->pub.public_key_hash, out_encoded_public_key,
 	    MLKEM1024_PUBLIC_KEY_BYTES);
 	memcpy(priv->fo_failure_secret, entropy + 32, 32);
+
+	ret = 1;
+
+ err:
+	CBB_cleanup(&cbb);
+
+	return ret;
 }
 
 void
-MLKEM1024_public_from_private(struct MLKEM1024_public_key *out_public_key,
-    const struct MLKEM1024_private_key *private_key)
+MLKEM1024_public_from_private(const MLKEM_private_key *private_key,
+    MLKEM_public_key *out_public_key)
 {
 	struct public_key *const pub = public_key_1024_from_external(
 	    out_public_key);
@@ -913,7 +927,6 @@ MLKEM1024_public_from_private(struct MLKEM1024_public_key *out_public_key,
 
 	*pub = priv->pub;
 }
-LCRYPTO_ALIAS(MLKEM1024_public_from_private);
 
 /*
  * Encrypts a message with given randomness to the ciphertext in |out|. Without
@@ -955,9 +968,9 @@ encrypt_cpa(uint8_t out[MLKEM1024_CIPHERTEXT_BYTES],
 
 /* Calls MLKEM1024_encap_external_entropy| with random bytes */
 void
-MLKEM1024_encap(uint8_t out_ciphertext[MLKEM1024_CIPHERTEXT_BYTES],
-    uint8_t out_shared_secret[MLKEM_SHARED_SECRET_BYTES],
-    const struct MLKEM1024_public_key *public_key)
+MLKEM1024_encap(const MLKEM_public_key *public_key,
+    uint8_t out_ciphertext[MLKEM1024_CIPHERTEXT_BYTES],
+    uint8_t out_shared_secret[MLKEM_SHARED_SECRET_BYTES])
 {
 	uint8_t entropy[MLKEM_ENCAP_ENTROPY];
 
@@ -965,14 +978,13 @@ MLKEM1024_encap(uint8_t out_ciphertext[MLKEM1024_CIPHERTEXT_BYTES],
 	MLKEM1024_encap_external_entropy(out_ciphertext, out_shared_secret,
 	    public_key, entropy);
 }
-LCRYPTO_ALIAS(MLKEM1024_encap);
 
 /* See section 6.2 of the spec. */
 void
 MLKEM1024_encap_external_entropy(
     uint8_t out_ciphertext[MLKEM1024_CIPHERTEXT_BYTES],
     uint8_t out_shared_secret[MLKEM_SHARED_SECRET_BYTES],
-    const struct MLKEM1024_public_key *public_key,
+    const MLKEM_public_key *public_key,
     const uint8_t entropy[MLKEM_ENCAP_ENTROPY])
 {
 	const struct public_key *pub = public_key_1024_from_external(public_key);
@@ -1008,10 +1020,10 @@ decrypt_cpa(uint8_t out[32], const struct private_key *priv,
 
 /* See section 6.3 */
 int
-MLKEM1024_decap(uint8_t out_shared_secret[MLKEM_SHARED_SECRET_BYTES],
+MLKEM1024_decap(const MLKEM_private_key *private_key,
     const uint8_t *ciphertext, size_t ciphertext_len,
-    const struct MLKEM1024_private_key *private_key)
-{
+    uint8_t out_shared_secret[MLKEM_SHARED_SECRET_BYTES])
+ {
 	const struct private_key *priv = private_key_1024_from_external(
 	    private_key);
 	uint8_t expected_ciphertext[MLKEM1024_CIPHERTEXT_BYTES];
@@ -1042,16 +1054,29 @@ MLKEM1024_decap(uint8_t out_shared_secret[MLKEM_SHARED_SECRET_BYTES],
 
 	return 1;
 }
-LCRYPTO_ALIAS(MLKEM1024_decap);
 
 int
-MLKEM1024_marshal_public_key(CBB *out,
-    const struct MLKEM1024_public_key *public_key)
+MLKEM1024_marshal_public_key(const MLKEM_public_key *public_key,
+    uint8_t **output, size_t *output_len)
 {
-	return mlkem_marshal_public_key(out,
-	    public_key_1024_from_external(public_key));
+	int ret = 0;
+	CBB cbb;
+
+	if (!CBB_init(&cbb, MLKEM1024_PUBLIC_KEY_BYTES))
+		goto err;
+	if (!mlkem_marshal_public_key(&cbb,
+	    public_key_1024_from_external(public_key)))
+		goto err;
+	if (!CBB_finish(&cbb, output, output_len))
+		goto err;
+
+	ret = 1;
+
+ err:
+	CBB_cleanup(&cbb);
+
+	return ret;
 }
-LCRYPTO_ALIAS(MLKEM1024_marshal_public_key);
 
 /*
  * mlkem_parse_public_key_no_hash parses |in| into |pub| but doesn't calculate
@@ -1062,10 +1087,11 @@ mlkem_parse_public_key_no_hash(struct public_key *pub, CBS *in)
 {
 	CBS t_bytes;
 
-	if (!CBS_get_bytes(in, &t_bytes, kEncodedVectorSize) ||
-	    !vector_decode(&pub->t, CBS_data(&t_bytes), kLog2Prime)) {
+	if (!CBS_get_bytes(in, &t_bytes, kEncodedVectorSize))
 		return 0;
-	}
+	if (!vector_decode(&pub->t, CBS_data(&t_bytes), kLog2Prime))
+		return 0;
+
 	memcpy(pub->rho, CBS_data(in), sizeof(pub->rho));
 	if (!CBS_skip(in, sizeof(pub->rho)))
 		return 0;
@@ -1074,66 +1100,84 @@ mlkem_parse_public_key_no_hash(struct public_key *pub, CBS *in)
 }
 
 int
-MLKEM1024_parse_public_key(struct MLKEM1024_public_key *public_key, CBS *in)
+MLKEM1024_parse_public_key(const uint8_t *input, size_t input_len,
+    MLKEM_public_key *public_key)
 {
 	struct public_key *pub = public_key_1024_from_external(public_key);
-	CBS orig_in = *in;
+	CBS cbs;
 
-	if (!mlkem_parse_public_key_no_hash(pub, in) ||
-	    CBS_len(in) != 0) {
+	CBS_init(&cbs, input, input_len);
+	if (!mlkem_parse_public_key_no_hash(pub, &cbs))
 		return 0;
-	}
-	hash_h(pub->public_key_hash, CBS_data(&orig_in), CBS_len(&orig_in));
+	if (CBS_len(&cbs) != 0)
+		return 0;
+
+	hash_h(pub->public_key_hash, input, input_len);
+
 	return 1;
 }
-LCRYPTO_ALIAS(MLKEM1024_parse_public_key);
 
 int
-MLKEM1024_marshal_private_key(CBB *out,
-    const struct MLKEM1024_private_key *private_key)
+MLKEM1024_marshal_private_key(const MLKEM_private_key *private_key,
+    uint8_t **out_private_key, size_t *out_private_key_len)
 {
 	const struct private_key *const priv = private_key_1024_from_external(
 	    private_key);
-	uint8_t *s_output;
+	CBB cbb;
+	int ret = 0;
 
-	if (!CBB_add_space(out, &s_output, kEncodedVectorSize)) {
-		return 0;
-	}
-	vector_encode(s_output, &priv->s, kLog2Prime);
-	if (!mlkem_marshal_public_key(out, &priv->pub) ||
-	    !CBB_add_bytes(out, priv->pub.public_key_hash,
-	    sizeof(priv->pub.public_key_hash)) ||
-	    !CBB_add_bytes(out, priv->fo_failure_secret,
-	    sizeof(priv->fo_failure_secret))) {
-		return 0;
-	}
-	return 1;
+	if (!CBB_init(&cbb, MLKEM1024_PRIVATE_KEY_BYTES))
+		goto err;
+
+	if (!vector_encode_cbb(&cbb, &priv->s, kLog2Prime))
+		goto err;
+	if (!mlkem_marshal_public_key(&cbb, &priv->pub))
+		goto err;
+	if (!CBB_add_bytes(&cbb, priv->pub.public_key_hash,
+	    sizeof(priv->pub.public_key_hash)))
+		goto err;
+	if (!CBB_add_bytes(&cbb, priv->fo_failure_secret,
+	    sizeof(priv->fo_failure_secret)))
+		goto err;
+
+	if (!CBB_finish(&cbb, out_private_key, out_private_key_len))
+		goto err;
+
+	ret = 1;
+
+ err:
+	CBB_cleanup(&cbb);
+
+	return ret;
 }
 
 int
-MLKEM1024_parse_private_key(struct MLKEM1024_private_key *out_private_key,
-    CBS *in)
+MLKEM1024_parse_private_key(const uint8_t *input, size_t input_len,
+    MLKEM_private_key *out_private_key)
 {
 	struct private_key *const priv = private_key_1024_from_external(
 	    out_private_key);
-	CBS s_bytes;
+	CBS cbs, s_bytes;
 
-	if (!CBS_get_bytes(in, &s_bytes, kEncodedVectorSize) ||
-	    !vector_decode(&priv->s, CBS_data(&s_bytes), kLog2Prime) ||
-	    !mlkem_parse_public_key_no_hash(&priv->pub, in)) {
+	CBS_init(&cbs, input, input_len);
+
+	if (!CBS_get_bytes(&cbs, &s_bytes, kEncodedVectorSize))
 		return 0;
-	}
-	memcpy(priv->pub.public_key_hash, CBS_data(in),
+	if (!vector_decode(&priv->s, CBS_data(&s_bytes), kLog2Prime))
+		return 0;
+	if (!mlkem_parse_public_key_no_hash(&priv->pub, &cbs))
+		return 0;
+
+	memcpy(priv->pub.public_key_hash, CBS_data(&cbs),
 	    sizeof(priv->pub.public_key_hash));
-	if (!CBS_skip(in, sizeof(priv->pub.public_key_hash)))
+	if (!CBS_skip(&cbs, sizeof(priv->pub.public_key_hash)))
 		return 0;
-	memcpy(priv->fo_failure_secret, CBS_data(in),
+	memcpy(priv->fo_failure_secret, CBS_data(&cbs),
 	    sizeof(priv->fo_failure_secret));
-	if (!CBS_skip(in, sizeof(priv->fo_failure_secret)))
+	if (!CBS_skip(&cbs, sizeof(priv->fo_failure_secret)))
 		return 0;
-	if (CBS_len(in) != 0)
+	if (CBS_len(&cbs) != 0)
 		return 0;
 
 	return 1;
 }
-LCRYPTO_ALIAS(MLKEM1024_parse_private_key);

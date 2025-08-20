@@ -1,4 +1,4 @@
-/*	$Id: test-geofeed.c,v 1.6 2024/04/22 05:54:01 claudio Exp $ */
+/*	$Id: test-geofeed.c,v 1.9 2025/07/20 07:49:47 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -32,15 +32,15 @@
 
 int outformats;
 int verbose;
-int filemode;
+int filemode = 1;
 int experimental;
 
 int
 main(int argc, char *argv[])
 {
 	int		 c, i, ppem = 0, verb = 0;
-	X509		*xp = NULL;
 	struct geofeed	*p;
+	struct cert	*cert = NULL;
 	unsigned char	*buf;
 	size_t		 len;
 
@@ -72,19 +72,20 @@ main(int argc, char *argv[])
 
 	for (i = 0; i < argc; i++) {
 		buf = load_file(argv[i], &len);
-		if ((p = geofeed_parse(&xp, argv[i], -1, buf, len)) == NULL) {
+		if ((p = geofeed_parse(&cert, argv[i], -1, buf, len)) == NULL) {
 			free(buf);
 			break;
 		}
 		if (verb)
-			geofeed_print(xp, p);
+			geofeed_print(cert, p);
 		if (ppem) {
-			if (!PEM_write_X509(stdout, xp))
+			if (!PEM_write_X509(stdout, cert->x509))
 				errx(1, "PEM_write_X509: unable to write cert");
 		}
 		free(buf);
 		geofeed_free(p);
-		X509_free(xp);
+		cert_free(cert);
+		cert = NULL;
 	}
 
 	EVP_cleanup();

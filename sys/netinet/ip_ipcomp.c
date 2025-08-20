@@ -1,4 +1,4 @@
-/* $OpenBSD: ip_ipcomp.c,v 1.93 2025/03/02 21:28:32 bluhm Exp $ */
+/* $OpenBSD: ip_ipcomp.c,v 1.95 2025/07/08 00:47:41 jsg Exp $ */
 
 /*
  * Copyright (c) 2001 Jean-Jacques Bernard-Gundol (jj@wabbitt.org)
@@ -40,7 +40,6 @@
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <netinet/ip_var.h>
 
 #ifdef INET6
 #include <netinet/ip6.h>
@@ -59,7 +58,7 @@
 #ifdef ENCDEBUG
 #define DPRINTF(fmt, args...)						\
 	do {								\
-		if (encdebug)						\
+		if (atomic_load_int(&encdebug))				\
 			printf("%s: " fmt "\n", __func__, ## args);	\
 	} while (0)
 #else

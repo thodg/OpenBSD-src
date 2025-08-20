@@ -1,4 +1,4 @@
-/*	$OpenBSD: crl.c,v 1.44 2025/02/28 13:46:09 tb Exp $ */
+/*	$OpenBSD: crl.c,v 1.50 2025/07/08 13:25:54 tb Exp $ */
 /*
  * Copyright (c) 2024 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -17,6 +17,7 @@
  */
 
 #include <err.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -24,6 +25,8 @@
 #include <openssl/x509.h>
 
 #include "extern.h"
+
+static pthread_rwlock_t	 crl_lk = PTHREAD_RWLOCK_INITIALIZER;
 
 /*
  * Check CRL Number is present, non-critical and in [0, 2^159-1].
@@ -169,6 +172,33 @@ crl_check_revoked(const char *fn, X509_CRL *x509_crl)
 	return 1;
 }
 
+static int
+crl_check_sigalg(const char *fn, const struct crl *crl)
+{
+	const X509_CRL		*x = crl->x509_crl;
+	const X509_ALGOR	*alg = NULL, *tbsalg;
+
+	/* Retrieve AlgorithmIdentifier from CertificateList and TBSCertList. */
+	X509_CRL_get0_signature(x, NULL, &alg);
+	if (alg == NULL) {
+		warnx("%s: missing signatureAlgorithm in certificateList", fn);
+		return 0;
+	}
+	if ((tbsalg = X509_CRL_get0_tbs_sigalg(x)) == NULL) {
+		warnx("%s: missing signature in tbsCertList", fn);
+		return 0;
+	}
+
+	/* Unlike X509_verify(), X509_CRL_verify() does not check this. */
+	if (X509_ALGOR_cmp(alg, tbsalg) != 0) {
+		warnx("%s: RFC 5280, 5.1.1.2: signatureAlgorithm and signature "
+		    "AlgorithmIdentifier mismatch", fn);
+		return 0;
+	}
+
+	return x509_check_tbs_sigalg(fn, tbsalg);
+}
+
 struct crl *
 crl_parse(const char *fn, const unsigned char *der, size_t len)
 {
@@ -176,7 +206,7 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 	struct crl		*crl;
 	const X509_NAME		*name;
 	const ASN1_TIME		*at;
-	int			 count, nid, rc = 0;
+	int			 count, rc = 0;
 
 	/* just fail for empty buffers, the warning was printed elsewhere */
 	if (der == NULL)
@@ -207,18 +237,8 @@ crl_parse(const char *fn, const unsigned char *der, size_t len)
 	if (!x509_valid_name(fn, "issuer", name))
 		goto out;
 
-	if ((nid = X509_CRL_get_signature_nid(crl->x509_crl)) == NID_undef) {
-		warnx("%s: unknown signature type", fn);
+	if (!crl_check_sigalg(fn, crl))
 		goto out;
-	}
-	if (experimental && nid == NID_ecdsa_with_SHA256) {
-		if (verbose)
-			warnx("%s: P-256 support is experimental", fn);
-	} else if (nid != NID_sha256WithRSAEncryption) {
-		warnx("%s: RFC 7935: wrong signature algorithm %s, want %s",
-		    fn, nid2str(nid), LN_sha256WithRSAEncryption);
-		goto out;
-	}
 
 	/*
 	 * RFC 6487, section 5: AKI and crlNumber MUST be present, no other
@@ -299,9 +319,10 @@ RB_GENERATE_STATIC(crl_tree, crl, entry, crlcmp);
  * Find a CRL based on the auth SKI value and manifest path.
  */
 struct crl *
-crl_get(struct crl_tree *crlt, const struct auth *a)
+crl_get(struct crl_tree *crls, const struct auth *a)
 {
-	struct crl	find;
+	struct crl	find, *crl;
+	int		error;
 
 	/* XXX - this should be removed, but filemode relies on it. */
 	if (a == NULL)
@@ -310,13 +331,26 @@ crl_get(struct crl_tree *crlt, const struct auth *a)
 	find.aki = a->cert->ski;
 	find.mftpath = a->cert->mft;
 
-	return RB_FIND(crl_tree, crlt, &find);
+	if ((error = pthread_rwlock_rdlock(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_rdlock: %s", strerror(error));
+	crl = RB_FIND(crl_tree, crls, &find);
+	if ((error = pthread_rwlock_unlock(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_unlock: %s", strerror(error));
+	return crl;
 }
 
 int
-crl_insert(struct crl_tree *crlt, struct crl *crl)
+crl_insert(struct crl_tree *crls, struct crl *crl)
 {
-	return RB_INSERT(crl_tree, crlt, crl) == NULL;
+	int error, rv;
+
+	if ((error = pthread_rwlock_wrlock(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_wrlock: %s", strerror(error));
+	rv = RB_INSERT(crl_tree, crls, crl) == NULL;
+	if ((error = pthread_rwlock_unlock(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_unlock: %s", strerror(error));
+
+	return rv;
 }
 
 void
@@ -331,12 +365,19 @@ crl_free(struct crl *crl)
 }
 
 void
-crl_tree_free(struct crl_tree *crlt)
+crl_tree_free(struct crl_tree *crls)
 {
 	struct crl	*crl, *tcrl;
+	int error;
 
-	RB_FOREACH_SAFE(crl, crl_tree, crlt, tcrl) {
-		RB_REMOVE(crl_tree, crlt, crl);
+	if ((error = pthread_rwlock_wrlock(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_wrlock: %s", strerror(error));
+	RB_FOREACH_SAFE(crl, crl_tree, crls, tcrl) {
+		RB_REMOVE(crl_tree, crls, crl);
 		crl_free(crl);
 	}
+	if ((error = pthread_rwlock_unlock(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_unlock: %s", strerror(error));
+	if ((error = pthread_rwlock_destroy(&crl_lk)) != 0)
+		errx(1, "pthread_rwlock_destroy: %s", strerror(error));
 }

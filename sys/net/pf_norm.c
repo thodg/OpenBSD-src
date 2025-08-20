@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_norm.c,v 1.234 2025/02/01 21:10:02 bluhm Exp $ */
+/*	$OpenBSD: pf_norm.c,v 1.236 2025/07/07 02:28:50 jsg Exp $ */
 
 /*
  * Copyright 2001 Niels Provos <provos@citi.umich.edu>
@@ -27,15 +27,10 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include "pflog.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/filio.h>
-#include <sys/fcntl.h>
 #include <sys/socket.h>
-#include <sys/kernel.h>
 #include <sys/time.h>
 #include <sys/pool.h>
 #include <sys/syslog.h>
@@ -43,7 +38,6 @@
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/if_pflog.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
@@ -55,11 +49,9 @@
 #include <netinet/udp.h>
 
 #ifdef INET6
-#include <netinet6/in6_var.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet/icmp6.h>
-#include <netinet6/nd6.h>
 #endif /* INET6 */
 
 #include <net/pfvar.h>
@@ -168,7 +160,7 @@ pf_normalize_init(void)
 	    IPL_SOFTNET, 0, "pfstscr", NULL);
 
 	pool_sethiwat(&pf_frag_pl, PFFRAG_FRAG_HIWAT);
-	pool_sethardlimit(&pf_frent_pl, PFFRAG_FRENT_HIWAT, NULL, 0);
+	pool_sethardlimit(&pf_frent_pl, PFFRAG_FRENT_HIWAT);
 
 	TAILQ_INIT(&pf_fragqueue);
 

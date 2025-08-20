@@ -1,4 +1,4 @@
-/* $OpenBSD: bn_mul.c,v 1.39 2023/07/08 12:21:58 beck Exp $ */
+/* $OpenBSD: bn_mul.c,v 1.43 2025/08/14 15:15:04 jsing Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -57,6 +57,7 @@
  */
 
 #include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -73,7 +74,7 @@
  */
 #ifndef HAVE_BN_MUL_COMBA4
 void
-bn_mul_comba4(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b)
+bn_mul_comba4(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b)
 {
 	BN_ULONG c0, c1, c2;
 
@@ -103,13 +104,73 @@ bn_mul_comba4(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b)
 #endif
 
 /*
+ * bn_mul_comba6() computes r[] = a[] * b[] using Comba multiplication
+ * (https://everything2.com/title/Comba+multiplication), where a and b are both
+ * six word arrays, producing a 12 word array result.
+ */
+#ifndef HAVE_BN_MUL_COMBA6
+void
+bn_mul_comba6(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b)
+{
+	BN_ULONG c0, c1, c2;
+
+	bn_mulw_addtw(a[0], b[0],  0,  0,  0, &c2, &c1, &r[0]);
+
+	bn_mulw_addtw(a[0], b[1],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[1], b[0], c2, c1, c0, &c2, &c1, &r[1]);
+
+	bn_mulw_addtw(a[2], b[0],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[1], b[1], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[0], b[2], c2, c1, c0, &c2, &c1, &r[2]);
+
+	bn_mulw_addtw(a[0], b[3],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[1], b[2], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[2], b[1], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[3], b[0], c2, c1, c0, &c2, &c1, &r[3]);
+
+	bn_mulw_addtw(a[4], b[0],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[3], b[1], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[2], b[2], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[1], b[3], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[0], b[4], c2, c1, c0, &c2, &c1, &r[4]);
+
+	bn_mulw_addtw(a[0], b[5],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[1], b[4], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[2], b[3], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[3], b[2], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[4], b[1], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[5], b[0], c2, c1, c0, &c2, &c1, &r[5]);
+
+	bn_mulw_addtw(a[5], b[1],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[4], b[2], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[3], b[3], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[2], b[4], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[1], b[5], c2, c1, c0, &c2, &c1, &r[6]);
+
+	bn_mulw_addtw(a[2], b[5],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[3], b[4], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[4], b[3], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[5], b[2], c2, c1, c0, &c2, &c1, &r[7]);
+
+	bn_mulw_addtw(a[5], b[3],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[4], b[4], c2, c1, c0, &c2, &c1, &c0);
+	bn_mulw_addtw(a[3], b[5], c2, c1, c0, &c2, &c1, &r[8]);
+
+	bn_mulw_addtw(a[4], b[5],  0, c2, c1, &c2, &c1, &c0);
+	bn_mulw_addtw(a[5], b[4], c2, c1, c0, &c2, &c1, &r[9]);
+
+	bn_mulw_addtw(a[5], b[5],  0, c2, c1, &c2, &r[11], &r[10]);
+}
+#endif
+
+/*
  * bn_mul_comba8() computes r[] = a[] * b[] using Comba multiplication
  * (https://everything2.com/title/Comba+multiplication), where a and b are both
  * eight word arrays, producing a 16 word array result.
  */
 #ifndef HAVE_BN_MUL_COMBA8
 void
-bn_mul_comba8(BN_ULONG *r, BN_ULONG *a, BN_ULONG *b)
+bn_mul_comba8(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b)
 {
 	BN_ULONG c0, c1, c2;
 
@@ -338,14 +399,16 @@ BN_mul(BIGNUM *r, const BIGNUM *a, const BIGNUM *b, BN_CTX *ctx)
 	if (rr == NULL)
 		goto err;
 
-	rn = a->top + b->top;
-	if (rn < a->top)
+	if (a->top > INT_MAX - b->top)
 		goto err;
+	rn = a->top + b->top;
 	if (!bn_wexpand(rr, rn))
 		goto err;
 
 	if (a->top == 4 && b->top == 4) {
 		bn_mul_comba4(rr->d, a->d, b->d);
+	} else if (a->top == 6 && b->top == 6) {
+		bn_mul_comba6(rr->d, a->d, b->d);
 	} else if (a->top == 8 && b->top == 8) {
 		bn_mul_comba8(rr->d, a->d, b->d);
 	} else {

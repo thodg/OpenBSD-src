@@ -879,7 +879,7 @@ _gmonparam
 _mcleanup
 _monstartup
 moncontrol
-monstartup
+_gmon_alloc
 
 /* hash */
 MD5Data
@@ -1368,13 +1368,14 @@ __freadptr
 __freadptrinc
 __fseterr
 __fwriting
-__sF
-__srget
-__swbuf
+__stderr
+__stdin
+__stdout
 asprintf
 clearerr
 dprintf
 fclose
+fdclose
 fdopen
 feof
 ferror

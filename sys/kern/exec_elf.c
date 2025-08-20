@@ -1,4 +1,4 @@
-/*	$OpenBSD: exec_elf.c,v 1.191 2024/09/15 23:13:19 deraadt Exp $	*/
+/*	$OpenBSD: exec_elf.c,v 1.193 2025/07/31 16:09:59 kettenis Exp $	*/
 
 /*
  * Copyright (c) 1996 Per Fogelstrom
@@ -97,7 +97,7 @@ int	elf_check_header(Elf_Ehdr *);
 int	elf_read_from(struct proc *, struct vnode *, u_long, void *, int);
 void	elf_load_psection(struct exec_vmcmd_set *, struct vnode *,
 	    Elf_Phdr *, Elf_Addr *, Elf_Addr *, int *, int);
-int	elf_os_pt_note_name(Elf_Note *);
+int	elf_os_pt_note_name(Elf_Note *, int *);
 int	elf_os_pt_note(struct proc *, struct exec_package *, Elf_Ehdr *, int *);
 int	elf_read_pintable(struct proc *p, struct vnode *vp, Elf_Phdr *pp,
 	    u_int **pinp, int is_ldso, size_t len);
@@ -120,10 +120,6 @@ struct elf_note_name {
 } elf_note_names[] = {
 	{ "OpenBSD",	ELF_NOTE_NAME_OPENBSD },
 };
-
-#define	ELFROUNDSIZE	sizeof(Elf_Word)
-#define	elfround(x)	roundup((x), ELFROUNDSIZE)
-
 
 /*
  * Check header for validity; return 0 for ok, ENOEXEC if error
@@ -1036,7 +1032,7 @@ exec_elf_fixup(struct proc *p, struct exec_package *epp)
 }
 
 int
-elf_os_pt_note_name(Elf_Note *np)
+elf_os_pt_note_name(Elf_Note *np, int *typep)
 {
 	int i, j;
 
@@ -1052,8 +1048,10 @@ elf_os_pt_note_name(Elf_Note *np)
 		for (j = np->descsz; j < elfround(np->descsz); j++)
 			if (((char *)(np + 1))[j] != '\0')
 				continue;
-		if (strcmp((char *)(np + 1), elf_note_names[i].name) == 0)
+		if (strcmp((char *)(np + 1), elf_note_names[i].name) == 0) {
+			*typep = np->type;
 			return elf_note_names[i].id;
+		}
 	}
 	return (0);
 }
@@ -1098,6 +1096,7 @@ elf_os_pt_note(struct proc *p, struct exec_package *epp, Elf_Ehdr *eh, int *name
 
 		for (offset = 0; offset < ph->p_filesz; offset += total) {
 			Elf_Note *np2 = (Elf_Note *)((char *)np + offset);
+			int name, type;
 
 			if (offset + sizeof(Elf_Note) > ph->p_filesz)
 				break;
@@ -1105,7 +1104,11 @@ elf_os_pt_note(struct proc *p, struct exec_package *epp, Elf_Ehdr *eh, int *name
 			    elfround(np2->descsz);
 			if (offset + total > ph->p_filesz)
 				break;
-			names |= elf_os_pt_note_name(np2);
+			name = elf_os_pt_note_name(np2, &type);
+			if (name == ELF_NOTE_NAME_OPENBSD &&
+			    type == NT_OPENBSD_PROF)
+				epp->ep_flags |= EXEC_PROFILE;
+			names |= name;
 		}
 	}
 
@@ -1146,8 +1149,6 @@ uvm_coredump_walk_cb	coredump_walk_elf;
 
 int	coredump_notes_elf(struct proc *, void *, size_t *);
 int	coredump_note_elf(struct proc *, void *, size_t *);
-int	coredump_writenote_elf(struct proc *, void *, Elf_Note *,
-	    const char *, void *);
 
 extern vaddr_t sigcode_va;
 extern vsize_t sigcode_sz;
@@ -1545,9 +1546,6 @@ coredump_note_elf(struct proc *p, void *iocookie, size_t *sizep)
 #ifdef PT_GETFPREGS
 	struct fpreg freg;
 #endif
-#ifdef PT_PACMASK
-	register_t pacmask[2];
-#endif
 
 	size = 0;
 
@@ -1592,27 +1590,14 @@ coredump_note_elf(struct proc *p, void *iocookie, size_t *sizep)
 	size += notesize;
 #endif
 
-#ifdef PT_PACMASK
-	notesize = sizeof(nhdr) + elfround(namesize) +
-	    elfround(sizeof(pacmask));
-	if (iocookie) {
-		pacmask[0] = pacmask[1] = process_get_pacmask(p);
-
-		nhdr.namesz = namesize;
-		nhdr.descsz = sizeof(pacmask);
-		nhdr.type = NT_OPENBSD_PACMASK;
-
-		error = coredump_writenote_elf(p, iocookie, &nhdr,
-		    name, &pacmask);
-		if (error)
-			return (error);
-	}
-	size += notesize;
-#endif
-
 	*sizep = size;
-	/* XXX Add hook for machdep per-LWP notes. */
-	return (0);
+
+#ifdef __HAVE_COREDUMP_NOTE_ELF_MD
+	/* Add machdep per-thread notes. */
+	return coredump_note_elf_md(p, iocookie, name, sizep);
+#else
+	return 0;
+#endif
 }
 
 int

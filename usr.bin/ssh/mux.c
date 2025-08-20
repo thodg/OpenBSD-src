@@ -1,4 +1,4 @@
-/* $OpenBSD: mux.c,v 1.103 2024/10/12 10:50:37 jsg Exp $ */
+/* $OpenBSD: mux.c,v 1.105 2025/08/18 03:43:01 djm Exp $ */
 /*
  * Copyright (c) 2002-2008 Damien Miller <djm@openbsd.org>
  *
@@ -447,6 +447,8 @@ mux_master_process_new_session(struct ssh *ssh, u_int rid,
 	nc = channel_new(ssh, "session", SSH_CHANNEL_OPENING,
 	    new_fd[0], new_fd[1], new_fd[2], window, packetmax,
 	    CHAN_EXTENDED_WRITE, "client-session", CHANNEL_NONBLOCK_STDIO);
+	if (cctx->want_tty)
+		channel_set_tty(ssh, nc);
 
 	nc->ctl_chan = c->self;		/* link session -> control channel */
 	c->ctl_child_id = nc->self;	/* link control -> session channel */
@@ -918,7 +920,7 @@ mux_master_process_close_fwd(struct ssh *ssh, u_int rid,
 	} else {	/* local and dynamic forwards */
 		/* Ditto */
 		if (channel_cancel_lport_listener(ssh, &fwd, fwd.connect_port,
-		    &options.fwd_opts) == -1)
+		    &options.fwd_opts) != 1)
 			error_reason = "port not found";
 	}
 

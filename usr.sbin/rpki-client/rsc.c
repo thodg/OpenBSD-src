@@ -1,4 +1,4 @@
-/*	$OpenBSD: rsc.c,v 1.37 2024/11/13 12:51:04 tb Exp $ */
+/*	$OpenBSD: rsc.c,v 1.41 2025/08/19 11:30:20 job Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2022 Job Snijders <job@fastly.com>
@@ -17,6 +17,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <assert.h>
 #include <err.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,11 +31,10 @@
 #include <openssl/x509v3.h>
 
 #include "extern.h"
-
-extern ASN1_OBJECT	*rsc_oid;
+#include "rpki-asn1.h"
 
 /*
- * Types and templates for RSC eContent - RFC 9323
+ * RSC eContent definition in RFC 9323, section 4.
  */
 
 ASN1_ITEM_EXP ConstrainedASIdentifiers_it;
@@ -44,18 +44,9 @@ ASN1_ITEM_EXP FileNameAndHash_it;
 ASN1_ITEM_EXP ResourceBlock_it;
 ASN1_ITEM_EXP RpkiSignedChecklist_it;
 
-typedef struct {
-	ASIdOrRanges		*asnum;
-} ConstrainedASIdentifiers;
-
 ASN1_SEQUENCE(ConstrainedASIdentifiers) = {
 	ASN1_EXP_SEQUENCE_OF(ConstrainedASIdentifiers, asnum, ASIdOrRange, 0),
 } ASN1_SEQUENCE_END(ConstrainedASIdentifiers);
-
-typedef struct {
-	ASN1_OCTET_STRING		*addressFamily;
-	STACK_OF(IPAddressOrRange)	*addressesOrRanges;
-} ConstrainedIPAddressFamily;
 
 ASN1_SEQUENCE(ConstrainedIPAddressFamily) = {
 	ASN1_SIMPLE(ConstrainedIPAddressFamily, addressFamily,
@@ -64,18 +55,10 @@ ASN1_SEQUENCE(ConstrainedIPAddressFamily) = {
 	    IPAddressOrRange),
 } ASN1_SEQUENCE_END(ConstrainedIPAddressFamily);
 
-typedef STACK_OF(ConstrainedIPAddressFamily) ConstrainedIPAddrBlocks;
-DECLARE_STACK_OF(ConstrainedIPAddressFamily);
-
 ASN1_ITEM_TEMPLATE(ConstrainedIPAddrBlocks) =
 	ASN1_EX_TEMPLATE_TYPE(ASN1_TFLG_SEQUENCE_OF, 0, ConstrainedIPAddrBlocks,
 	    ConstrainedIPAddressFamily)
 ASN1_ITEM_TEMPLATE_END(ConstrainedIPAddrBlocks);
-
-typedef struct {
-	ConstrainedASIdentifiers	*asID;
-	ConstrainedIPAddrBlocks		*ipAddrBlocks;
-} ResourceBlock;
 
 ASN1_SEQUENCE(ResourceBlock) = {
 	ASN1_EXP_OPT(ResourceBlock, asID, ConstrainedASIdentifiers, 0),
@@ -83,34 +66,10 @@ ASN1_SEQUENCE(ResourceBlock) = {
 	    ConstrainedIPAddressFamily, 1)
 } ASN1_SEQUENCE_END(ResourceBlock);
 
-typedef struct {
-	ASN1_IA5STRING		*fileName;
-	ASN1_OCTET_STRING	*hash;
-} FileNameAndHash;
-
-DECLARE_STACK_OF(FileNameAndHash);
-
-#ifndef DEFINE_STACK_OF
-#define sk_ConstrainedIPAddressFamily_num(sk) \
-    SKM_sk_num(ConstrainedIPAddressFamily, (sk))
-#define sk_ConstrainedIPAddressFamily_value(sk, i) \
-    SKM_sk_value(ConstrainedIPAddressFamily, (sk), (i))
-
-#define sk_FileNameAndHash_num(sk)	SKM_sk_num(FileNameAndHash, (sk))
-#define sk_FileNameAndHash_value(sk, i)	SKM_sk_value(FileNameAndHash, (sk), (i))
-#endif
-
 ASN1_SEQUENCE(FileNameAndHash) = {
 	ASN1_OPT(FileNameAndHash, fileName, ASN1_IA5STRING),
 	ASN1_SIMPLE(FileNameAndHash, hash, ASN1_OCTET_STRING),
 } ASN1_SEQUENCE_END(FileNameAndHash);
-
-typedef struct {
-	ASN1_INTEGER			*version;
-	ResourceBlock			*resources;
-	X509_ALGOR			*digestAlgorithm;
-	STACK_OF(FileNameAndHash)	*checkList;
-} RpkiSignedChecklist;
 
 ASN1_SEQUENCE(RpkiSignedChecklist) = {
 	ASN1_EXP_OPT(RpkiSignedChecklist, version, ASN1_INTEGER, 0),
@@ -119,8 +78,8 @@ ASN1_SEQUENCE(RpkiSignedChecklist) = {
 	ASN1_SEQUENCE_OF(RpkiSignedChecklist, checkList, FileNameAndHash),
 } ASN1_SEQUENCE_END(RpkiSignedChecklist);
 
-DECLARE_ASN1_FUNCTIONS(RpkiSignedChecklist);
 IMPLEMENT_ASN1_FUNCTIONS(RpkiSignedChecklist);
+
 
 /*
  * Parse asID (inside ResourceBlock)
@@ -379,17 +338,19 @@ rsc_parse_econtent(const char *fn, struct rsc *rsc, const unsigned char *d,
  * Returns the RSC or NULL if the object was malformed.
  */
 struct rsc *
-rsc_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
-    size_t len)
+rsc_parse(struct cert **out_cert, const char *fn, int talid,
+    const unsigned char *der, size_t len)
 {
 	struct rsc		*rsc;
+	struct cert		*cert = NULL;
 	unsigned char		*cms;
 	size_t			 cmsz;
-	struct cert		*cert = NULL;
 	time_t			 signtime = 0;
 	int			 rc = 0;
 
-	cms = cms_parse_validate(x509, fn, der, len, rsc_oid, &cmsz,
+	assert(*out_cert == NULL);
+
+	cms = cms_parse_validate(&cert, fn, talid, der, len, rsc_oid, &cmsz,
 	    &signtime);
 	if (cms == NULL)
 		return NULL;
@@ -398,29 +359,7 @@ rsc_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 		err(1, NULL);
 	rsc->signtime = signtime;
 
-	if (!x509_get_aia(*x509, fn, &rsc->aia))
-		goto out;
-	if (!x509_get_aki(*x509, fn, &rsc->aki))
-		goto out;
-	if (!x509_get_ski(*x509, fn, &rsc->ski))
-		goto out;
-	if (rsc->aia == NULL || rsc->aki == NULL || rsc->ski == NULL) {
-		warnx("%s: RFC 6487 section 4.8: "
-		    "missing AIA, AKI or SKI X509 extension", fn);
-		goto out;
-	}
-
-	if (!x509_get_notbefore(*x509, fn, &rsc->notbefore))
-		goto out;
-	if (!x509_get_notafter(*x509, fn, &rsc->notafter))
-		goto out;
-
-	if (X509_get_ext_by_NID(*x509, NID_sinfo_access, -1) != -1) {
-		warnx("%s: RSC: EE cert must not have an SIA extension", fn);
-		goto out;
-	}
-
-	if (x509_any_inherits(*x509)) {
+	if (x509_any_inherits(cert->x509)) {
 		warnx("%s: inherit elements not allowed in EE cert", fn);
 		goto out;
 	}
@@ -428,18 +367,16 @@ rsc_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 	if (!rsc_parse_econtent(fn, rsc, cms, cmsz))
 		goto out;
 
-	if ((cert = cert_parse_ee_cert(fn, talid, *x509)) == NULL)
-		goto out;
-
 	rsc->valid = valid_rsc(fn, cert, rsc);
+
+	*out_cert = cert;
+	cert = NULL;
 
 	rc = 1;
  out:
 	if (rc == 0) {
 		rsc_free(rsc);
 		rsc = NULL;
-		X509_free(*x509);
-		*x509 = NULL;
 	}
 	cert_free(cert);
 	free(cms);
@@ -461,9 +398,6 @@ rsc_free(struct rsc *p)
 	for (i = 0; i < p->num_files; i++)
 		free(p->files[i].filename);
 
-	free(p->aia);
-	free(p->aki);
-	free(p->ski);
 	free(p->ips);
 	free(p->ases);
 	free(p->files);

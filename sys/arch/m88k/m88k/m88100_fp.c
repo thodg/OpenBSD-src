@@ -1,4 +1,4 @@
-/*	$OpenBSD: m88100_fp.c,v 1.7 2024/03/03 11:14:34 miod Exp $	*/
+/*	$OpenBSD: m88100_fp.c,v 1.9 2025/07/16 07:15:42 jsg Exp $	*/
 
 /*
  * Copyright (c) 2007, 2014, Miodrag Vallat.
@@ -361,7 +361,7 @@ m88100_fpu_imprecise_exception(struct trapframe *frame)
 	 * returning an inexact result.
 	 * However, there is nothing to do in this case, since the result
 	 * is not a floating-point value, and has been correctly put in
-	 * the destination register; we simply need to to ignore that
+	 * the destination register; we simply need to ignore that
 	 * exception.
 	 */
 	switch ((frame->tf_fpit >> 11) & 0x1f) {
@@ -384,7 +384,7 @@ m88100_fpu_imprecise_exception(struct trapframe *frame)
 		fmt = FTYPE_SNG;
 
 	sign = (frame->tf_fprh & FPRH_SIGN) != 0;
-	exp = ((int32_t)frame->tf_fpit) >> 20; /* signed, unbiaised exponent */
+	exp = ((int32_t)frame->tf_fpit) >> 20; /* signed, unbiased exponent */
 
 	if (fmt == FTYPE_SNG) {
 		exp += SNG_EXP_BIAS;

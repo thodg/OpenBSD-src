@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_timer.c,v 1.83 2025/02/12 21:28:11 bluhm Exp $	*/
+/*	$OpenBSD: tcp_timer.c,v 1.87 2025/07/08 00:47:41 jsg Exp $	*/
 /*	$NetBSD: tcp_timer.c,v 1.14 1996/02/13 23:44:09 christos Exp $	*/
 
 /*
@@ -36,9 +36,7 @@
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/protosw.h>
-#include <sys/kernel.h>
 #include <sys/pool.h>
 
 #include <net/route.h>
@@ -91,7 +89,7 @@ tcp_timer_enter(struct inpcb *inp, struct socket **so, struct tcpcb **tp,
 	KASSERT(timer < TCPT_NTIMERS);
 
 	NET_LOCK_SHARED();
-	*so = in_pcbsolock_ref(inp);
+	*so = in_pcbsolock(inp);
 	if (*so == NULL) {
 		*tp = NULL;
 		return -1;
@@ -109,7 +107,7 @@ tcp_timer_enter(struct inpcb *inp, struct socket **so, struct tcpcb **tp,
 static inline void
 tcp_timer_leave(struct inpcb *inp, struct socket *so)
 {
-	in_pcbsounlock_rele(inp, so);
+	in_pcbsounlock(inp, so);
 	NET_UNLOCK_SHARED();
 	in_pcbunref(inp);
 }
@@ -237,7 +235,7 @@ tcp_timer_rexmt(void *arg)
 		sin.sin_family = AF_INET;
 		sin.sin_addr = inp->inp_faddr;
 
-		in_pcbsounlock_rele(inp, so);
+		in_pcbsounlock(inp, so);
 		in_pcbunref(inp);
 
 		icmp_mtudisc(&icmp, rtableid);
@@ -277,7 +275,7 @@ tcp_timer_rexmt(void *arg)
 	 * lots more sophisticated searching to find the right
 	 * value here...
 	 */
-	if (ip_mtudisc &&
+	if (atomic_load_int(&ip_mtudisc) &&
 	    TCPS_HAVEESTABLISHED(tp->t_state) &&
 	    tp->t_rxtshift > TCP_MAXRXTSHIFT / 6) {
 		struct rtentry *rt = NULL;
@@ -540,20 +538,4 @@ tcp_timer_2msl(void *arg)
 		tcp_trace(TA_TIMER, ostate, tp, otp, NULL, TCPT_2MSL, 0);
  out:
 	tcp_timer_leave(inp, so);
-}
-
-void
-tcp_timer_reaper(void *arg)
-{
-	struct tcpcb *tp = arg;
-
-	/*
-	 * This timer is necessary to delay the pool_put() after all timers
-	 * have finished, even if they were sleeping to grab the net lock.
-	 * Putting the pool_put() in a timer is sufficient as all timers run
-	 * from the same timeout thread.  Note that neither softnet thread nor
-	 * user process may access the tcpcb after arming the reaper timer.
-	 * Freeing may run in parallel as it does not grab the net lock.
-	 */
-	pool_put(&tcpcb_pool, tp);
 }

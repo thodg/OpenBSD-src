@@ -1,4 +1,4 @@
-/* $OpenBSD: ec_local.h,v 1.67 2025/03/24 13:07:04 jsing Exp $ */
+/* $OpenBSD: ec_local.h,v 1.70 2025/08/03 15:07:57 jsing Exp $ */
 /*
  * Originally written by Bodo Moeller for the OpenSSL project.
  */
@@ -76,6 +76,7 @@
 #include <openssl/objects.h>
 
 #include "bn_local.h"
+#include "ec_internal.h"
 
 __BEGIN_HIDDEN_DECLS
 
@@ -84,6 +85,9 @@ typedef struct ec_method_st {
 	    const BIGNUM *b, BN_CTX *);
 	int (*group_get_curve)(const EC_GROUP *, BIGNUM *p, BIGNUM *a,
 	    BIGNUM *b, BN_CTX *);
+
+	int (*point_set_to_infinity)(const EC_GROUP *, EC_POINT *);
+	int (*point_is_at_infinity)(const EC_GROUP *, const EC_POINT *);
 
 	int (*point_is_on_curve)(const EC_GROUP *, const EC_POINT *, BN_CTX *);
 	int (*point_cmp)(const EC_GROUP *, const EC_POINT *a, const EC_POINT *b,
@@ -155,6 +159,10 @@ struct ec_group_st {
 
 	/* Montgomery context used by EC_GFp_mont_method. */
 	BN_MONT_CTX *mont_ctx;
+
+	EC_FIELD_MODULUS fm;
+	EC_FIELD_ELEMENT fe_a;
+	EC_FIELD_ELEMENT fe_b;
 } /* EC_GROUP */;
 
 struct ec_point_st {
@@ -168,10 +176,15 @@ struct ec_point_st {
 	BIGNUM *Y;
 	BIGNUM *Z;
 	int Z_is_one; /* enable optimized point arithmetics for special case */
+
+	EC_FIELD_ELEMENT fe_x;
+	EC_FIELD_ELEMENT fe_y;
+	EC_FIELD_ELEMENT fe_z;
 } /* EC_POINT */;
 
 const EC_METHOD *EC_GFp_simple_method(void);
 const EC_METHOD *EC_GFp_mont_method(void);
+const EC_METHOD *EC_GFp_homogeneous_projective_method(void);
 
 /* Compute r = scalar1 * point1 + scalar2 * point2 in non-constant time. */
 int ec_wnaf_mul(const EC_GROUP *group, EC_POINT *r, const BIGNUM *scalar1,

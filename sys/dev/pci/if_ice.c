@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ice.c,v 1.39 2025/04/08 07:36:02 stsp Exp $	*/
+/*	$OpenBSD: if_ice.c,v 1.58 2025/08/19 11:46:52 stsp Exp $	*/
 
 /*  Copyright (c) 2024, Intel Corporation
  *  All rights reserved.
@@ -84,6 +84,10 @@
 
 #include <netinet/in.h>
 #include <netinet/if_ether.h>
+#include <netinet/tcp.h>
+#include <netinet/tcp_timer.h>
+#include <netinet/tcp_var.h>
+#include <netinet/udp.h>
 
 #define STRUCT_HACK_VAR_LEN
 
@@ -100,6 +104,12 @@
 
 #include "if_icereg.h"
 #include "if_icevar.h"
+
+/*
+ * Our network stack cannot handle packets greater than MAXMCLBYTES.
+ * This interface cannot handle packets greater than ICE_TSO_SIZE.
+ */
+CTASSERT(MAXMCLBYTES < ICE_TSO_SIZE);
 
 /**
  * @var ice_driver_version
@@ -129,10 +139,14 @@ const uint8_t ice_rc_version = 0;
 typedef void *ice_match_t;
 
 static const struct pci_matchid ice_devices[] = {
-	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E810_XXV_SFP },
-#if 0 /* no hardware available for testing: */
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E810_C_QSFP },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E810_C_SFP },
 	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E810_XXV_QSFP },
-#endif
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E810_XXV_SFP },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E823_L_SFP },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E823_L_10G },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E823_L_1G },
+	{ PCI_VENDOR_INTEL, PCI_PRODUCT_INTEL_E823_L_QSFP },
 };
 
 int
@@ -247,6 +261,8 @@ struct ice_intr_vector {
 
 #define ICE_MAX_VECTORS			8 /* XXX this is pretty arbitrary */
 
+static struct rwlock ice_sff_lock = RWLOCK_INITIALIZER("icesff");
+
 struct ice_softc {
 	struct device sc_dev;
 	struct arpcom		sc_ac;
@@ -287,35 +303,14 @@ struct ice_softc {
 	struct ice_resmgr os_imgr;
 
 	/* isc_* fields inherited from FreeBSD iflib struct if_softc_ctx */
-	int isc_vectors;
-	int isc_nrxqsets;
-	int isc_ntxqsets;
-	int isc_msix_bar;
 	int isc_tx_nsegments;
 	int isc_ntxd[8];
 	int isc_nrxd[8];
-	uint32_t isc_txqsizes[8];
-	uint32_t isc_rxqsizes[8];
-	uint8_t isc_txd_size[8];
-	uint8_t isc_rxd_size[8];
 	int isc_tx_tso_segments_max;
 	int isc_tx_tso_size_max;
 	int isc_tx_tso_segsize_max;
-	int isc_tx_csum_flags;
-	int isc_capabilities;
-	int isc_capenable;
-	int isc_rss_table_size;
-	int isc_rss_table_mask;
 	int isc_nrxqsets_max;
 	int isc_ntxqsets_max;
-	uint16_t isc_rxd_buf_size[8]; /* set at init time by driver, 0
-				         means use iflib-calculated size
-				         based on isc_max_frame_size */
-	uint16_t isc_max_frame_size; /* set at init time by driver */
-	uint16_t isc_min_frame_size; /* set at init time by driver, only used if
-					IFLIB_NEED_ETHER_PAD is set. */
-	uint32_t isc_pause_frames;   /* set by driver for iflib_timer to detect */
-	int isc_disable_msix;
 
 	/* Tx/Rx queue managers */
 	struct ice_resmgr tx_qmgr;
@@ -866,7 +861,7 @@ enum ice_memcpy_type {
 };
 
 /*
- * ice_calloc - Allocate an array of elementes
+ * ice_calloc - Allocate an array of elements
  * @hw: the hardware private structure
  * @count: number of elements to allocate
  * @size: the size of each element
@@ -982,12 +977,11 @@ ice_set_mac_type(struct ice_hw *hw)
 	switch (sc->sc_pid) {
 #if 0
 	case ICE_DEV_ID_E810C_BACKPLANE:
-	case ICE_DEV_ID_E810C_QSFP:
-	case ICE_DEV_ID_E810C_SFP:
 	case ICE_DEV_ID_E810_XXV_BACKPLANE:
-	case ICE_DEV_ID_E810_XXV_QSFP:
-	case ICE_DEV_ID_E810_XXV_SFP:
 #endif
+	case PCI_PRODUCT_INTEL_E810_C_QSFP:
+	case PCI_PRODUCT_INTEL_E810_C_SFP:
+	case PCI_PRODUCT_INTEL_E810_XXV_QSFP:
 	case PCI_PRODUCT_INTEL_E810_XXV_SFP:
 		hw->mac_type = ICE_MAC_E810;
 		break;
@@ -1001,19 +995,21 @@ ice_set_mac_type(struct ice_hw *hw)
 	case ICE_DEV_ID_E822L_BACKPLANE:
 	case ICE_DEV_ID_E822L_SFP:
 	case ICE_DEV_ID_E822L_SGMII:
-	case ICE_DEV_ID_E823L_10G_BASE_T:
-	case ICE_DEV_ID_E823L_1GBE:
+#endif
+	case PCI_PRODUCT_INTEL_E823_L_10G:
+	case PCI_PRODUCT_INTEL_E823_L_1G:
+	case PCI_PRODUCT_INTEL_E823_L_QSFP:
+	case PCI_PRODUCT_INTEL_E823_L_SFP:
+#if 0
 	case ICE_DEV_ID_E823L_BACKPLANE:
-	case ICE_DEV_ID_E823L_QSFP:
-	case ICE_DEV_ID_E823L_SFP:
 	case ICE_DEV_ID_E823C_10G_BASE_T:
 	case ICE_DEV_ID_E823C_BACKPLANE:
 	case ICE_DEV_ID_E823C_QSFP:
 	case ICE_DEV_ID_E823C_SFP:
 	case ICE_DEV_ID_E823C_SGMII:
+#endif
 		hw->mac_type = ICE_MAC_GENERIC;
 		break;
-#endif
 	default:
 		hw->mac_type = ICE_MAC_UNKNOWN;
 		break;
@@ -13574,6 +13570,160 @@ ice_down(struct ice_softc *sc)
 	return 0;
 }
 
+/* Read SFF EEPROM (0x06EE) */
+int
+ice_aq_sff_eeprom(struct ice_hw *hw, uint16_t lport, uint8_t bus_addr,
+    uint16_t mem_addr, uint8_t page, uint8_t set_page,
+    uint8_t *data, uint8_t length, int write, struct ice_sq_cd *cd)
+{
+	struct ice_aqc_sff_eeprom *cmd;
+	struct ice_aq_desc desc;
+	int status;
+
+	if (!data || (mem_addr & 0xff00))
+		return ICE_ERR_PARAM;
+
+	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_sff_eeprom);
+	cmd = &desc.params.read_write_sff_param;
+	desc.flags = htole16(ICE_AQ_FLAG_RD);
+	cmd->lport_num = (uint8_t)(lport & 0xff);
+	cmd->lport_num_valid = (uint8_t)((lport >> 8) & 0x01);
+	cmd->i2c_bus_addr = htole16(
+	    ((bus_addr >> 1) & ICE_AQC_SFF_I2CBUS_7BIT_M) |
+	    ((set_page << ICE_AQC_SFF_SET_EEPROM_PAGE_S) &
+	    ICE_AQC_SFF_SET_EEPROM_PAGE_M));
+	cmd->i2c_mem_addr = htole16(mem_addr & 0xff);
+	cmd->eeprom_page = htole16((uint16_t)page << ICE_AQC_SFF_EEPROM_PAGE_S);
+	if (write)
+		cmd->i2c_bus_addr |= htole16(ICE_AQC_SFF_IS_WRITE);
+
+	status = ice_aq_send_cmd(hw, &desc, data, length, cd);
+	return status;
+}
+
+int
+ice_rw_sff_eeprom(struct ice_softc *sc, uint16_t dev_addr, uint16_t offset,
+    uint8_t page, uint8_t* data, uint16_t length, uint8_t set_page, int write)
+{
+	struct ice_hw *hw = &sc->hw;
+	int ret = 0, retries = 0;
+	int status;
+
+	if (length > 16)
+		return (EINVAL);
+
+	if (ice_test_state(&sc->state, ICE_STATE_RECOVERY_MODE))
+		return (ENOSYS);
+
+	if (ice_test_state(&sc->state, ICE_STATE_NO_MEDIA))
+		return (ENXIO);
+
+	do {
+		status = ice_aq_sff_eeprom(hw, 0, dev_addr, offset, page,
+		    set_page, data, length, write, NULL);
+		if (!status) {
+			ret = 0;
+			break;
+		}
+		if (status == ICE_ERR_AQ_ERROR &&
+		    hw->adminq.sq_last_status == ICE_AQ_RC_EBUSY) {
+			ret = EBUSY;
+			continue;
+		}
+		if (status == ICE_ERR_AQ_ERROR &&
+		    hw->adminq.sq_last_status == ICE_AQ_RC_EACCES) {
+			/* FW says I2C access isn't supported */
+			ret = EACCES;
+			break;
+		}
+		if (status == ICE_ERR_AQ_ERROR &&
+		    hw->adminq.sq_last_status == ICE_AQ_RC_EPERM) {
+			ret = EPERM;
+			break;
+		} else {
+			ret = EIO;
+			break;
+		}
+	} while (retries++ < ICE_I2C_MAX_RETRIES);
+
+	return (ret);
+}
+
+/*
+ * Read from the SFF eeprom.
+ * The I2C device address is typically 0xA0 or 0xA2. For more details on
+ * the contents of an SFF eeprom, refer to SFF-8724 (SFP), SFF-8636 (QSFP),
+ * and SFF-8024 (both).
+ */
+int
+ice_read_sff_eeprom(struct ice_softc *sc, uint16_t dev_addr, uint16_t offset,
+    uint8_t page, uint8_t* data, uint16_t length)
+{
+	return ice_rw_sff_eeprom(sc, dev_addr, offset, page, data, length,
+	    0, 0);
+}
+
+/* Write to the SFF eeprom. */
+int
+ice_write_sff_eeprom(struct ice_softc *sc, uint16_t dev_addr, uint16_t offset,
+    uint8_t page, uint8_t* data, uint16_t length, uint8_t set_page)
+{
+	return ice_rw_sff_eeprom(sc, dev_addr, offset, page, data, length,
+	    1, set_page);
+}
+
+int
+ice_get_sffpage(struct ice_softc *sc, struct if_sffpage *sff)
+{
+	struct ice_hw *hw = &sc->hw;
+	struct ice_port_info *pi = hw->port_info;
+	struct ice_link_status *li = &pi->phy.link_info;
+	const uint16_t chunksize = 16;
+	uint16_t offset = 0;
+	uint8_t curpage = 0;
+	int error;
+
+	if (sff->sff_addr != IFSFF_ADDR_EEPROM &&
+	    sff->sff_addr != IFSFF_ADDR_DDM)
+		return (EINVAL);
+
+	if (li->module_type[0] == ICE_SFF8024_ID_NONE)
+		return (ENXIO);
+
+	if (sff->sff_addr == IFSFF_ADDR_EEPROM &&
+	    li->module_type[0] == ICE_SFF8024_ID_SFP) {
+		error = ice_read_sff_eeprom(sc, sff->sff_addr, 127, 0,
+		    &curpage, 1);
+		if (error)
+			return error;
+
+		if (curpage != sff->sff_page) {
+			error = ice_write_sff_eeprom(sc, sff->sff_addr, 127, 0,
+			    &sff->sff_page, 1, 1);
+			if (error)
+				return error;
+		}
+	}
+
+	for (; offset <= IFSFF_DATA_LEN - chunksize; offset += chunksize) {
+		error = ice_read_sff_eeprom(sc, sff->sff_addr, offset,
+		    sff->sff_page, &sff->sff_data[0] + offset, chunksize);
+		if (error)
+			return error;
+	}
+
+	if (sff->sff_addr == IFSFF_ADDR_EEPROM &&
+	    li->module_type[0] == ICE_SFF8024_ID_SFP &&
+	    curpage != sff->sff_page) {
+		error = ice_write_sff_eeprom(sc, sff->sff_addr, 127, 0,
+		    &curpage, 1, 1);
+		if (error)
+			return error;
+	}
+
+	return 0;
+}
+
 int
 ice_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 {
@@ -13643,6 +13793,13 @@ ice_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			}
 		}
 		break;
+	case SIOCGIFSFFPAGE:
+		error = rw_enter(&ice_sff_lock, RW_WRITE|RW_INTR);
+		if (error)
+			break;
+		error = ice_get_sffpage(sc, (struct if_sffpage *)data);
+		rw_exit(&ice_sff_lock);
+		break;
 	default:
 		error = ether_ioctl(ifp, &sc->sc_ac, cmd, data);
 		break;
@@ -13661,11 +13818,97 @@ ice_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 	return error;
 }
 
-uint64_t
-ice_tx_setup_offload(struct mbuf *m0, struct ice_tx_queue *txq,
-    unsigned int prod)
+/**
+ * ice_tso_detect_sparse - detect TSO packets with too many segments
+ *
+ * Hardware only transmits packets with a maximum of 8 descriptors. For TSO
+ * packets, hardware needs to be able to build the split packets using 8 or
+ * fewer descriptors. Additionally, the header must be contained within at
+ * most 3 descriptors.
+ *
+ * To verify this, we walk the headers to find out how many descriptors the
+ * headers require (usually 1). Then we ensure that, for each TSO segment, its
+ * data plus the headers are contained within 8 or fewer descriptors.
+ */
+int
+ice_tso_detect_sparse(struct mbuf *m, struct ether_extracted *ext,
+    bus_dmamap_t map)
 {
-	struct ether_extracted ext;
+	int count, curseg, i, hlen, segsz, seglen, hdrs, maxsegs;
+	bus_dma_segment_t *segs;
+	uint64_t paylen, outlen, nsegs;
+
+	curseg = hdrs = 0;
+
+	hlen = ETHER_HDR_LEN + ext->iphlen + ext->tcphlen;
+	outlen = MIN(9668, MAX(64, m->m_pkthdr.ph_mss));
+	paylen = m->m_pkthdr.len - hlen;
+	nsegs = (paylen + outlen - 1) / outlen;
+
+	segs = map->dm_segs;
+
+	/* First, count the number of descriptors for the header.
+	 * Additionally, make sure it does not span more than 3 segments.
+	 */
+	i = 0;
+	curseg = segs[0].ds_len;
+	while (hlen > 0) {
+		hdrs++;
+		if (hdrs > ICE_MAX_TSO_HDR_SEGS)
+			return (1);
+		if (curseg == 0) {
+			i++;
+			if (i == nsegs)
+				return (1);
+
+			curseg = segs[i].ds_len;
+		}
+		seglen = MIN(curseg, hlen);
+		curseg -= seglen;
+		hlen -= seglen;
+	}
+
+	maxsegs = ICE_MAX_TX_SEGS - hdrs;
+
+	/* We must count the headers, in order to verify that they take up
+	 * 3 or fewer descriptors. However, we don't need to check the data
+	 * if the total segments is small.
+	 */
+	if (nsegs <= maxsegs)
+		return (0);
+
+	count = 0;
+
+	/* Now check the data to make sure that each TSO segment is made up of
+	 * no more than maxsegs descriptors. This ensures that hardware will
+	 * be capable of performing TSO offload.
+	 */
+	while (paylen > 0) {
+		segsz = m->m_pkthdr.ph_mss;
+		while (segsz > 0 && paylen != 0) {
+			count++;
+			if (count > maxsegs)
+				return (1);
+			if (curseg == 0) {
+				i++;
+				if (i == nsegs)
+					return (1);
+				curseg = segs[i].ds_len;
+			}
+			seglen = MIN(curseg, segsz);
+			segsz -= seglen;
+			curseg -= seglen;
+			paylen -= seglen;
+		}
+		count = 0;
+	}
+
+	return (0);
+}
+
+uint64_t
+ice_tx_setup_offload(struct mbuf *m0, struct ether_extracted *ext)
+{
 	uint64_t offload = 0, hlen;
 
 #if NVLAN > 0
@@ -13679,22 +13922,34 @@ ice_tx_setup_offload(struct mbuf *m0, struct ice_tx_queue *txq,
 	    M_IPV4_CSUM_OUT|M_TCP_CSUM_OUT|M_UDP_CSUM_OUT|M_TCP_TSO))
 		return offload;
 
-	ether_extract_headers(m0, &ext);
-	hlen = ext.iphlen;
+	hlen = ext->iphlen;
 
-	if (ext.ip4) {
-		/* TODO: ipv4 checksum offload */
-		offload |= ICE_TX_DESC_CMD_IIPT_IPV4 << ICE_TXD_QW1_CMD_S;
-	} else if (ext.ip6)
+	if (ext->ip4) {
+		if (ISSET(m0->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT))
+			offload |= ICE_TX_DESC_CMD_IIPT_IPV4_CSUM <<
+			    ICE_TXD_QW1_CMD_S;
+		else
+			offload |= ICE_TX_DESC_CMD_IIPT_IPV4 <<
+			    ICE_TXD_QW1_CMD_S;
+	} else if (ext->ip6)
 		offload |= ICE_TX_DESC_CMD_IIPT_IPV6 << ICE_TXD_QW1_CMD_S;
+	else
+		return offload;
 
 	offload |= ((ETHER_HDR_LEN >> 1) << ICE_TX_DESC_LEN_MACLEN_S) <<
 	    ICE_TXD_QW1_OFFSET_S;
-	if (ext.ip4 || ext.ip6)
-		offload |= ((hlen >> 2) << ICE_TX_DESC_LEN_IPLEN_S) <<
-		    ICE_TXD_QW1_OFFSET_S;
+	offload |= ((hlen >> 2) << ICE_TX_DESC_LEN_IPLEN_S) <<
+	    ICE_TXD_QW1_OFFSET_S;
 
-	/* TODO: enable offloading features */
+	if (ext->tcp && ISSET(m0->m_pkthdr.csum_flags, M_TCP_CSUM_OUT)) {
+		offload |= ICE_TX_DESC_CMD_L4T_EOFT_TCP << ICE_TXD_QW1_CMD_S;
+		offload |= ((uint64_t)(ext->tcphlen >> 2) <<
+		    ICE_TX_DESC_LEN_L4_LEN_S) << ICE_TXD_QW1_OFFSET_S;
+	} else if (ext->udp && ISSET(m0->m_pkthdr.csum_flags, M_UDP_CSUM_OUT)) {
+		offload |= ICE_TX_DESC_CMD_L4T_EOFT_UDP << ICE_TXD_QW1_CMD_S;
+		offload |= ((uint64_t)(sizeof(*ext->udp) >> 2) <<
+		    ICE_TX_DESC_LEN_L4_LEN_S) << ICE_TXD_QW1_OFFSET_S;
+	}
 
 	return offload;
 }
@@ -13718,6 +13973,36 @@ ice_load_mbuf(bus_dma_tag_t dmat, bus_dmamap_t map, struct mbuf *m)
 }
 
 void
+ice_set_tso_context(struct mbuf *m0, struct ice_tx_queue *txq,
+    unsigned int prod, struct ether_extracted *ext)
+{
+	struct ice_tx_desc *ring;
+	struct ice_tx_ctx_desc *txd;
+	uint64_t qword1 = 0, paylen, outlen;
+
+	/*
+	 * The MSS should not be set to a lower value than 64.
+	 */
+	outlen = MAX(64, m0->m_pkthdr.ph_mss);
+	paylen = m0->m_pkthdr.len - ETHER_HDR_LEN - ext->iphlen - ext->tcphlen;
+
+	ring = ICE_DMA_KVA(&txq->tx_desc_mem);
+	txd = (struct ice_tx_ctx_desc *)&ring[prod];
+
+	qword1 |= ICE_TX_DESC_DTYPE_CTX;
+	qword1 |= ICE_TX_CTX_DESC_TSO << ICE_TXD_CTX_QW1_CMD_S;
+	qword1 |= paylen << ICE_TXD_CTX_QW1_TSO_LEN_S;
+	qword1 |= outlen << ICE_TXD_CTX_QW1_MSS_S;
+
+	htolem32(&txd->tunneling_params, 0);
+	htolem16(&txd->l2tag2, 0);
+	htolem16(&txd->rsvd, 0);
+	htolem64(&txd->qw1, qword1);
+
+	tcpstat_add(tcps_outpkttso, (paylen + outlen - 1) / outlen);
+}
+
+void
 ice_start(struct ifqueue *ifq)
 {
 	struct ifnet *ifp = ifq->ifq_if;
@@ -13734,6 +14019,7 @@ ice_start(struct ifqueue *ifq)
 	uint64_t offload;
 	uint64_t paddr;
 	uint64_t seglen;
+	struct ether_extracted ext;
 #if NBPFILTER > 0
 	caddr_t if_bpf;
 #endif
@@ -13766,21 +14052,52 @@ ice_start(struct ifqueue *ifq)
 		if (m == NULL)
 			break;
 
-		offload = ice_tx_setup_offload(m, txq, prod);
+		ether_extract_headers(m, &ext);
+		offload = ice_tx_setup_offload(m, &ext);
+
+		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO)) {
+			if (ext.tcp == NULL || m->m_pkthdr.ph_mss == 0 ||
+			    m->m_pkthdr.ph_mss > ICE_TXD_CTX_MAX_MSS) {
+				tcpstat_inc(tcps_outbadtso);
+				ifq->ifq_errors++;
+				m_freem(m);
+				continue;
+			}
+		}
 
 		txm = &txq->tx_map[prod];
 		map = txm->txm_map;
-#if 0
-		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO)) {
-			prod++;
-			prod &= mask;
-			free--;
-		}
-#endif
+
 		if (ice_load_mbuf(sc->sc_dmat, map, m) != 0) {
 			ifq->ifq_errors++;
 			m_freem(m);
 			continue;
+		}
+
+		if (ISSET(m->m_pkthdr.csum_flags, M_TCP_TSO)) {
+			if (ice_tso_detect_sparse(m, &ext, map)) {
+				bus_dmamap_unload(sc->sc_dmat, map);
+				if (m_defrag(m, M_DONTWAIT) != 0 ||
+				    bus_dmamap_load_mbuf(sc->sc_dmat, map, m,
+				    BUS_DMA_STREAMING | BUS_DMA_NOWAIT) != 0) {
+					tcpstat_inc(tcps_outbadtso);
+					ifq->ifq_errors++;
+					m_freem(m);
+					continue;
+				}
+				if (ice_tso_detect_sparse(m, &ext, map)) {
+					bus_dmamap_unload(sc->sc_dmat, map);
+					tcpstat_inc(tcps_outbadtso);
+					ifq->ifq_errors++;
+					m_freem(m);
+					continue;
+				}
+			}
+
+			ice_set_tso_context(m, txq, prod, &ext);
+			prod++;
+			prod &= mask;
+			free--;
 		}
 
 		bus_dmamap_sync(sc->sc_dmat, map, 0,
@@ -14229,7 +14546,6 @@ ice_disable_unsupported_features(ice_bitmap_t *bitmap)
 
 	/* Features not (yet?) supported by the OpenBSD driver. */
 	ice_clear_bit(ICE_FEATURE_DCB, bitmap);
-	ice_clear_bit(ICE_FEATURE_RSS, bitmap);
 	ice_clear_bit(ICE_FEATURE_TEMP_SENSOR, bitmap);
 	ice_clear_bit(ICE_FEATURE_TX_BALANCE, bitmap);
 }
@@ -14447,7 +14763,7 @@ ice_get_set_tx_topo(struct ice_hw *hw, uint8_t *buf, uint16_t buf_size,
 	if (set) {
 		ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_set_tx_topo);
 		cmd->set_flags = ICE_AQC_TX_TOPO_FLAGS_ISSUED;
-		/* requested to update a new topology, not a default topolgy */
+		/* requested to update a new topology, not a default topology */
 		if (buf)
 			cmd->set_flags |= ICE_AQC_TX_TOPO_FLAGS_SRC_RAM |
 					  ICE_AQC_TX_TOPO_FLAGS_LOAD_NEW;
@@ -17643,30 +17959,17 @@ ice_setup_scctx(struct ice_softc *sc)
 	 * a single queue pair.
 	 */
 	if (safe_mode || recovery_mode || !have_rss) {
-		sc->isc_ntxqsets = sc->isc_nrxqsets = 1;
 		sc->isc_ntxqsets_max = 1;
 		sc->isc_nrxqsets_max = 1;
 	} else {
-		sc->isc_ntxqsets = hw->func_caps.common_cap.rss_table_size;
-		sc->isc_nrxqsets = hw->func_caps.common_cap.rss_table_size;
-
 		sc->isc_ntxqsets_max = hw->func_caps.common_cap.num_txq;
 		sc->isc_nrxqsets_max = hw->func_caps.common_cap.num_rxq;
 	}
-
-	sc->isc_txqsizes[0] = roundup(sc->isc_ntxd[0]
-	    * sizeof(struct ice_tx_desc), DBA_ALIGN);
-	sc->isc_rxqsizes[0] = roundup(sc->isc_nrxd[0]
-	    * sizeof(union ice_32b_rx_flex_desc), DBA_ALIGN);
 
 	sc->isc_tx_nsegments = ICE_MAX_TX_SEGS;
 	sc->isc_tx_tso_segments_max = ICE_MAX_TSO_SEGS;
 	sc->isc_tx_tso_size_max = ICE_TSO_SIZE;
 	sc->isc_tx_tso_segsize_max = ICE_MAX_DMA_SEG_SIZE;
-#if 0
-	sc->isc_msix_bar = pci_msix_table_bar(dev);
-#endif
-	sc->isc_rss_table_size = hw->func_caps.common_cap.rss_table_size;
 #if 0
 	/*
 	 * If the driver loads in recovery mode, disable Tx/Rx functionality
@@ -17676,22 +17979,6 @@ ice_setup_scctx(struct ice_softc *sc)
 	else
 		scctx->isc_txrx = &ice_txrx;
 #endif
-	/*
-	 * If the driver loads in Safe mode or Recovery mode, disable
-	 * advanced features including hardware offloads.
-	 */
-	if (safe_mode || recovery_mode) {
-		sc->isc_capenable = ICE_SAFE_CAPS;
-		sc->isc_tx_csum_flags = 0;
-	} else {
-		sc->isc_capenable = ICE_FULL_CAPS;
-#if 0
-		sc->isc_tx_csum_flags = ICE_CSUM_OFFLOAD;
-#endif
-	}
-
-	sc->isc_capabilities = sc->isc_capenable;
-
 	for (i = 0; i < nitems(sc->isc_ntxd); i++)
 		sc->isc_ntxd[i] = ICE_DEFAULT_DESC_COUNT;
 	for (i = 0; i < nitems(sc->isc_nrxd); i++)
@@ -19103,6 +19390,520 @@ ice_create_vsig_from_lst(struct ice_hw *hw, enum ice_block blk, uint16_t vsi,
 }
 
 /**
+ * ice_pkg_buf_alloc
+ * @hw: pointer to the HW structure
+ *
+ * Allocates a package buffer and returns a pointer to the buffer header.
+ * Note: all package contents must be in Little Endian form.
+ */
+struct ice_buf_build *
+ice_pkg_buf_alloc(struct ice_hw *hw)
+{
+	struct ice_buf_build *bld;
+	struct ice_buf_hdr *buf;
+
+	bld = (struct ice_buf_build *)ice_malloc(hw, sizeof(*bld));
+	if (!bld)
+		return NULL;
+
+	buf = (struct ice_buf_hdr *)bld;
+	buf->data_end = htole16(offsetof(struct ice_buf_hdr, section_entry));
+	return bld;
+}
+
+/*
+ * Define a macro that will align a pointer to point to the next memory address
+ * that falls on the given power of 2 (i.e., 2, 4, 8, 16, 32, 64...). For
+ * example, given the variable pointer = 0x1006, then after the following call:
+ *
+ *      pointer = ICE_ALIGN(pointer, 4)
+ *
+ * ... the value of pointer would equal 0x1008, since 0x1008 is the next
+ * address after 0x1006 which is divisible by 4.
+ */
+#define ICE_ALIGN(ptr, align)	(((ptr) + ((align) - 1)) & ~((align) - 1))
+
+/**
+ * ice_pkg_buf_alloc_section
+ * @bld: pointer to pkg build (allocated by ice_pkg_buf_alloc())
+ * @type: the section type value
+ * @size: the size of the section to reserve (in bytes)
+ *
+ * Reserves memory in the buffer for a section's content and updates the
+ * buffers' status accordingly. This routine returns a pointer to the first
+ * byte of the section start within the buffer, which is used to fill in the
+ * section contents.
+ * Note: all package contents must be in Little Endian form.
+ */
+void *
+ice_pkg_buf_alloc_section(struct ice_buf_build *bld, uint32_t type,
+    uint16_t size)
+{
+	struct ice_buf_hdr *buf;
+	uint16_t sect_count;
+	uint16_t data_end;
+
+	if (!bld || !type || !size)
+		return NULL;
+
+	buf = (struct ice_buf_hdr *)&bld->buf;
+
+	/* check for enough space left in buffer */
+	data_end = le16toh(buf->data_end);
+
+	/* section start must align on 4 byte boundary */
+	data_end = ICE_ALIGN(data_end, 4);
+
+	if ((data_end + size) > ICE_MAX_S_DATA_END)
+		return NULL;
+
+	/* check for more available section table entries */
+	sect_count = le16toh(buf->section_count);
+	if (sect_count < bld->reserved_section_table_entries) {
+		void *section_ptr = ((uint8_t *)buf) + data_end;
+
+		buf->section_entry[sect_count].offset = htole16(data_end);
+		buf->section_entry[sect_count].size = htole16(size);
+		buf->section_entry[sect_count].type = htole32(type);
+
+		data_end += size;
+		buf->data_end = htole16(data_end);
+
+		buf->section_count = htole16(sect_count + 1);
+		return section_ptr;
+	}
+
+	/* no free section table entries */
+	return NULL;
+}
+
+/**
+ * ice_pkg_buf_reserve_section
+ * @bld: pointer to pkg build (allocated by ice_pkg_buf_alloc())
+ * @count: the number of sections to reserve
+ *
+ * Reserves one or more section table entries in a package buffer. This routine
+ * can be called multiple times as long as they are made before calling
+ * ice_pkg_buf_alloc_section(). Once ice_pkg_buf_alloc_section()
+ * is called once, the number of sections that can be allocated will not be able
+ * to be increased; not using all reserved sections is fine, but this will
+ * result in some wasted space in the buffer.
+ * Note: all package contents must be in Little Endian form.
+ */
+int
+ice_pkg_buf_reserve_section(struct ice_buf_build *bld, uint16_t count)
+{
+	struct ice_buf_hdr *buf;
+	uint16_t section_count;
+	uint16_t data_end;
+
+	if (!bld)
+		return ICE_ERR_PARAM;
+
+	buf = (struct ice_buf_hdr *)&bld->buf;
+
+	/* already an active section, can't increase table size */
+	section_count = le16toh(buf->section_count);
+	if (section_count > 0)
+		return ICE_ERR_CFG;
+
+	if (bld->reserved_section_table_entries + count > ICE_MAX_S_COUNT)
+		return ICE_ERR_CFG;
+	bld->reserved_section_table_entries += count;
+
+	data_end = le16toh(buf->data_end) +
+		FLEX_ARRAY_SIZE(buf, section_entry, count);
+	buf->data_end = htole16(data_end);
+
+	return 0;
+}
+
+/**
+ * ice_pkg_buf_get_active_sections
+ * @bld: pointer to pkg build (allocated by ice_pkg_buf_alloc())
+ *
+ * Returns the number of active sections. Before using the package buffer
+ * in an update package command, the caller should make sure that there is at
+ * least one active section - otherwise, the buffer is not legal and should
+ * not be used.
+ * Note: all package contents must be in Little Endian form.
+ */
+uint16_t
+ice_pkg_buf_get_active_sections(struct ice_buf_build *bld)
+{
+	struct ice_buf_hdr *buf;
+
+	if (!bld)
+		return 0;
+
+	buf = (struct ice_buf_hdr *)&bld->buf;
+	return le16toh(buf->section_count);
+}
+
+/**
+ * ice_pkg_buf
+ * @bld: pointer to pkg build (allocated by ice_pkg_buf_alloc())
+ *
+ * Return a pointer to the buffer's header
+ */
+struct ice_buf *
+ice_pkg_buf(struct ice_buf_build *bld)
+{
+	if (bld)
+		return &bld->buf;
+
+	return NULL;
+}
+
+static const uint32_t ice_sect_lkup[ICE_BLK_COUNT][ICE_SECT_COUNT] = {
+	/* SWITCH */
+	{
+		ICE_SID_XLT0_SW,
+		ICE_SID_XLT_KEY_BUILDER_SW,
+		ICE_SID_XLT1_SW,
+		ICE_SID_XLT2_SW,
+		ICE_SID_PROFID_TCAM_SW,
+		ICE_SID_PROFID_REDIR_SW,
+		ICE_SID_FLD_VEC_SW,
+		ICE_SID_CDID_KEY_BUILDER_SW,
+		ICE_SID_CDID_REDIR_SW
+	},
+
+	/* ACL */
+	{
+		ICE_SID_XLT0_ACL,
+		ICE_SID_XLT_KEY_BUILDER_ACL,
+		ICE_SID_XLT1_ACL,
+		ICE_SID_XLT2_ACL,
+		ICE_SID_PROFID_TCAM_ACL,
+		ICE_SID_PROFID_REDIR_ACL,
+		ICE_SID_FLD_VEC_ACL,
+		ICE_SID_CDID_KEY_BUILDER_ACL,
+		ICE_SID_CDID_REDIR_ACL
+	},
+
+	/* FD */
+	{
+		ICE_SID_XLT0_FD,
+		ICE_SID_XLT_KEY_BUILDER_FD,
+		ICE_SID_XLT1_FD,
+		ICE_SID_XLT2_FD,
+		ICE_SID_PROFID_TCAM_FD,
+		ICE_SID_PROFID_REDIR_FD,
+		ICE_SID_FLD_VEC_FD,
+		ICE_SID_CDID_KEY_BUILDER_FD,
+		ICE_SID_CDID_REDIR_FD
+	},
+
+	/* RSS */
+	{
+		ICE_SID_XLT0_RSS,
+		ICE_SID_XLT_KEY_BUILDER_RSS,
+		ICE_SID_XLT1_RSS,
+		ICE_SID_XLT2_RSS,
+		ICE_SID_PROFID_TCAM_RSS,
+		ICE_SID_PROFID_REDIR_RSS,
+		ICE_SID_FLD_VEC_RSS,
+		ICE_SID_CDID_KEY_BUILDER_RSS,
+		ICE_SID_CDID_REDIR_RSS
+	},
+
+	/* PE */
+	{
+		ICE_SID_XLT0_PE,
+		ICE_SID_XLT_KEY_BUILDER_PE,
+		ICE_SID_XLT1_PE,
+		ICE_SID_XLT2_PE,
+		ICE_SID_PROFID_TCAM_PE,
+		ICE_SID_PROFID_REDIR_PE,
+		ICE_SID_FLD_VEC_PE,
+		ICE_SID_CDID_KEY_BUILDER_PE,
+		ICE_SID_CDID_REDIR_PE
+	}
+};
+
+/**
+ * ice_sect_id - returns section ID
+ * @blk: block type
+ * @sect: section type
+ *
+ * This helper function returns the proper section ID given a block type and a
+ * section type.
+ */
+uint32_t
+ice_sect_id(enum ice_block blk, enum ice_sect sect)
+{
+	return ice_sect_lkup[blk][sect];
+}
+
+/**
+ * ice_prof_bld_es - build profile ID extraction sequence changes
+ * @hw: pointer to the HW struct
+ * @blk: hardware block
+ * @bld: the update package buffer build to add to
+ * @chgs: the list of changes to make in hardware
+ */
+int
+ice_prof_bld_es(struct ice_hw *hw, enum ice_block blk,
+		struct ice_buf_build *bld, struct ice_chs_chg_head *chgs)
+{
+	uint16_t vec_size = hw->blk[blk].es.fvw * sizeof(struct ice_fv_word);
+	struct ice_chs_chg *tmp;
+	uint16_t off;
+	struct ice_pkg_es *p;
+	uint32_t id;
+
+	TAILQ_FOREACH(tmp, chgs, list_entry) {
+		if (tmp->type != ICE_PTG_ES_ADD || !tmp->add_prof)
+			continue;
+
+		off = tmp->prof_id * hw->blk[blk].es.fvw;
+		id = ice_sect_id(blk, ICE_VEC_TBL);
+		p = (struct ice_pkg_es *)ice_pkg_buf_alloc_section(bld, id,
+		    ice_struct_size(p, es, 1) + vec_size - sizeof(p->es[0]));
+		if (!p)
+			return ICE_ERR_MAX_LIMIT;
+
+		p->count = htole16(1);
+		p->offset = htole16(tmp->prof_id);
+		memcpy(p->es, &hw->blk[blk].es.t[off], vec_size);
+	}
+
+	return 0;
+}
+
+/**
+ * ice_prof_bld_tcam - build profile ID TCAM changes
+ * @hw: pointer to the HW struct
+ * @blk: hardware block
+ * @bld: the update package buffer build to add to
+ * @chgs: the list of changes to make in hardware
+ */
+int
+ice_prof_bld_tcam(struct ice_hw *hw, enum ice_block blk,
+    struct ice_buf_build *bld, struct ice_chs_chg_head *chgs)
+{
+	struct ice_chs_chg *tmp;
+	struct ice_prof_id_section *p;
+	uint32_t id;
+
+	TAILQ_FOREACH(tmp, chgs, list_entry) {
+		if (tmp->type != ICE_TCAM_ADD || !tmp->add_tcam_idx)
+			continue;
+
+		id = ice_sect_id(blk, ICE_PROF_TCAM);
+		p = (struct ice_prof_id_section *)ice_pkg_buf_alloc_section(
+		    bld, id, ice_struct_size(p, entry, 1));
+		if (!p)
+			return ICE_ERR_MAX_LIMIT;
+
+		p->count = htole16(1);
+		p->entry[0].addr = htole16(tmp->tcam_idx);
+		p->entry[0].prof_id = tmp->prof_id;
+
+		memcpy(p->entry[0].key,
+		    &hw->blk[blk].prof.t[tmp->tcam_idx].key,
+		    sizeof(hw->blk[blk].prof.t->key));
+	}
+
+	return 0;
+}
+
+/**
+ * ice_prof_bld_xlt1 - build XLT1 changes
+ * @blk: hardware block
+ * @bld: the update package buffer build to add to
+ * @chgs: the list of changes to make in hardware
+ */
+int
+ice_prof_bld_xlt1(enum ice_block blk, struct ice_buf_build *bld,
+		  struct ice_chs_chg_head *chgs)
+{
+	struct ice_chs_chg *tmp;
+	struct ice_xlt1_section *p;
+	uint32_t id;
+
+	TAILQ_FOREACH(tmp, chgs, list_entry) {
+		if (tmp->type != ICE_PTG_ES_ADD || !tmp->add_ptg)
+			continue;
+
+		id = ice_sect_id(blk, ICE_XLT1);
+		p = (struct ice_xlt1_section *)ice_pkg_buf_alloc_section(bld,
+		    id, ice_struct_size(p, value, 1));
+		if (!p)
+			return ICE_ERR_MAX_LIMIT;
+
+		p->count = htole16(1);
+		p->offset = htole16(tmp->ptype);
+		p->value[0] = tmp->ptg;
+	}
+
+	return 0;
+}
+
+/**
+ * ice_prof_bld_xlt2 - build XLT2 changes
+ * @blk: hardware block
+ * @bld: the update package buffer build to add to
+ * @chgs: the list of changes to make in hardware
+ */
+int
+ice_prof_bld_xlt2(enum ice_block blk, struct ice_buf_build *bld,
+		  struct ice_chs_chg_head *chgs)
+{
+	struct ice_chs_chg *tmp;
+	struct ice_xlt2_section *p;
+	uint32_t id;
+
+	TAILQ_FOREACH(tmp, chgs, list_entry) {
+		if (tmp->type != ICE_VSIG_ADD &&
+		    tmp->type != ICE_VSI_MOVE &&
+		    tmp->type != ICE_VSIG_REM)
+			continue;
+
+		id = ice_sect_id(blk, ICE_XLT2);
+		p = (struct ice_xlt2_section *)ice_pkg_buf_alloc_section(bld,
+		    id, ice_struct_size(p, value, 1));
+		if (!p)
+			return ICE_ERR_MAX_LIMIT;
+
+		p->count = htole16(1);
+		p->offset = htole16(tmp->vsi);
+		p->value[0] = htole16(tmp->vsig);
+	}
+
+	return 0;
+}
+
+/**
+ * ice_aq_update_pkg
+ * @hw: pointer to the hardware structure
+ * @pkg_buf: the package cmd buffer
+ * @buf_size: the size of the package cmd buffer
+ * @last_buf: last buffer indicator
+ * @error_offset: returns error offset
+ * @error_info: returns error information
+ * @cd: pointer to command details structure or NULL
+ *
+ * Update Package (0x0C42)
+ */
+int
+ice_aq_update_pkg(struct ice_hw *hw, struct ice_buf_hdr *pkg_buf,
+    uint16_t buf_size, bool last_buf, uint32_t *error_offset,
+    uint32_t *error_info, struct ice_sq_cd *cd)
+{
+	struct ice_aqc_download_pkg *cmd;
+	struct ice_aq_desc desc;
+	int status;
+
+	if (error_offset)
+		*error_offset = 0;
+	if (error_info)
+		*error_info = 0;
+
+	cmd = &desc.params.download_pkg;
+	ice_fill_dflt_direct_cmd_desc(&desc, ice_aqc_opc_update_pkg);
+	desc.flags |= htole16(ICE_AQ_FLAG_RD);
+
+	if (last_buf)
+		cmd->flags |= ICE_AQC_DOWNLOAD_PKG_LAST_BUF;
+
+	status = ice_aq_send_cmd(hw, &desc, pkg_buf, buf_size, cd);
+	if (status == ICE_ERR_AQ_ERROR) {
+		/* Read error from buffer only when the FW returned an error */
+		struct ice_aqc_download_pkg_resp *resp;
+
+		resp = (struct ice_aqc_download_pkg_resp *)pkg_buf;
+		if (error_offset)
+			*error_offset = le32toh(resp->error_offset);
+		if (error_info)
+			*error_info = le32toh(resp->error_info);
+	}
+
+	return status;
+}
+
+/**
+ * ice_update_pkg_no_lock
+ * @hw: pointer to the hardware structure
+ * @bufs: pointer to an array of buffers
+ * @count: the number of buffers in the array
+ */
+int
+ice_update_pkg_no_lock(struct ice_hw *hw, struct ice_buf *bufs, uint32_t count)
+{
+	int status = 0;
+	uint32_t i;
+
+	for (i = 0; i < count; i++) {
+		struct ice_buf_hdr *bh = (struct ice_buf_hdr *)(bufs + i);
+		bool last = ((i + 1) == count);
+		uint32_t offset, info;
+
+		status = ice_aq_update_pkg(hw, bh, le16toh(bh->data_end),
+		    last, &offset, &info, NULL);
+		if (status) {
+			DNPRINTF(ICE_DBG_PKG,
+			    "Update pkg failed: err %d off %d inf %d\n",
+			    status, offset, info);
+			break;
+		}
+	}
+
+	return status;
+}
+
+/**
+ * ice_acquire_change_lock
+ * @hw: pointer to the HW structure
+ * @access: access type (read or write)
+ *
+ * This function will request ownership of the change lock.
+ */
+int
+ice_acquire_change_lock(struct ice_hw *hw, enum ice_aq_res_access_type access)
+{
+	return ice_acquire_res(hw, ICE_CHANGE_LOCK_RES_ID, access,
+	    ICE_CHANGE_LOCK_TIMEOUT);
+}
+
+/**
+ * ice_release_change_lock
+ * @hw: pointer to the HW structure
+ *
+ * This function will release the change lock using the proper Admin Command.
+ */
+void
+ice_release_change_lock(struct ice_hw *hw)
+{
+	ice_release_res(hw, ICE_CHANGE_LOCK_RES_ID);
+}
+
+/**
+ * ice_update_pkg
+ * @hw: pointer to the hardware structure
+ * @bufs: pointer to an array of buffers
+ * @count: the number of buffers in the array
+ *
+ * Obtains change lock and updates package.
+ */
+int
+ice_update_pkg(struct ice_hw *hw, struct ice_buf *bufs, uint32_t count)
+{
+	int status;
+
+	status = ice_acquire_change_lock(hw, ICE_RES_WRITE);
+	if (status)
+		return status;
+
+	status = ice_update_pkg_no_lock(hw, bufs, count);
+
+	ice_release_change_lock(hw);
+
+	return status;
+}
+
+/**
  * ice_upd_prof_hw - update hardware using the change list
  * @hw: pointer to the HW struct
  * @blk: hardware block
@@ -19112,7 +19913,6 @@ enum ice_status
 ice_upd_prof_hw(struct ice_hw *hw, enum ice_block blk,
 		struct ice_chs_chg_head *chgs)
 {
-#if 0
 	struct ice_buf_build *b;
 	struct ice_chs_chg *tmp;
 	enum ice_status status;
@@ -19124,7 +19924,7 @@ ice_upd_prof_hw(struct ice_hw *hw, enum ice_block blk,
 	uint16_t sects;
 
 	/* count number of sections we need */
-	TAILQ_FOREACH(p, chgs, list_entry) {
+	TAILQ_FOREACH(tmp, chgs, list_entry) {
 		switch (tmp->type) {
 		case ICE_PTG_ES_ADD:
 			if (tmp->add_ptg)
@@ -19196,15 +19996,11 @@ ice_upd_prof_hw(struct ice_hw *hw, enum ice_block blk,
 	/* update package */
 	status = ice_update_pkg(hw, ice_pkg_buf(b), 1);
 	if (status == ICE_ERR_AQ_ERROR)
-		ice_debug(hw, ICE_DBG_INIT, "Unable to update HW profile\n");
+		DNPRINTF(ICE_DBG_INIT, "Unable to update HW profile\n");
 
 error_tmp:
-	ice_pkg_buf_free(hw, b);
+	ice_free(hw, b);
 	return status;
-#else
-	printf("%s: not implemented\n", __func__);
-	return ICE_ERR_NOT_IMPL;
-#endif
 }
 
 /**
@@ -20179,7 +20975,7 @@ ice_free_vsi_qmaps(struct ice_vsi *vsi)
 		ice_resmgr_release_map(&sc->tx_qmgr, vsi->tx_qmap,
 		    vsi->num_tx_queues);
 		free(vsi->tx_qmap, M_DEVBUF,
-		    vsi->num_tx_queues * sizeof(uint16_t));
+		    sc->isc_ntxqsets_max * sizeof(uint16_t));
 		vsi->tx_qmap = NULL;
 	}
 
@@ -20187,7 +20983,7 @@ ice_free_vsi_qmaps(struct ice_vsi *vsi)
 		ice_resmgr_release_map(&sc->rx_qmgr, vsi->rx_qmap,
 		     vsi->num_rx_queues);
 		free(vsi->rx_qmap, M_DEVBUF,
-		    vsi->num_rx_queues * sizeof(uint16_t));
+		    sc->isc_nrxqsets_max * sizeof(uint16_t));
 		vsi->rx_qmap = NULL;
 	}
 }
@@ -22993,7 +23789,7 @@ ice_add_dscp_tc_bw_tlv(struct ice_lldp_org_tlv *tlv,
 			   ICE_DSCP_SUBTYPE_TCBW);
 	tlv->ouisubtype = htonl(ouisubtype);
 
-	/* First Octect after subtype
+	/* First Octet after subtype
 	 * ----------------------------
 	 * | RSV | CBS | RSV | Max TCs |
 	 * | 1b  | 1b  | 3b  | 3b      |
@@ -27372,108 +28168,108 @@ ice_print_health_status_string(struct ice_softc *sc,
 
 	switch (status_code) {
 	case ICE_AQC_HEALTH_STATUS_INFO_RECOVERY:
-		printf("%s: The device is in firmware recovery mode.\n",
+		DPRINTF("%s: The device is in firmware recovery mode.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_FLASH_ACCESS:
-		printf("%s: The flash chip cannot be accessed.\n",
+		DPRINTF("%s: The flash chip cannot be accessed.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_NVM_AUTH:
-		printf("%s: NVM authentication failed.\n",
+		DPRINTF("%s: NVM authentication failed.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_OROM_AUTH:
-		printf("%s: Option ROM authentication failed.\n",
+		DPRINTF("%s: Option ROM authentication failed.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_DDP_AUTH:
-		printf("%s: DDP package failed.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: DDP package failed.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_NVM_COMPAT:
-		printf("%s: NVM image is incompatible.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: NVM image is incompatible.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_OROM_COMPAT:
-		printf("%s: Option ROM is incompatible.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: Option ROM is incompatible.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_DCB_MIB:
-		printf("%s: Supplied MIB file is invalid. "
+		DPRINTF("%s: Supplied MIB file is invalid. "
 		    "DCB reverted to default configuration.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_UNKNOWN_MOD_STRICT:
-		printf("%s: An unsupported module was detected.\n",
+		DPRINTF("%s: An unsupported module was detected.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_MOD_TYPE:
-		printf("%s: Module type is not supported.\n",
+		DPRINTF("%s: Module type is not supported.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_MOD_QUAL:
-		printf("%s: Module is not qualified.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: Module is not qualified.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_MOD_COMM:
-		printf("%s: Device cannot communicate with the module.\n",
+		DPRINTF("%s: Device cannot communicate with the module.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_MOD_CONFLICT:
-		printf("%s: Unresolved module conflict.\n",
+		DPRINTF("%s: Unresolved module conflict.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_MOD_NOT_PRESENT:
-		printf("%s: Module is not present.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: Module is not present.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_INFO_MOD_UNDERUTILIZED:
-		printf("%s: Underutilized module.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: Underutilized module.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_UNKNOWN_MOD_LENIENT:
-		printf("%s: An unsupported module was detected.\n",
+		DPRINTF("%s: An unsupported module was detected.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_INVALID_LINK_CFG:
-		printf("%s: Invalid link configuration.\n",
+		DPRINTF("%s: Invalid link configuration.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_PORT_ACCESS:
-		printf("%s: Port hardware access error.\n",
+		DPRINTF("%s: Port hardware access error.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_PORT_UNREACHABLE:
-		printf("%s: A port is unreachable.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: A port is unreachable.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_INFO_PORT_SPEED_MOD_LIMITED:
-		printf("%s: Port speed is limited due to module.\n",
+		DPRINTF("%s: Port speed is limited due to module.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_PARALLEL_FAULT:
-		printf("%s: A parallel fault was detected.\n",
+		DPRINTF("%s: A parallel fault was detected.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_INFO_PORT_SPEED_PHY_LIMITED:
-		printf("%s: Port speed is limited by PHY capabilities.\n",
+		DPRINTF("%s: Port speed is limited by PHY capabilities.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_NETLIST_TOPO:
-		printf("%s: LOM topology netlist is corrupted.\n",
+		DPRINTF("%s: LOM topology netlist is corrupted.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_NETLIST:
-		printf("%s: Unrecoverable netlist error.\n",
+		DPRINTF("%s: Unrecoverable netlist error.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_TOPO_CONFLICT:
-		printf("%s: Port topology conflict.\n", sc->sc_dev.dv_xname);
+		DPRINTF("%s: Port topology conflict.\n", sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_LINK_HW_ACCESS:
-		printf("%s: Unrecoverable hardware access error.\n",
+		DPRINTF("%s: Unrecoverable hardware access error.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_LINK_RUNTIME:
-		printf("%s: Unrecoverable runtime error.\n",
+		DPRINTF("%s: Unrecoverable runtime error.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	case ICE_AQC_HEALTH_STATUS_ERR_DNL_INIT:
-		printf("%s: Link management engine failed to initialize.\n",
+		DPRINTF("%s: Link management engine failed to initialize.\n",
 		    sc->sc_dev.dv_xname);
 		break;
 	default:
@@ -28426,10 +29222,94 @@ ice_intr0(void *xsc)
 #define ICE_RX_FLEX_NIC(desc, field) \
 	(((struct ice_32b_rx_flex_desc_nic *)desc)->field)
 
+/**
+ * ice_rx_checksum - verify hardware checksum is valid or not
+ * @status0: descriptor status data
+ * @ptype: packet type
+ *
+ * Determine whether the hardware indicated that the Rx checksum is valid. If
+ * so, update the checksum flags and data, informing the stack of the status
+ * of the checksum so that it does not spend time verifying it manually.
+ */
 void
-ice_rx_checksum(struct mbuf *m, uint16_t status0)
+ice_rx_checksum(struct mbuf *m, uint16_t status0, uint16_t ptype)
 {
-	/* TODO */
+	const uint16_t l3_error = (BIT(ICE_RX_FLEX_DESC_STATUS0_XSUM_IPE_S) |
+	    BIT(ICE_RX_FLEX_DESC_STATUS0_XSUM_EIPE_S));
+	const uint16_t l4_error = (BIT(ICE_RX_FLEX_DESC_STATUS0_XSUM_L4E_S) |
+	    BIT(ICE_RX_FLEX_DESC_STATUS0_XSUM_EUDPE_S));
+	const uint16_t xsum_errors = (l3_error | l4_error |
+	    BIT(ICE_RX_FLEX_DESC_STATUS0_IPV6EXADD_S));
+	struct ice_rx_ptype_decoded decoded;
+	int is_ipv4, is_ipv6;
+
+	/* No L3 or L4 checksum was calculated */
+	if (!(status0 & BIT(ICE_RX_FLEX_DESC_STATUS0_L3L4P_S)))
+		return;
+
+	decoded = ice_decode_rx_desc_ptype(ptype);
+
+	if (!(decoded.known && decoded.outer_ip))
+		return;
+
+	is_ipv4 = (decoded.outer_ip == ICE_RX_PTYPE_OUTER_IP) &&
+	    (decoded.outer_ip_ver == ICE_RX_PTYPE_OUTER_IPV4);
+	is_ipv6 = (decoded.outer_ip == ICE_RX_PTYPE_OUTER_IP) &&
+	    (decoded.outer_ip_ver == ICE_RX_PTYPE_OUTER_IPV6);
+
+	/* No checksum errors were reported */
+	if (!(status0 & xsum_errors)) {
+		if (is_ipv4)
+			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_IN_OK;
+
+		switch (decoded.inner_prot) {
+		case ICE_RX_PTYPE_INNER_PROT_TCP:
+			m->m_pkthdr.csum_flags |= M_TCP_CSUM_IN_OK;
+			break;
+		case ICE_RX_PTYPE_INNER_PROT_UDP:
+			m->m_pkthdr.csum_flags |= M_UDP_CSUM_IN_OK;
+			break;
+		default:
+			break;
+		}
+
+		return;
+	}
+
+	/*
+	 * Certain IPv6 extension headers impact the validity of L4 checksums.
+	 * If one of these headers exist, hardware will set the IPV6EXADD bit
+	 * in the descriptor. If the bit is set then pretend like hardware
+	 * didn't checksum this packet.
+	 */
+	if (is_ipv6 && (status0 & BIT(ICE_RX_FLEX_DESC_STATUS0_IPV6EXADD_S)))
+		return;
+
+	/*
+	 * At this point, status0 must have at least one of the l3_error or
+	 * l4_error bits set.
+	 */
+	if (status0 & l3_error) {
+		if (is_ipv4)
+			m->m_pkthdr.csum_flags |= M_IPV4_CSUM_IN_BAD;
+
+		/* don't bother reporting L4 errors if we got an L3 error */
+		return;
+	} else if (is_ipv4)
+		m->m_pkthdr.csum_flags |= M_IPV4_CSUM_IN_OK;
+
+	if (status0 & l4_error) {
+		switch (decoded.inner_prot) {
+		case ICE_RX_PTYPE_INNER_PROT_TCP:
+			m->m_pkthdr.csum_flags |= M_TCP_CSUM_IN_BAD;
+			break;
+		case ICE_RX_PTYPE_INNER_PROT_UDP:
+			m->m_pkthdr.csum_flags |= M_UDP_CSUM_IN_BAD;
+			break;
+		default:
+			break;
+		}
+	}
 }
 
 int
@@ -28441,9 +29321,10 @@ ice_rxeof(struct ice_softc *sc, struct ice_rx_queue *rxq)
 	struct ice_rx_map *rxm;
 	bus_dmamap_t map;
 	unsigned int cons, prod;
+	struct mbuf_list mltcp = MBUF_LIST_INITIALIZER();
 	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 	struct mbuf *m;
-	uint16_t status0;
+	uint16_t status0, ptype;
 	unsigned int eop;
 	unsigned int len;
 	unsigned int mask;
@@ -28519,8 +29400,19 @@ ice_rxeof(struct ice_softc *sc, struct ice_rx_queue *rxq)
 				m->m_pkthdr.csum_flags |= M_FLOWID;
 			}
 
-			ice_rx_checksum(m, status0);
-			ml_enqueue(&ml, m);
+			/* Get packet type and set checksum flags */
+			ptype = le16toh(cur->wb.ptype_flex_flags0) &
+				ICE_RX_FLEX_DESC_PTYPE_M;
+			ice_rx_checksum(m, status0, ptype);
+
+#ifndef SMALL_KERNEL
+			if (ISSET(ifp->if_xflags, IFXF_LRO) &&
+			    (ptype == ICE_RX_FLEX_DECS_PTYPE_MAC_IPV4_TCP ||
+			     ptype == ICE_RX_FLEX_DECS_PTYPE_MAC_IPV6_TCP))
+				tcp_softlro_glue(&mltcp, m, ifp);
+			else
+#endif
+				ml_enqueue(&ml, m);
 
 			rxq->rxq_m_head = NULL;
 			rxq->rxq_m_tail = &rxq->rxq_m_head;
@@ -28533,8 +29425,15 @@ ice_rxeof(struct ice_softc *sc, struct ice_rx_queue *rxq)
 	} while (cons != prod);
 
 	if (done) {
+		int livelocked = 0;
+
 		rxq->rxq_cons = cons;
+		if (ifiq_input(ifiq, &mltcp))
+			livelocked = 1;
 		if (ifiq_input(ifiq, &ml))
+			livelocked = 1;
+
+		if (livelocked)
 			if_rxr_livelocked(&rxq->rxq_acct);
 		ice_rxfill(sc, rxq);
 	}
@@ -28602,7 +29501,7 @@ ice_txeof(struct ice_softc *sc, struct ice_tx_queue *txq)
 
 	//ixl_enable(sc, txr->txr_msix);
 
-	if (ifq_is_oactive(ifq))
+	if (done && ifq_is_oactive(ifq))
 		ifq_restart(ifq);
 
 	return (done);
@@ -28634,9 +29533,6 @@ ice_intr_vector(void *ivp)
 /**
  * ice_allocate_msix - Allocate MSI-X vectors for the interface
  * @sc: the device private softc
- *
- * @post on success this function must set the following scctx parameters:
- * isc_vectors, isc_nrxqsets, isc_ntxqsets, and isc_intr.
  *
  * @returns zero on success or an error code on failure.
  */
@@ -28672,10 +29568,6 @@ ice_allocate_msix(struct ice_softc *sc)
 			}
 		}
 	}
-
-	sc->isc_vectors = sc->sc_nvectors;
-	sc->isc_nrxqsets = sc->sc_nqueues;
-	sc->isc_ntxqsets = sc->sc_nqueues;
 
 	return 0;
 
@@ -28778,8 +29670,8 @@ ice_tx_queues_alloc(struct ice_softc *sc)
 
 		for (j = 0; j < sc->isc_ntxd[i]; j++) {
 			map = &txq->tx_map[j];
-			if (bus_dmamap_create(sc->sc_dmat, ICE_MAX_FRAME_SIZE,
-			    ICE_MAX_TX_SEGS, ICE_MAX_FRAME_SIZE, 0,
+			if (bus_dmamap_create(sc->sc_dmat, MAXMCLBYTES,
+			    ICE_MAX_TX_SEGS, ICE_MAX_DMA_SEG_SIZE, 0,
 			    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 			    &map->txm_map) != 0) {
 				printf("%s: could not allocate Tx DMA map\n",
@@ -29706,6 +30598,15 @@ ice_attach_hook(struct device *self)
 	ifp->if_capabilities = IFCAP_VLAN_MTU;
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
+#endif
+	ifp->if_capabilities |= IFCAP_CSUM_IPv4 |
+	    IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4 |
+	    IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6 |
+	    IFCAP_TSOv4 | IFCAP_TSOv6;
+	ifp->if_capabilities |= IFCAP_LRO;
+#if notyet
+	/* for now tcplro at ice(4) is default off */
+	ifp->if_xflags |= IFXF_LRO;
 #endif
 
 	if_attach(ifp);

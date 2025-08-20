@@ -1,4 +1,4 @@
-/*	$OpenBSD: mft.c,v 1.122 2025/02/25 15:55:26 claudio Exp $ */
+/*	$OpenBSD: mft.c,v 1.128 2025/08/19 11:30:20 job Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -33,41 +33,14 @@
 #include <openssl/x509.h>
 
 #include "extern.h"
-
-extern ASN1_OBJECT	*mft_oid;
+#include "rpki-asn1.h"
 
 /*
- * Types and templates for the Manifest eContent, RFC 6486, section 4.2.
+ * Manifest eContent definition in RFC 9286, section 4.2.
  */
 
 ASN1_ITEM_EXP FileAndHash_it;
 ASN1_ITEM_EXP Manifest_it;
-
-typedef struct {
-	ASN1_IA5STRING	*file;
-	ASN1_BIT_STRING	*hash;
-} FileAndHash;
-
-DECLARE_STACK_OF(FileAndHash);
-
-#ifndef DEFINE_STACK_OF
-#define sk_FileAndHash_dup(sk)		SKM_sk_dup(FileAndHash, (sk))
-#define sk_FileAndHash_free(sk)		SKM_sk_free(FileAndHash, (sk))
-#define sk_FileAndHash_num(sk)		SKM_sk_num(FileAndHash, (sk))
-#define sk_FileAndHash_value(sk, i)	SKM_sk_value(FileAndHash, (sk), (i))
-#define sk_FileAndHash_sort(sk)		SKM_sk_sort(FileAndHash, (sk))
-#define sk_FileAndHash_set_cmp_func(sk, cmp) \
-    SKM_sk_set_cmp_func(FileAndHash, (sk), (cmp))
-#endif
-
-typedef struct {
-	ASN1_INTEGER		*version;
-	ASN1_INTEGER		*manifestNumber;
-	ASN1_GENERALIZEDTIME	*thisUpdate;
-	ASN1_GENERALIZEDTIME	*nextUpdate;
-	ASN1_OBJECT		*fileHashAlg;
-	STACK_OF(FileAndHash)	*fileList;
-} Manifest;
 
 ASN1_SEQUENCE(FileAndHash) = {
 	ASN1_SIMPLE(FileAndHash, file, ASN1_IA5STRING),
@@ -83,8 +56,8 @@ ASN1_SEQUENCE(Manifest) = {
 	ASN1_SEQUENCE_OF(Manifest, fileList, FileAndHash),
 } ASN1_SEQUENCE_END(Manifest);
 
-DECLARE_ASN1_FUNCTIONS(Manifest);
 IMPLEMENT_ASN1_FUNCTIONS(Manifest);
+
 
 #define GENTIME_LENGTH 15
 
@@ -352,11 +325,11 @@ mft_parse_econtent(const char *fn, struct mft *mft, const unsigned char *d,
 	}
 
 	if (!x509_get_time(mft_asn1->thisUpdate, &mft->thisupdate)) {
-		warn("%s: parsing manifest thisUpdate failed", fn);
+		warnx("%s: parsing manifest thisUpdate failed", fn);
 		goto out;
 	}
 	if (!x509_get_time(mft_asn1->nextUpdate, &mft->nextupdate)) {
-		warn("%s: parsing manifest nextUpdate failed", fn);
+		warnx("%s: parsing manifest nextUpdate failed", fn);
 		goto out;
 	}
 
@@ -414,55 +387,39 @@ mft_parse_econtent(const char *fn, struct mft *mft, const unsigned char *d,
  * Return mft if it conforms to RFC 6486, otherwise NULL.
  */
 struct mft *
-mft_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
-    size_t len)
+mft_parse(struct cert **out_cert, const char *fn, int talid,
+    const unsigned char *der, size_t len)
 {
 	struct mft	*mft;
 	struct cert	*cert = NULL;
 	int		 rc = 0;
 	size_t		 cmsz;
 	unsigned char	*cms;
-	char		*crldp = NULL, *crlfile;
+	char		*crlfile;
 	time_t		 signtime = 0;
 
-	cms = cms_parse_validate(x509, fn, der, len, mft_oid, &cmsz, &signtime);
+	assert(*out_cert == NULL);
+
+	cms = cms_parse_validate(&cert, fn, talid, der, len, mft_oid, &cmsz,
+	    &signtime);
 	if (cms == NULL)
 		return NULL;
-	assert(*x509 != NULL);
 
 	if ((mft = calloc(1, sizeof(*mft))) == NULL)
 		err(1, NULL);
 	mft->signtime = signtime;
 
-	if (!x509_get_aia(*x509, fn, &mft->aia))
-		goto out;
-	if (!x509_get_aki(*x509, fn, &mft->aki))
-		goto out;
-	if (!x509_get_sia(*x509, fn, &mft->sia))
-		goto out;
-	if (!x509_get_ski(*x509, fn, &mft->ski))
-		goto out;
-	if (mft->aia == NULL || mft->aki == NULL || mft->sia == NULL ||
-	    mft->ski == NULL) {
-		warnx("%s: RFC 6487 section 4.8: "
-		    "missing AIA, AKI, SIA, or SKI X509 extension", fn);
-		goto out;
-	}
+	if ((mft->aki = strdup(cert->aki)) == NULL)
+		err(1, NULL);
+	if ((mft->sia = strdup(cert->signedobj)) == NULL)
+		err(1, NULL);
 
-	if (!x509_inherits(*x509)) {
+	if (!x509_inherits(cert->x509)) {
 		warnx("%s: RFC 3779 extension not set to inherit", fn);
 		goto out;
 	}
 
-	/* get CRL info for later */
-	if (!x509_get_crl(*x509, fn, &crldp))
-		goto out;
-	if (crldp == NULL) {
-		warnx("%s: RFC 6487 section 4.8.6: CRL: "
-		    "missing CRL distribution point extension", fn);
-		goto out;
-	}
-	crlfile = strrchr(crldp, '/');
+	crlfile = strrchr(cert->crl, '/');
 	if (crlfile == NULL) {
 		warnx("%s: RFC 6487 section 4.8.6: "
 		    "invalid CRL distribution point", fn);
@@ -481,24 +438,21 @@ mft_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 	if (mft_parse_econtent(fn, mft, cms, cmsz) == 0)
 		goto out;
 
-	if ((cert = cert_parse_ee_cert(fn, talid, *x509)) == NULL)
-		goto out;
-
 	if (mft->signtime > mft->nextupdate) {
 		warnx("%s: dating issue: CMS signing-time after MFT nextUpdate",
 		    fn);
 		goto out;
 	}
 
+	*out_cert = cert;
+	cert = NULL;
+
 	rc = 1;
 out:
 	if (rc == 0) {
 		mft_free(mft);
 		mft = NULL;
-		X509_free(*x509);
-		*x509 = NULL;
 	}
-	free(crldp);
 	cert_free(cert);
 	free(cms);
 	return mft;
@@ -522,10 +476,8 @@ mft_free(struct mft *p)
 	free(p->path);
 	free(p->files);
 	free(p->seqnum);
-	free(p->aia);
 	free(p->aki);
 	free(p->sia);
-	free(p->ski);
 	free(p->crl);
 	free(p);
 }
@@ -543,11 +495,9 @@ mft_buffer(struct ibuf *b, const struct mft *p)
 	io_simple_buffer(b, &p->talid, sizeof(p->talid));
 	io_simple_buffer(b, &p->certid, sizeof(p->certid));
 	io_simple_buffer(b, &p->seqnum_gap, sizeof(p->seqnum_gap));
-	io_str_buffer(b, p->path);
+	io_opt_str_buffer(b, p->path);
 
-	io_str_buffer(b, p->aia);
 	io_str_buffer(b, p->aki);
-	io_str_buffer(b, p->ski);
 
 	io_simple_buffer(b, &p->filesz, sizeof(size_t));
 	for (i = 0; i < p->filesz; i++) {
@@ -577,14 +527,13 @@ mft_read(struct ibuf *b)
 	io_read_buf(b, &p->talid, sizeof(p->talid));
 	io_read_buf(b, &p->certid, sizeof(p->certid));
 	io_read_buf(b, &p->seqnum_gap, sizeof(p->seqnum_gap));
-	io_read_str(b, &p->path);
+	io_read_opt_str(b, &p->path);
 
-	io_read_str(b, &p->aia);
 	io_read_str(b, &p->aki);
-	io_read_str(b, &p->ski);
-	assert(p->aia && p->aki && p->ski);
 
 	io_read_buf(b, &p->filesz, sizeof(size_t));
+	if (p->filesz == 0)
+		err(1, "mft_read: bad message");
 	if ((p->files = calloc(p->filesz, sizeof(struct mftfile))) == NULL)
 		err(1, NULL);
 

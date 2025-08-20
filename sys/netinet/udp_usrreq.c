@@ -1,4 +1,4 @@
-/*	$OpenBSD: udp_usrreq.c,v 1.336 2025/03/11 15:31:03 mvs Exp $	*/
+/*	$OpenBSD: udp_usrreq.c,v 1.349 2025/07/18 08:39:14 mvs Exp $	*/
 /*	$NetBSD: udp_usrreq.c,v 1.28 1996/03/16 23:54:03 christos Exp $	*/
 
 /*
@@ -76,14 +76,11 @@
 #include <sys/mbuf.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/sysctl.h>
 #include <sys/domain.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/if_media.h>
-#include <net/route.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -110,7 +107,6 @@
 #endif
 
 #ifdef PIPEX
-#include <netinet/if_ether.h>
 #include <net/pipex.h>
 #endif
 
@@ -157,11 +153,13 @@ const struct pr_usrreqs udp6_usrreqs = {
 };
 #endif
 
+#ifndef SMALL_KERNEL
 const struct sysctl_bounded_args udpctl_vars[] = {
 	{ UDPCTL_CHECKSUM, &udpcksum, 0, 1 },
 	{ UDPCTL_RECVSPACE, &udp_recvspace, 0, SB_MAX },
 	{ UDPCTL_SENDSPACE, &udp_sendspace, 0, SB_MAX },
 };
+#endif /* SMALL_KERNEL */
 
 struct	inpcbtable udbtable;
 #ifdef INET6
@@ -174,7 +172,6 @@ void	udp_sbappend(struct inpcb *, struct mbuf *, struct ip *,
 	    u_int32_t, struct netstack *);
 int	udp_output(struct inpcb *, struct mbuf *, struct mbuf *, struct mbuf *);
 void	udp_notify(struct inpcb *, int);
-int	udp_sysctl_locked(int *, u_int, void *, size_t *, void *, size_t);
 int	udp_sysctl_udpstat(void *, size_t *, void *);
 
 #ifndef	UDB_INITIAL_HASH_SIZE
@@ -211,11 +208,14 @@ udp_input(struct mbuf **mp, int *offp, int proto, int af, struct netstack *ns)
 	} srcsa, dstsa;
 	struct ip6_hdr *ip6 = NULL;
 	u_int32_t ipsecflowinfo = 0;
+#ifdef IPSEC
+	int udpencap_port_local = atomic_load_int(&udpencap_port);
+#endif /* IPSEC */
 
 	udpstat_inc(udps_ipackets);
 
-	IP6_EXTHDR_GET(uh, struct udphdr *, m, iphlen, sizeof(struct udphdr));
-	if (!uh) {
+	uh = ip6_exthdr_get(mp, iphlen, sizeof(struct udphdr));
+	if (uh == NULL) {
 		udpstat_inc(udps_hdrops);
 		return IPPROTO_DONE;
 	}
@@ -304,11 +304,12 @@ udp_input(struct mbuf **mp, int *offp, int proto, int af, struct netstack *ns)
 	CLR(m->m_pkthdr.csum_flags, M_UDP_CSUM_OUT);
 
 #ifdef IPSEC
-	if (udpencap_enable && udpencap_port && esp_enable &&
+	if (atomic_load_int(&udpencap_enable) && udpencap_port_local &&
+	    atomic_load_int(&esp_enable) &&
 #if NPF > 0
 	    !(m->m_pkthdr.pf.flags & PF_TAG_DIVERTED) &&
 #endif
-	    uh->uh_dport == htons(udpencap_port)) {
+	    uh->uh_dport == htons(udpencap_port_local)) {
 		u_int32_t spi;
 		int skip = iphlen + sizeof(struct udphdr);
 
@@ -501,7 +502,7 @@ udp_input(struct mbuf **mp, int *offp, int proto, int af, struct netstack *ns)
 			/*
 			 * No matching pcb found; discard datagram.
 			 * (No need to send an ICMP Port Unreachable
-			 * for a broadcast or multicast datgram.)
+			 * for a broadcast or multicast datagram.)
 			 */
 			udpstat_inc(udps_noportbcast);
 			m_freem(m);
@@ -597,7 +598,6 @@ udp_input(struct mbuf **mp, int *offp, int proto, int af, struct netstack *ns)
 		return IPPROTO_DONE;
 	}
 
-	KASSERT(sotoinpcb(inp->inp_socket) == inp);
 	soassertlocked_readonly(inp->inp_socket);
 
 #ifdef INET6
@@ -908,12 +908,16 @@ udp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 	if (ip) {
 		struct inpcb *inp;
 		struct socket *so = NULL;
+#ifdef IPSEC
+		int udpencap_port_local = atomic_load_int(&udpencap_port);
+#endif
 
 		uhp = (struct udphdr *)((caddr_t)ip + (ip->ip_hl << 2));
 #ifdef IPSEC
 		/* PMTU discovery for udpencap */
-		if (cmd == PRC_MSGSIZE && ip_mtudisc && udpencap_enable &&
-		    udpencap_port && uhp->uh_sport == htons(udpencap_port)) {
+		if (cmd == PRC_MSGSIZE && atomic_load_int(&ip_mtudisc) &&
+		    atomic_load_int(&udpencap_enable) && udpencap_port_local &&
+		    uhp->uh_sport == udpencap_port_local) {
 			udpencap_ctlinput(cmd, sa, rdomain, v);
 			return;
 		}
@@ -922,10 +926,10 @@ udp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 		    ip->ip_dst, uhp->uh_dport, ip->ip_src, uhp->uh_sport,
 		    rdomain);
 		if (inp != NULL)
-			so = in_pcbsolock_ref(inp);
+			so = in_pcbsolock(inp);
 		if (so != NULL)
 			notify(inp, errno);
-		in_pcbsounlock_rele(inp, so);
+		in_pcbsounlock(inp, so);
 		in_pcbunref(inp);
 	} else
 		in_pcbnotifyall(&udbtable, satosin(sa), rdomain, errno, notify);
@@ -1130,10 +1134,11 @@ udp_attach(struct socket *so, int proto, int wait)
 		return error;
 #ifdef INET6
 	if (ISSET(sotoinpcb(so)->inp_flags, INP_IPV6))
-		sotoinpcb(so)->inp_ipv6.ip6_hlim = ip6_defhlim;
+		sotoinpcb(so)->inp_ipv6.ip6_hlim =
+		    atomic_load_int(&ip6_defhlim);
 	else
 #endif
-		sotoinpcb(so)->inp_ip.ip_ttl = ip_defttl;
+		sotoinpcb(so)->inp_ip.ip_ttl = atomic_load_int(&ip_defttl);
 	return 0;
 }
 
@@ -1266,6 +1271,7 @@ udp_send(struct socket *so, struct mbuf *m, struct mbuf *addr,
 	return (udp_output(inp, m, addr, control));
 }
 
+#ifndef SMALL_KERNEL
 /*
  * Sysctl for udp variables.
  */
@@ -1278,16 +1284,37 @@ udp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (ENOTDIR);
 
 	switch (name[0]) {
-	case UDPCTL_BADDYNAMIC:
-	case UDPCTL_ROOTONLY: {
-		size_t savelen = *oldlenp;
+	case UDPCTL_ROOTONLY:
+		if (newp && (int)atomic_load_int(&securelevel) > 0)
+			return (EPERM);
+		/* FALLTHROUGH */
+	case UDPCTL_BADDYNAMIC: {
+		struct baddynamicports *ports = (name[0] == UDPCTL_ROOTONLY ?
+		    &rootonlyports : &baddynamicports);
+		const size_t bufitems = DP_MAPSIZE;
+		const size_t buflen = bufitems * sizeof(uint32_t);
+		size_t i;
+		uint32_t *buf;
 		int error;
 
-		if ((error = sysctl_vslock(oldp, savelen)))
-			return (error);
-		error = udp_sysctl_locked(name, namelen, oldp, oldlenp,
-		    newp, newlen);
-		sysctl_vsunlock(oldp, savelen);
+		buf = malloc(buflen, M_SYSCTL, M_WAITOK | M_ZERO);
+
+		NET_LOCK_SHARED();
+		for (i = 0; i < bufitems; ++i)
+			buf[i] = ports->udp[i];
+		NET_UNLOCK_SHARED();
+
+		error = sysctl_struct(oldp, oldlenp, newp, newlen,
+		    buf, buflen);
+
+		if (error == 0 && newp) {
+			NET_LOCK();
+			for (i = 0; i < bufitems; ++i)
+				ports->udp[i] = buf[i];
+			NET_UNLOCK();
+		}
+
+		free(buf, M_SYSCTL, buflen);
 
 		return (error);
 	}
@@ -1302,33 +1329,6 @@ udp_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		    name, namelen, oldp, oldlenp, newp, newlen));
 	}
 	/* NOTREACHED */
-}
-
-int
-udp_sysctl_locked(int *name, u_int namelen, void *oldp, size_t *oldlenp,
-    void *newp, size_t newlen)
-{
-	int error = ENOPROTOOPT;
-
-	switch (name[0]) {
-	case UDPCTL_BADDYNAMIC:
-		NET_LOCK();
-		error = sysctl_struct(oldp, oldlenp, newp, newlen,
-		    baddynamicports.udp, sizeof(baddynamicports.udp));
-		NET_UNLOCK();
-		break;
-
-	case UDPCTL_ROOTONLY:
-		if (newp && securelevel > 0)
-			return (EPERM);
-		NET_LOCK();
-		error = sysctl_struct(oldp, oldlenp, newp, newlen,
-		    rootonlyports.udp, sizeof(rootonlyports.udp));
-		NET_UNLOCK();
-		break;
-	}
-
-	return (error);
 }
 
 int
@@ -1349,3 +1349,4 @@ udp_sysctl_udpstat(void *oldp, size_t *oldlenp, void *newp)
 	return (sysctl_rdstruct(oldp, oldlenp, newp,
 	    &udpstat, sizeof(udpstat)));
 }
+#endif /* SMALL_KERNEL */

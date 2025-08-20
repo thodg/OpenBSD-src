@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_carp.c,v 1.367 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: ip_carp.c,v 1.370 2025/07/08 00:47:41 jsg Exp $	*/
 
 /*
  * Copyright (c) 2002 Michael Shalayeff. All rights reserved.
@@ -34,18 +34,13 @@
  *
  */
 
-#include "ether.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/timeout.h>
 #include <sys/ioctl.h>
 #include <sys/errno.h>
-#include <sys/device.h>
-#include <sys/kernel.h>
 #include <sys/sysctl.h>
 #include <sys/syslog.h>
 #include <sys/refcnt.h>
@@ -53,8 +48,6 @@
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_types.h>
-#include <net/netisr.h>
-#include <net/route.h>
 
 #include <crypto/sha1.h>
 
@@ -63,7 +56,6 @@
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
 #include <netinet/if_ether.h>
-#include <netinet/ip_ipsp.h>
 
 #include <net/if_dl.h>
 
@@ -79,11 +71,6 @@
 #include "bpfilter.h"
 #if NBPFILTER > 0
 #include <net/bpf.h>
-#endif
-
-#include "vlan.h"
-#if NVLAN > 0
-#include <net/if_vlan_var.h>
 #endif
 
 #include <netinet/ip_carp.h>
@@ -1068,7 +1055,7 @@ void
 carp_send_ad(struct carp_vhost_entry *vhe)
 {
 	struct carp_header ch;
-	struct timeval tv;
+	uint64_t usec;
 	struct carp_softc *sc = vhe->parent_sc;
 	struct carp_header *ch_ptr;
 	struct mbuf *m;
@@ -1091,11 +1078,10 @@ carp_send_ad(struct carp_vhost_entry *vhe)
 	} else {
 		advbase = sc->sc_advbase;
 		advskew = vhe->advskew;
-		tv.tv_sec = advbase;
-		if (advbase == 0 && advskew == 0)
-			tv.tv_usec = 1 * 1000000 / 256;
-		else
-			tv.tv_usec = advskew * 1000000 / 256;
+		usec = (uint64_t)advbase * 1000000;
+		usec += (uint64_t)advskew * 1000000 / 256;
+		if (usec == 0)
+			usec = 1000000 / 256;
 	}
 
 	ch.carp_version = CARP_VERSION;
@@ -1278,7 +1264,7 @@ carp_send_ad(struct carp_vhost_entry *vhe)
 retry_later:
 	sc->cur_vhe = NULL;
 	if (advbase != 255 || advskew != 255)
-		timeout_add_tv(&vhe->ad_tmo, &tv);
+		timeout_add_usec(&vhe->ad_tmo, usec);
 	if_put(ifp);
 }
 
@@ -1587,8 +1573,8 @@ void
 carp_setrun(struct carp_vhost_entry *vhe, sa_family_t af)
 {
 	struct ifnet *ifp;
-	struct timeval tv;
 	struct carp_softc *sc = vhe->parent_sc;
+	uint64_t usec;
 
 	if ((ifp = if_get(sc->sc_carpdevidx)) == NULL) {
 		sc->sc_if.if_flags &= ~IFF_RUNNING;
@@ -1612,6 +1598,11 @@ carp_setrun(struct carp_vhost_entry *vhe, sa_family_t af)
 		return;
 	}
 
+	usec = (uint64_t)sc->sc_advbase * 1000000;
+	usec += (uint64_t)vhe->advskew * 1000000 / 256;
+	if (usec == 0)
+		usec = 1000000 / 256;
+
 	switch (vhe->state) {
 	case INIT:
 		carp_set_state(vhe, BACKUP);
@@ -1619,39 +1610,27 @@ carp_setrun(struct carp_vhost_entry *vhe, sa_family_t af)
 		break;
 	case BACKUP:
 		timeout_del(&vhe->ad_tmo);
-		tv.tv_sec = 3 * sc->sc_advbase;
-		if (sc->sc_advbase == 0 && vhe->advskew == 0)
-			tv.tv_usec = 3 * 1000000 / 256;
-		else if (sc->sc_advbase == 0)
-			tv.tv_usec = 3 * vhe->advskew * 1000000 / 256;
-		else
-			tv.tv_usec = vhe->advskew * 1000000 / 256;
 		if (vhe->vhe_leader)
 			sc->sc_delayed_arp = -1;
 		switch (af) {
 		case AF_INET:
-			timeout_add_tv(&vhe->md_tmo, &tv);
+			timeout_add_usec(&vhe->md_tmo, 3 * usec);
 			break;
 #ifdef INET6
 		case AF_INET6:
-			timeout_add_tv(&vhe->md6_tmo, &tv);
+			timeout_add_usec(&vhe->md6_tmo, 3 * usec);
 			break;
 #endif /* INET6 */
 		default:
 			if (sc->sc_naddrs)
-				timeout_add_tv(&vhe->md_tmo, &tv);
+				timeout_add_usec(&vhe->md_tmo, 3 * usec);
 			if (sc->sc_naddrs6)
-				timeout_add_tv(&vhe->md6_tmo, &tv);
+				timeout_add_usec(&vhe->md6_tmo, 3 * usec);
 			break;
 		}
 		break;
 	case MASTER:
-		tv.tv_sec = sc->sc_advbase;
-		if (sc->sc_advbase == 0 && vhe->advskew == 0)
-			tv.tv_usec = 1 * 1000000 / 256;
-		else
-			tv.tv_usec = vhe->advskew * 1000000 / 256;
-		timeout_add_tv(&vhe->ad_tmo, &tv);
+		timeout_add_usec(&vhe->ad_tmo, usec);
 		break;
 	}
 }

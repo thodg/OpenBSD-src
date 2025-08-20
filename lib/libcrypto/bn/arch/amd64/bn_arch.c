@@ -1,4 +1,4 @@
-/*	$OpenBSD: bn_arch.c,v 1.7 2023/06/24 16:01:44 jsing Exp $ */
+/*	$OpenBSD: bn_arch.c,v 1.12 2025/08/14 15:29:17 jsing Exp $ */
 /*
  * Copyright (c) 2023 Joel Sing <jsing@openbsd.org>
  *
@@ -19,6 +19,7 @@
 
 #include "bn_arch.h"
 #include "bn_local.h"
+#include "crypto_arch.h"
 #include "s2n_bignum.h"
 
 #ifdef HAVE_BN_ADD
@@ -26,8 +27,8 @@ BN_ULONG
 bn_add(BN_ULONG *r, int r_len, const BN_ULONG *a, int a_len, const BN_ULONG *b,
     int b_len)
 {
-	return bignum_add(r_len, (uint64_t *)r, a_len, (uint64_t *)a,
-	    b_len, (uint64_t *)b);
+	return bignum_add(r_len, (uint64_t *)r, a_len, (const uint64_t *)a,
+	    b_len, (const uint64_t *)b);
 }
 #endif
 
@@ -36,8 +37,8 @@ bn_add(BN_ULONG *r, int r_len, const BN_ULONG *a, int a_len, const BN_ULONG *b,
 BN_ULONG
 bn_add_words(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd, int n)
 {
-	return bignum_add(n, (uint64_t *)rd, n, (uint64_t *)ad, n,
-	    (uint64_t *)bd);
+	return bignum_add(n, (uint64_t *)rd, n, (const uint64_t *)ad, n,
+	    (const uint64_t *)bd);
 }
 #endif
 
@@ -46,8 +47,8 @@ BN_ULONG
 bn_sub(BN_ULONG *r, int r_len, const BN_ULONG *a, int a_len, const BN_ULONG *b,
     int b_len)
 {
-	return bignum_sub(r_len, (uint64_t *)r, a_len, (uint64_t *)a,
-	    b_len, (uint64_t *)b);
+	return bignum_sub(r_len, (uint64_t *)r, a_len, (const uint64_t *)a,
+	    b_len, (const uint64_t *)b);
 }
 #endif
 
@@ -55,8 +56,28 @@ bn_sub(BN_ULONG *r, int r_len, const BN_ULONG *a, int a_len, const BN_ULONG *b,
 BN_ULONG
 bn_sub_words(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd, int n)
 {
-	return bignum_sub(n, (uint64_t *)rd, n, (uint64_t *)ad, n,
-	    (uint64_t *)bd);
+	return bignum_sub(n, (uint64_t *)rd, n, (const uint64_t *)ad, n,
+	    (const uint64_t *)bd);
+}
+#endif
+
+#ifdef HAVE_BN_MOD_ADD_WORDS
+void
+bn_mod_add_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
+    const BN_ULONG *m, size_t n)
+{
+	bignum_modadd(n, (uint64_t *)r, (const uint64_t *)a,
+	    (const uint64_t *)b, (const uint64_t *)m);
+}
+#endif
+
+#ifdef HAVE_BN_MOD_SUB_WORDS
+void
+bn_mod_sub_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
+    const BN_ULONG *m, size_t n)
+{
+	bignum_modsub(n, (uint64_t *)r, (const uint64_t *)a,
+	    (const uint64_t *)b, (const uint64_t *)m);
 }
 #endif
 
@@ -64,7 +85,7 @@ bn_sub_words(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd, int n)
 BN_ULONG
 bn_mul_add_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
 {
-	return bignum_cmadd(num, (uint64_t *)rd, w, num, (uint64_t *)ad);
+	return bignum_cmadd(num, (uint64_t *)rd, w, num, (const uint64_t *)ad);
 }
 #endif
 
@@ -72,25 +93,52 @@ bn_mul_add_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
 BN_ULONG
 bn_mul_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
 {
-	return bignum_cmul(num, (uint64_t *)rd, w, num, (uint64_t *)ad);
+	return bignum_cmul(num, (uint64_t *)rd, w, num, (const uint64_t *)ad);
 }
 #endif
 
 #ifdef HAVE_BN_MUL_COMBA4
 void
-bn_mul_comba4(BN_ULONG *rd, BN_ULONG *ad, BN_ULONG *bd)
+bn_mul_comba4(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd)
 {
-	/* XXX - consider using non-alt on CPUs that have the ADX extension. */
-	bignum_mul_4_8_alt((uint64_t *)rd, (uint64_t *)ad, (uint64_t *)bd);
+	if ((crypto_cpu_caps_amd64 & CRYPTO_CPU_CAPS_AMD64_ADX) != 0) {
+		bignum_mul_4_8((uint64_t *)rd, (const uint64_t *)ad,
+		    (const uint64_t *)bd);
+		return;
+	}
+
+	bignum_mul_4_8_alt((uint64_t *)rd, (const uint64_t *)ad,
+	    (const uint64_t *)bd);
+}
+#endif
+
+#ifdef HAVE_BN_MUL_COMBA6
+void
+bn_mul_comba6(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd)
+{
+	if ((crypto_cpu_caps_amd64 & CRYPTO_CPU_CAPS_AMD64_ADX) != 0) {
+		bignum_mul_6_12((uint64_t *)rd, (const uint64_t *)ad,
+		    (const uint64_t *)bd);
+		return;
+	}
+
+	bignum_mul_6_12_alt((uint64_t *)rd, (const uint64_t *)ad,
+	    (const uint64_t *)bd);
 }
 #endif
 
 #ifdef HAVE_BN_MUL_COMBA8
 void
-bn_mul_comba8(BN_ULONG *rd, BN_ULONG *ad, BN_ULONG *bd)
+bn_mul_comba8(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd)
 {
-	/* XXX - consider using non-alt on CPUs that have the ADX extension. */
-	bignum_mul_8_16_alt((uint64_t *)rd, (uint64_t *)ad, (uint64_t *)bd);
+	if ((crypto_cpu_caps_amd64 & CRYPTO_CPU_CAPS_AMD64_ADX) != 0) {
+		bignum_mul_8_16((uint64_t *)rd, (const uint64_t *)ad,
+		    (const uint64_t *)bd);
+		return;
+	}
+
+	bignum_mul_8_16_alt((uint64_t *)rd, (const uint64_t *)ad,
+	    (const uint64_t *)bd);
 }
 #endif
 
@@ -98,7 +146,7 @@ bn_mul_comba8(BN_ULONG *rd, BN_ULONG *ad, BN_ULONG *bd)
 int
 bn_sqr(BIGNUM *r, const BIGNUM *a, int r_len, BN_CTX *ctx)
 {
-	bignum_sqr(r_len, (uint64_t *)r->d, a->top, (uint64_t *)a->d);
+	bignum_sqr(r_len, (uint64_t *)r->d, a->top, (const uint64_t *)a->d);
 
 	return 1;
 }
@@ -108,8 +156,25 @@ bn_sqr(BIGNUM *r, const BIGNUM *a, int r_len, BN_CTX *ctx)
 void
 bn_sqr_comba4(BN_ULONG *rd, const BN_ULONG *ad)
 {
-	/* XXX - consider using non-alt on CPUs that have the ADX extension. */
-	bignum_sqr_4_8_alt((uint64_t *)rd, (uint64_t *)ad);
+	if ((crypto_cpu_caps_amd64 & CRYPTO_CPU_CAPS_AMD64_ADX) != 0) {
+		bignum_sqr_4_8((uint64_t *)rd, (const uint64_t *)ad);
+		return;
+	}
+
+	bignum_sqr_4_8_alt((uint64_t *)rd, (const uint64_t *)ad);
+}
+#endif
+
+#ifdef HAVE_BN_SQR_COMBA6
+void
+bn_sqr_comba6(BN_ULONG *rd, const BN_ULONG *ad)
+{
+	if ((crypto_cpu_caps_amd64 & CRYPTO_CPU_CAPS_AMD64_ADX) != 0) {
+		bignum_sqr_6_12((uint64_t *)rd, (const uint64_t *)ad);
+		return;
+	}
+
+	bignum_sqr_6_12_alt((uint64_t *)rd, (const uint64_t *)ad);
 }
 #endif
 
@@ -117,8 +182,12 @@ bn_sqr_comba4(BN_ULONG *rd, const BN_ULONG *ad)
 void
 bn_sqr_comba8(BN_ULONG *rd, const BN_ULONG *ad)
 {
-	/* XXX - consider using non-alt on CPUs that have the ADX extension. */
-	bignum_sqr_8_16_alt((uint64_t *)rd, (uint64_t *)ad);
+	if ((crypto_cpu_caps_amd64 & CRYPTO_CPU_CAPS_AMD64_ADX) != 0) {
+		bignum_sqr_8_16((uint64_t *)rd, (const uint64_t *)ad);
+		return;
+	}
+
+	bignum_sqr_8_16_alt((uint64_t *)rd, (const uint64_t *)ad);
 }
 #endif
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_iwxreg.h,v 1.55 2024/11/08 09:12:46 kettenis Exp $	*/
+/*	$OpenBSD: if_iwxreg.h,v 1.57 2025/07/15 13:40:02 jsg Exp $	*/
 
 /*-
  * Based on BSD-licensed source modules in the Linux iwlwifi driver,
@@ -2836,7 +2836,7 @@ struct iwx_fw_dbg_trigger_time_event {
  * rx_bar: tid bitmap to configure on what tid the trigger should occur
  *	when a BAR is received (for a Tx BlockAck session).
  * tx_bar: tid bitmap to configure on what tid the trigger should occur
- *	when a BAR is send (for an Rx BlocAck session).
+ *	when a BAR is send (for an Rx BlockAck session).
  * frame_timeout: tid bitmap to configure on what tid the trigger should occur
  *	when a frame times out in the reordering buffer.
  */
@@ -4527,7 +4527,7 @@ struct iwx_mac_ctx_cmd {
  *	Available only from version 2 of the command.
  *	This values comes from the EMLSR transition delay in the EML Capabilities
  *	subfield.
- * @medium_sync_delay: the value as it appeasr in P802.11be_D2.2 Figure 9-1002j.
+ * @medium_sync_delay: the value as it appears in P802.11be_D2.2 Figure 9-1002j.
  * @assoc_id: unique ID assigned by the AP during association
  * @reserved1: alignment
  * @data_policy: see &enum iwx_mac_data_policy

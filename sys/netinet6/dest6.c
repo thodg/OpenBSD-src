@@ -1,4 +1,4 @@
-/*	$OpenBSD: dest6.c,v 1.21 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: dest6.c,v 1.24 2025/07/08 00:47:41 jsg Exp $	*/
 /*	$KAME: dest6.c,v 1.25 2001/02/22 01:39:16 itojun Exp $	*/
 
 /*
@@ -34,16 +34,12 @@
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
-#include <sys/errno.h>
-#include <sys/time.h>
-#include <sys/kernel.h>
 
 #include <net/route.h>
 
 #include <netinet/in.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
-#include <netinet/icmp6.h>
 
 /*
  * Destination options header processing.
@@ -57,12 +53,12 @@ dest6_input(struct mbuf **mp, int *offp, int proto, int af,
 	u_int8_t *opt;
 
 	/* validation of the length of the header */
-	IP6_EXTHDR_GET(dstopts, struct ip6_dest *, *mp, off, sizeof(*dstopts));
+	dstopts = ip6_exthdr_get(mp, off, sizeof(*dstopts));
 	if (dstopts == NULL)
 		return IPPROTO_DONE;
 	dstoptlen = (dstopts->ip6d_len + 1) << 3;
 
-	IP6_EXTHDR_GET(dstopts, struct ip6_dest *, *mp, off, dstoptlen);
+	dstopts = ip6_exthdr_get(mp, off, dstoptlen);
 	if (dstopts == NULL)
 		return IPPROTO_DONE;
 	off += dstoptlen;

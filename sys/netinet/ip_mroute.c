@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_mroute.c,v 1.144 2025/03/11 15:31:03 mvs Exp $	*/
+/*	$OpenBSD: ip_mroute.c,v 1.150 2025/07/19 16:40:40 mvs Exp $	*/
 /*	$NetBSD: ip_mroute.c,v 1.85 2004/04/26 01:31:57 matt Exp $	*/
 
 /*
@@ -60,10 +60,10 @@
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/protosw.h>
 #include <sys/ioctl.h>
 #include <sys/syslog.h>
+#include <sys/sysctl.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
@@ -75,6 +75,11 @@
 #include <netinet/in_pcb.h>
 #include <netinet/igmp.h>
 #include <netinet/ip_mroute.h>
+
+/*
+ * Locks used to protect data:
+ *	I	immutable after creation
+ */
 
 /* #define MCAST_DEBUG */
 
@@ -98,12 +103,11 @@ int mcast_debug = 1;
 struct socket	*ip_mrouter[RT_TABLEID_MAX + 1];
 struct rttimer_queue ip_mrouterq;
 uint64_t	 mrt_count[RT_TABLEID_MAX + 1];
-int		ip_mrtproto = IGMP_DVMRP;    /* for netstat only */
+int		ip_mrtproto = IGMP_DVMRP;    /* [I] for netstat only */
 
-struct mrtstat	mrtstat;
+struct cpumem *mrtcounters;
 
-struct rtentry	*mfc_find(struct ifnet *, struct in_addr *,
-    struct in_addr *, unsigned int);
+struct rtentry	*mfc_find(struct ifnet *, struct in_addr *, unsigned int);
 int get_sg_cnt(unsigned int, struct sioc_sg_req *);
 int get_vif_cnt(unsigned int, struct sioc_vif_req *);
 int mrt_rtwalk_mfcsysctl(struct rtentry *, void *, unsigned int);
@@ -113,6 +117,7 @@ int get_version(struct mbuf *);
 int add_vif(struct socket *, struct mbuf *);
 int del_vif(struct socket *, struct mbuf *);
 void update_mfc_params(struct mfcctl2 *, int, unsigned int);
+void mfc_expire_route(struct rtentry *, u_int);
 int mfc_add(struct mfcctl2 *, struct in_addr *, struct in_addr *,
     int, unsigned int, int);
 int add_mfc(struct socket *, struct mbuf *);
@@ -138,14 +143,13 @@ static const u_int32_t mrt_api_support = (MRT_MFC_FLAGS_DISABLE_WRONGVIF |
 static u_int32_t mrt_api_config = 0;
 
 /*
- * Find a route for a given origin IP address and Multicast group address
+ * Find a route for a given Multicast group address.
  * Type of service parameter to be added in the future!!!
- * Statistics are updated by the caller if needed
- * (mrtstat.mrts_mfc_lookups and mrtstat.mrts_mfc_misses)
+ * Statistics are updated by the caller if needed (mrts_mfc_lookups and
+ * mrts_mfc_misses)
  */
 struct rtentry *
-mfc_find(struct ifnet *ifp, struct in_addr *origin, struct in_addr *group,
-    unsigned int rtableid)
+mfc_find(struct ifnet *ifp, struct in_addr *group, unsigned int rtableid)
 {
 	struct rtentry		*rt;
 	struct sockaddr_in	 msin;
@@ -249,6 +253,15 @@ ip_mrouter_get(struct socket *so, int optname, struct mbuf *m)
 	return (error);
 }
 
+void
+mrt_init(void)
+{
+	mrtcounters = counters_alloc(mrts_ncounters);
+
+	rt_timer_queue_init(&ip_mrouterq, MCAST_EXPIRE_FREQUENCY,
+	    &mfc_expire_route);
+}
+
 /*
  * Handle ioctl commands to obtain information from the cache
  */
@@ -297,7 +310,7 @@ get_sg_cnt(unsigned int rtableid, struct sioc_sg_req *req)
 	struct rtentry *rt;
 	struct mfc *mfc;
 
-	rt = mfc_find(NULL, &req->src, &req->grp, rtableid);
+	rt = mfc_find(NULL, &req->grp, rtableid);
 	if (rt == NULL) {
 		req->pktcnt = req->bytecnt = req->wrong_if = 0xffffffff;
 		return (EADDRNOTAVAIL);
@@ -347,18 +360,36 @@ get_vif_cnt(unsigned int rtableid, struct sioc_vif_req *req)
 int
 mrt_sysctl_vif(void *oldp, size_t *oldlenp)
 {
+	TAILQ_HEAD(, ifnet) if_tmplist =
+	    TAILQ_HEAD_INITIALIZER(if_tmplist);
 	caddr_t where = oldp;
 	size_t needed, given;
 	struct ifnet *ifp;
 	struct vif *vifp;
 	struct vifinfo vinfo;
+	int error = 0;
 
 	given = *oldlenp;
 	needed = 0;
 	memset(&vinfo, 0, sizeof vinfo);
+
+	rw_enter_write(&if_tmplist_lock);
+	NET_LOCK_SHARED();
+
 	TAILQ_FOREACH(ifp, &ifnetlist, if_list) {
-		if ((vifp = (struct vif *)ifp->if_mcast) == NULL)
+		if (ifp->if_mcast != NULL) {
+			if_ref(ifp);
+			TAILQ_INSERT_TAIL(&if_tmplist, ifp, if_tmplist);
+		}
+	}
+	NET_UNLOCK_SHARED();
+
+	TAILQ_FOREACH (ifp, &if_tmplist, if_tmplist) {
+		NET_LOCK_SHARED();
+		if ((vifp = (struct vif *)ifp->if_mcast) == NULL) {
+			NET_UNLOCK_SHARED();
 			continue;
+		}
 
 		vinfo.v_vifi = vifp->v_id;
 		vinfo.v_flags = vifp->v_flags;
@@ -369,17 +400,27 @@ mrt_sysctl_vif(void *oldp, size_t *oldlenp)
 		vinfo.v_pkt_out = vifp->v_pkt_out;
 		vinfo.v_bytes_in = vifp->v_bytes_in;
 		vinfo.v_bytes_out = vifp->v_bytes_out;
+		NET_UNLOCK_SHARED();
 
 		needed += sizeof(vinfo);
 		if (where && needed <= given) {
-			int error;
-
 			error = copyout(&vinfo, where, sizeof(vinfo));
 			if (error)
-				return (error);
+				break;
 			where += sizeof(vinfo);
 		}
 	}
+
+	while ((ifp = TAILQ_FIRST(&if_tmplist))) {
+		TAILQ_REMOVE(&if_tmplist, ifp, if_tmplist);
+		if_put(ifp);
+	}
+
+	rw_exit_write(&if_tmplist_lock);
+
+	if (error)
+		return (error);
+
 	if (where) {
 		*oldlenp = needed;
 		if (given < needed)
@@ -463,6 +504,38 @@ mrt_rtwalk_mfcsysctl(struct rtentry *rt, void *arg, unsigned int rtableid)
 }
 
 int
+mrt_sysctl_mrtstat(void *oldp, size_t *oldlenp, void *newp)
+{
+	uint64_t counters[mrts_ncounters];
+	struct mrtstat mrtstat;
+	int i = 0;
+
+#define ASSIGN(field)	do { mrtstat.field = counters[i++]; } while (0)
+
+	memset(&mrtstat, 0, sizeof mrtstat);
+	counters_read(mrtcounters, counters, nitems(counters), NULL);
+
+	ASSIGN(mrts_mfc_lookups);
+	ASSIGN(mrts_mfc_misses);
+	ASSIGN(mrts_upcalls);
+	ASSIGN(mrts_no_route);
+	ASSIGN(mrts_bad_tunnel);
+	ASSIGN(mrts_cant_tunnel);
+	ASSIGN(mrts_wrong_if);
+	ASSIGN(mrts_upq_ovflw);
+	ASSIGN(mrts_cache_cleanups);
+	ASSIGN(mrts_drop_sel);
+	ASSIGN(mrts_q_overflow);
+	ASSIGN(mrts_pkt2large);
+	ASSIGN(mrts_upq_sockfull);
+
+#undef ASSIGN
+
+	return (sysctl_rdstruct(oldp, oldlenp, newp,
+	    &mrtstat, sizeof(mrtstat)));
+}
+
+int
 mrt_sysctl_mfc(void *oldp, size_t *oldlenp)
 {
 	unsigned int		 rtableid;
@@ -478,10 +551,12 @@ mrt_sysctl_mfc(void *oldp, size_t *oldlenp)
 		msa.msa_len = *oldlenp;
 	}
 
+	NET_LOCK();
 	for (rtableid = 0; rtableid <= RT_TABLEID_MAX; rtableid++) {
 		rtable_walk(rtableid, AF_INET, NULL, mrt_rtwalk_mfcsysctl,
 		    &msa);
 	}
+	NET_UNLOCK();
 
 	if (msa.msa_minfos != NULL && msa.msa_needed > 0 &&
 	    (error = copyout(msa.msa_minfos, oldp, msa.msa_needed)) != 0) {
@@ -880,8 +955,7 @@ update_mfc_params(struct mfcctl2 *mfccp, int wait, unsigned int rtableid)
 		if ((ifp = if_lookupbyvif(i, rtableid)) == NULL)
 			continue;
 
-		rt = mfc_find(ifp, &mfccp->mfcc_origin,
-		    &mfccp->mfcc_mcastgrp, rtableid);
+		rt = mfc_find(ifp, &mfccp->mfcc_mcastgrp, rtableid);
 
 		/* vif not configured or removed. */
 		if (mfccp->mfcc_ttls[i] == 0) {
@@ -935,8 +1009,7 @@ update_mfc_params(struct mfcctl2 *mfccp, int wait, unsigned int rtableid)
 	}
 
 	/* We already have a route, nothing to do here. */
-	if ((rt = mfc_find(ifp, &mfccp->mfcc_origin,
-	    &mfccp->mfcc_mcastgrp, rtableid)) != NULL) {
+	if ((rt = mfc_find(ifp, &mfccp->mfcc_mcastgrp, rtableid)) != NULL) {
 		rtfree(rt);
 		return;
 	}
@@ -1037,8 +1110,7 @@ del_mfc(struct socket *so, struct mbuf *m)
 	DPRINTF("origin %#08X group %#08X rtableid %d",
 	    mfcctl2.mfcc_origin.s_addr, mfcctl2.mfcc_mcastgrp.s_addr, rtableid);
 
-	while ((rt = mfc_find(NULL, &mfcctl2.mfcc_origin,
-	    &mfcctl2.mfcc_mcastgrp, rtableid)) != NULL) {
+	while ((rt = mfc_find(NULL, &mfcctl2.mfcc_mcastgrp, rtableid)) != NULL) {
 		mrt_mcast_del(rt, rtableid);
 		rtfree(rt);
 	}
@@ -1116,8 +1188,8 @@ ip_mforward(struct mbuf *m, struct ifnet *ifp, int flags)
 	/*
 	 * Determine forwarding vifs from the forwarding cache table
 	 */
-	++mrtstat.mrts_mfc_lookups;
-	rt = mfc_find(NULL, &ip->ip_src, &ip->ip_dst, rtableid);
+	mrtstat_inc(mrts_mfc_lookups);
+	rt = mfc_find(NULL, &ip->ip_dst, rtableid);
 
 	/* Entry exists, so forward if necessary */
 	if (rt != NULL) {
@@ -1129,8 +1201,8 @@ ip_mforward(struct mbuf *m, struct ifnet *ifp, int flags)
 		 */
 		int hlen = ip->ip_hl << 2;
 
-		++mrtstat.mrts_mfc_misses;
-		mrtstat.mrts_no_route++;
+		mrtstat_inc(mrts_mfc_misses);
+		mrtstat_inc(mrts_no_route);
 
 		{
 			struct igmpmsg *im;
@@ -1161,13 +1233,13 @@ ip_mforward(struct mbuf *m, struct ifnet *ifp, int flags)
 			im->im_mbz = 0;
 			im->im_vif = v->v_id;
 
-			mrtstat.mrts_upcalls++;
+			mrtstat_inc(mrts_upcalls);
 
 			sin.sin_addr = ip->ip_src;
 			if (socket_send(ip_mrouter[rtableid], mm, &sin) < 0) {
 				log(LOG_WARNING, "ip_mforward: ip_mrouter "
 				    "socket queue full\n");
-				++mrtstat.mrts_upq_sockfull;
+				mrtstat_inc(mrts_upq_sockfull);
 				return (ENOBUFS);
 			}
 
@@ -1203,7 +1275,7 @@ ip_mdq(struct mbuf *m, struct ifnet *ifp0, struct rtentry *rt, int flags)
 	 */
 	if (mfc->mfc_parent != v->v_id) {
 		/* came in the wrong interface */
-		++mrtstat.mrts_wrong_if;
+		mrtstat_inc(mrts_wrong_if);
 		mfc->mfc_wrong_if++;
 		rtfree(rt);
 		return (0);
@@ -1333,7 +1405,7 @@ rt_mcast_add(struct ifnet *ifp, struct sockaddr *origin, struct sockaddr *group)
 
 	mrt_count[rtableid]++;
 
-	return (mfc_find(ifp, NULL, &satosin(group)->sin_addr, rtableid));
+	return (mfc_find(ifp, &satosin(group)->sin_addr, rtableid));
 }
 
 void

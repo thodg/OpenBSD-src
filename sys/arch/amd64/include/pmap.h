@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.h,v 1.91 2024/11/08 01:57:34 jsg Exp $	*/
+/*	$OpenBSD: pmap.h,v 1.94 2025/07/07 00:55:15 jsg Exp $	*/
 /*	$NetBSD: pmap.h,v 1.1 2003/04/26 18:39:46 fvdl Exp $	*/
 
 /*
@@ -399,7 +399,6 @@ int		pmap_test_attrs(struct vm_page *, unsigned);
 static void	pmap_update_pg(vaddr_t);
 void		pmap_write_protect(struct pmap *, vaddr_t,
 				vaddr_t, vm_prot_t);
-void		pmap_fix_ept(struct pmap *, vaddr_t);
 
 paddr_t	pmap_prealloc_lowmem_ptps(paddr_t);
 
@@ -429,12 +428,6 @@ void	pmap_flush_cache(vaddr_t, vsize_t);
 /*
  * inline functions
  */
-
-static inline void
-pmap_remove_all(struct pmap *pmap)
-{
-	/* Nothing. */
-}
 
 /*
  * pmap_update_pg: flush one page from the TLB (or flush the whole thing
@@ -486,19 +479,8 @@ pmap_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 }
 
 /*
- * various address inlines
- *
- *  vtopte: return a pointer to the PTE mapping a VA, works only for
- *  user and PT addresses
- *
  *  kvtopte: return a pointer to the PTE mapping a kernel VA
  */
-
-static inline pt_entry_t *
-vtopte(vaddr_t va)
-{
-	return (PTE_BASE + pl1_i(va));
-}
 
 static inline pt_entry_t *
 kvtopte(vaddr_t va)

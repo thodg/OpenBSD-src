@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.137 2024/10/23 07:41:44 mpi Exp $	*/
+/*	$OpenBSD: trap.c,v 1.139 2025/07/25 16:55:00 miod Exp $	*/
 /*
  * Copyright (c) 2004, Miodrag Vallat.
  * Copyright (c) 1998 Steve Murphree, Jr.
@@ -1333,8 +1333,7 @@ m88110_syscall(register_t code, struct trapframe *tf)
  * and do normal return-to-user-mode stuff.
  */
 void
-child_return(arg)
-	void *arg;
+child_return(void *arg)
 {
 	struct proc *p = arg;
 	struct trapframe *tf;
@@ -1594,7 +1593,7 @@ splassert_check(int wantipl, const char *func)
 int
 double_reg_fixup(struct trapframe *frame, int fault)
 {
-	u_int32_t pc, instr, value;
+	uint32_t pc, instr, value;
 	int regno, store;
 	vaddr_t addr;
 
@@ -1683,12 +1682,14 @@ double_reg_fixup(struct trapframe *frame, int fault)
 		/*
 		 * Two word loads. r0 should be left unaltered, but the
 		 * value should still be fetched even if it is discarded.
+		 * We can use copyin32 here as the address is guaranteed
+		 * to be properly aligned on a 32-bit boundary.
 		 */
-		if (copyin((void *)addr, &value, sizeof(u_int32_t)) != 0)
+		if (copyin32((const uint32_t *)addr, &value) != 0)
 			return SIGSEGV;
 		if (regno != 0)
 			frame->tf_r[regno] = value;
-		if (copyin((void *)(addr + 4), &value, sizeof(u_int32_t)) != 0)
+		if (copyin32((const uint32_t *)(addr + 4), &value) != 0)
 			return SIGSEGV;
 		if (regno != 31)
 			frame->tf_r[regno + 1] = value;

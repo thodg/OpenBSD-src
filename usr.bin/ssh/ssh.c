@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh.c,v 1.612 2025/04/09 01:24:40 djm Exp $ */
+/* $OpenBSD: ssh.c,v 1.615 2025/08/18 03:43:01 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -513,16 +513,28 @@ resolve_canonicalize(char **hostp, int port)
 static void
 check_load(int r, struct sshkey **k, const char *path, const char *message)
 {
+	char *fp;
+
 	switch (r) {
 	case 0:
+		if (k == NULL || *k == NULL)
+			return;
 		/* Check RSA keys size and discard if undersized */
-		if (k != NULL && *k != NULL &&
-		    (r = sshkey_check_rsa_length(*k,
+		if ((r = sshkey_check_rsa_length(*k,
 		    options.required_rsa_size)) != 0) {
 			error_r(r, "load %s \"%s\"", message, path);
 			free(*k);
 			*k = NULL;
+			break;
 		}
+		if ((fp = sshkey_fingerprint(*k,
+		    options.fingerprint_hash, SSH_FP_DEFAULT)) == NULL) {
+			fatal_f("failed to fingerprint %s %s key from %s",
+			    sshkey_type(*k), message, path);
+		}
+		debug("loaded %s from %s: %s %s", message, path,
+		    sshkey_type(*k), fp);
+		free(fp);
 		break;
 	case SSH_ERR_INTERNAL_ERROR:
 	case SSH_ERR_ALLOC_FAIL:
@@ -536,6 +548,8 @@ check_load(int r, struct sshkey **k, const char *path, const char *message)
 		error_r(r, "load %s \"%s\"", message, path);
 		break;
 	}
+	if (k != NULL && *k == NULL)
+		debug("no %s loaded from %s", message, path);
 }
 
 /*
@@ -717,7 +731,6 @@ main(int ac, char **av)
 	if ((ssh = ssh_alloc_session_state()) == NULL)
 		fatal("Couldn't allocate session state");
 	channel_init_channels(ssh);
-
 
 	/* Parse command-line arguments. */
 	args = argv_assemble(ac, av); /* logged later */
@@ -1341,6 +1354,8 @@ main(int ac, char **av)
 	if (options.port == 0)
 		options.port = default_ssh_port();
 	channel_set_af(ssh, options.address_family);
+	ssh_packet_set_qos(ssh, options.ip_qos_interactive,
+	    options.ip_qos_bulk);
 
 	/* Tidy and check options */
 	if (options.host_key_alias != NULL)
@@ -1702,10 +1717,9 @@ main(int ac, char **av)
 	if ((o) >= sensitive_data.nkeys) \
 		fatal_f("pubkey out of array bounds"); \
 	check_load(sshkey_load_public(p, &(sensitive_data.keys[o]), NULL), \
-	    &(sensitive_data.keys[o]), p, "pubkey"); \
+	    &(sensitive_data.keys[o]), p, "hostbased pubkey"); \
 	if (sensitive_data.keys[o] != NULL) { \
-		debug2("hostbased key %d: %s key from \"%s\"", o, \
-		    sshkey_ssh_name(sensitive_data.keys[o]), p); \
+		debug2("hostbased pubkey \"%s\" in slot %d", p, o); \
 		loaded++; \
 	} \
 } while (0)
@@ -1713,10 +1727,9 @@ main(int ac, char **av)
 	if ((o) >= sensitive_data.nkeys) \
 		fatal_f("cert out of array bounds"); \
 	check_load(sshkey_load_cert(p, &(sensitive_data.keys[o])), \
-	    &(sensitive_data.keys[o]), p, "cert"); \
+	    &(sensitive_data.keys[o]), p, "hostbased cert"); \
 	if (sensitive_data.keys[o] != NULL) { \
-		debug2("hostbased key %d: %s cert from \"%s\"", o, \
-		    sshkey_ssh_name(sensitive_data.keys[o]), p); \
+		debug2("hostbased cert \"%s\" in slot %d", p, o); \
 		loaded++; \
 	} \
 } while (0)
@@ -1725,15 +1738,9 @@ main(int ac, char **av)
 			L_CERT(_PATH_HOST_ECDSA_KEY_FILE, 0);
 			L_CERT(_PATH_HOST_ED25519_KEY_FILE, 1);
 			L_CERT(_PATH_HOST_RSA_KEY_FILE, 2);
-#ifdef WITH_DSA
-			L_CERT(_PATH_HOST_DSA_KEY_FILE, 3);
-#endif
 			L_PUBKEY(_PATH_HOST_ECDSA_KEY_FILE, 4);
 			L_PUBKEY(_PATH_HOST_ED25519_KEY_FILE, 5);
 			L_PUBKEY(_PATH_HOST_RSA_KEY_FILE, 6);
-#ifdef WITH_DSA
-			L_PUBKEY(_PATH_HOST_DSA_KEY_FILE, 7);
-#endif
 			L_CERT(_PATH_HOST_XMSS_KEY_FILE, 8);
 			L_PUBKEY(_PATH_HOST_XMSS_KEY_FILE, 9);
 			if (loaded == 0)
@@ -2155,7 +2162,7 @@ ssh_session2_setup(struct ssh *ssh, int id, int success, void *arg)
 {
 	extern char **environ;
 	const char *display, *term;
-	int r, interactive = tty_flag;
+	int r;
 	char *proto = NULL, *data = NULL;
 
 	if (!success)
@@ -2174,7 +2181,6 @@ ssh_session2_setup(struct ssh *ssh, int id, int success, void *arg)
 		    data, 1);
 		client_expect_confirm(ssh, id, "X11 forwarding", CONFIRM_WARN);
 		/* XXX exit_on_forward_failure */
-		interactive = 1;
 	}
 
 	check_agent_present();
@@ -2184,10 +2190,6 @@ ssh_session2_setup(struct ssh *ssh, int id, int success, void *arg)
 		if ((r = sshpkt_send(ssh)) != 0)
 			fatal_fr(r, "send packet");
 	}
-
-	/* Tell the packet module whether this is an interactive session. */
-	ssh_packet_set_interactive(ssh, interactive,
-	    options.ip_qos_interactive, options.ip_qos_bulk);
 
 	if ((term = lookup_env_in_list("TERM", options.setenv,
 	    options.num_setenv)) == NULL || *term == '\0')
@@ -2225,8 +2227,9 @@ ssh_session2_open(struct ssh *ssh)
 	    "session", SSH_CHANNEL_OPENING, in, out, err,
 	    window, packetmax, CHAN_EXTENDED_WRITE,
 	    "client-session", CHANNEL_NONBLOCK_STDIO);
-
-	debug3_f("channel_new: %d", c->self);
+	if (tty_flag)
+		channel_set_tty(ssh, c);
+	debug3_f("channel_new: %d%s", c->self, tty_flag ? " (tty)" : "");
 
 	channel_send_open(ssh, c->self);
 	if (options.session_type != SESSION_TYPE_NONE)
@@ -2239,7 +2242,7 @@ ssh_session2_open(struct ssh *ssh)
 static int
 ssh_session2(struct ssh *ssh, const struct ssh_conn_info *cinfo)
 {
-	int r, interactive, id = -1;
+	int r, id = -1;
 	char *cp, *tun_fwd_ifname = NULL;
 
 	/* XXX should be pre-session */
@@ -2295,14 +2298,6 @@ ssh_session2(struct ssh *ssh, const struct ssh_conn_info *cinfo)
 
 	if (options.session_type != SESSION_TYPE_NONE)
 		id = ssh_session2_open(ssh);
-	else {
-		interactive = options.control_master == SSHCTL_MASTER_NO;
-		/* ControlPersist may have clobbered ControlMaster, so check */
-		if (need_controlpersist_detach)
-			interactive = otty_flag != 0;
-		ssh_packet_set_interactive(ssh, interactive,
-		    options.ip_qos_interactive, options.ip_qos_bulk);
-	}
 
 	/* If we don't expect to open a new session, then disallow it */
 	if (options.control_master == SSHCTL_MASTER_NO &&
@@ -2427,9 +2422,7 @@ load_public_identity_files(const struct ssh_conn_info *cinfo)
 			continue;
 		xasprintf(&cp, "%s-cert", filename);
 		check_load(sshkey_load_public(cp, &public, NULL),
-		    &public, filename, "pubkey");
-		debug("identity file %s type %d", cp,
-		    public ? public->type : -1);
+		    &public, filename, "identity pubkey");
 		if (public == NULL) {
 			free(cp);
 			continue;
@@ -2458,9 +2451,7 @@ load_public_identity_files(const struct ssh_conn_info *cinfo)
 		free(cp);
 
 		check_load(sshkey_load_public(filename, &public, NULL),
-		    &public, filename, "certificate");
-		debug("certificate file %s type %d", filename,
-		    public ? public->type : -1);
+		    &public, filename, "identity cert");
 		free(options.certificate_files[i]);
 		options.certificate_files[i] = NULL;
 		if (public == NULL) {

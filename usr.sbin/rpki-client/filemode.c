@@ -1,4 +1,4 @@
-/*	$OpenBSD: filemode.c,v 1.58 2025/02/25 15:55:26 claudio Exp $ */
+/*	$OpenBSD: filemode.c,v 1.67 2025/08/01 16:33:58 tb Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -32,6 +32,7 @@
 #include <imsg.h>
 
 #include <openssl/asn1.h>
+#include <openssl/cms.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -43,7 +44,7 @@
 
 static X509_STORE_CTX	*ctx;
 static struct auth_tree	 auths = RB_INITIALIZER(&auths);
-static struct crl_tree	 crlt = RB_INITIALIZER(&crlt);
+static struct crl_tree	 crls = RB_INITIALIZER(&crls);
 
 struct tal		*talobj[TALSZ_MAX];
 
@@ -117,7 +118,7 @@ parse_load_crl(char *uri)
 	}
 
 	crl = crl_parse(uri, f, flen);
-	if (crl != NULL && !crl_insert(&crlt, crl))
+	if (crl != NULL && !crl_insert(&crls, crl))
 		crl_free(crl);
 
 	free(f);
@@ -151,7 +152,7 @@ parse_load_cert(char *uri)
 		goto done;
 	}
 
-	cert = cert_parse_pre(uri, f, flen);
+	cert = cert_parse(uri, f, flen);
 	free(f);
 
 	if (cert == NULL)
@@ -217,7 +218,7 @@ parse_load_certchain(char *uri)
 		cert = stack[i - 1];
 		uri = filestack[i - 1];
 
-		crl = crl_get(&crlt, a);
+		crl = crl_get(&crls, a);
 		if (!valid_x509(uri, ctx, cert->x509, a, crl, &errstr) ||
 		    !valid_cert(uri, a, cert)) {
 			if (errstr != NULL)
@@ -260,7 +261,7 @@ parse_load_ta(struct tal *tal)
 	}
 
 	/* Extract certificate data. */
-	cert = cert_parse_pre(file, f, flen);
+	cert = cert_parse(file, f, flen);
 	cert = ta_parse(file, cert, tal->pkey, tal->pkeysz);
 	if (cert == NULL)
 		goto out;
@@ -313,7 +314,7 @@ print_signature_path(const char *crl, const char *aia, const struct auth *a)
 {
 	if (crl != NULL)
 		printf("Signature path:           %s\n", crl);
-	if (a != NULL && a->cert != NULL && a->cert->mft != NULL)
+	if (a != NULL)
 		printf("                          %s\n", a->cert->mft);
 	if (aia != NULL)
 		printf("                          %s\n", aia);
@@ -321,13 +322,86 @@ print_signature_path(const char *crl, const char *aia, const struct auth *a)
 	for (; a != NULL; a = a->issuer) {
 		if (a->cert->crl != NULL)
 			printf("                          %s\n", a->cert->crl);
-		if (a->issuer != NULL && a->issuer->cert != NULL &&
-		    a->issuer->cert->mft != NULL)
+		if (a->issuer != NULL)
 			printf("                          %s\n",
 			    a->issuer->cert->mft);
 		if (a->cert->aia != NULL)
 			printf("                          %s\n", a->cert->aia);
 	}
+}
+
+/*
+ * Attempt to determine the file type from the DER by trial and error.
+ */
+static enum rtype
+rtype_from_der(const char *fn, const unsigned char *der, size_t len)
+{
+	CMS_ContentInfo		*cms = NULL;
+	X509			*x509 = NULL;
+	X509_CRL		*crl = NULL;
+	const unsigned char	*p;
+	enum rtype		 rtype = RTYPE_INVALID;
+
+	/* Does der parse as a CMS signed object? */
+	p = der;
+	if ((cms = d2i_CMS_ContentInfo(NULL, &p, len)) != NULL) {
+		const ASN1_OBJECT *obj;
+
+		if (CMS_get0_SignerInfos(cms) == NULL) {
+			warnx("%s: CMS object not signedData", fn);
+			goto out;
+		}
+
+		if ((obj = CMS_get0_eContentType(cms)) == NULL) {
+			warnx("%s: RFC 6488, section 2.1.3.1: eContentType: "
+			    "OID object is NULL", fn);
+			goto out;
+		}
+
+		if (OBJ_cmp(obj, aspa_oid) == 0)
+			rtype = RTYPE_ASPA;
+		else if (OBJ_cmp(obj, mft_oid) == 0)
+			rtype = RTYPE_MFT;
+		else if (OBJ_cmp(obj, gbr_oid) == 0)
+			rtype = RTYPE_GBR;
+		else if (OBJ_cmp(obj, roa_oid) == 0)
+			rtype = RTYPE_ROA;
+		else if (OBJ_cmp(obj, rsc_oid) == 0)
+			rtype = RTYPE_RSC;
+		else if (OBJ_cmp(obj, spl_oid) == 0)
+			rtype = RTYPE_SPL;
+		else if (OBJ_cmp(obj, tak_oid) == 0)
+			rtype = RTYPE_TAK;
+
+		goto out;
+	}
+
+	/* Does der parse as a certificate? */
+	p = der;
+	if ((x509 = d2i_X509(NULL, &p, len)) != NULL) {
+		rtype = RTYPE_CER;
+		goto out;
+	}
+
+	/* Does der parse as a CRL? */
+	p = der;
+	if ((crl = d2i_X509_CRL(NULL, &p, len)) != NULL) {
+		rtype = RTYPE_CRL;
+		goto out;
+	}
+
+	/*
+	 * We could add some heuristics for recognizing TALs and geofeed by
+	 * looking for things like "rsync://" and "MII" or "RPKI Signature"
+	 * using memmem(3). If we do this, we should also rename the function.
+	 */
+
+ out:
+	CMS_ContentInfo_free(cms);
+	X509_free(x509);
+	X509_CRL_free(crl);
+
+	return rtype;
 }
 
 /*
@@ -337,7 +411,6 @@ static void
 proc_parser_file(char *file, unsigned char *buf, size_t len)
 {
 	static int num;
-	X509 *x509 = NULL;
 	struct aspa *aspa = NULL;
 	struct cert *cert = NULL;
 	struct crl *crl = NULL;
@@ -350,7 +423,6 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	struct tak *tak = NULL;
 	struct tal *tal = NULL;
 	char *aia = NULL;
-	char *crl_uri = NULL;
 	time_t *notbefore = NULL, *expires = NULL, *notafter = NULL;
 	time_t now;
 	struct auth *a = NULL;
@@ -397,30 +469,25 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	free(hash);
 
 	type = rtype_from_file_extension(file);
+	if (type == RTYPE_INVALID)
+		type = rtype_from_der(file, buf, len);
 
 	switch (type) {
 	case RTYPE_ASPA:
-		aspa = aspa_parse(&x509, file, -1, buf, len);
+		aspa = aspa_parse(&cert, file, -1, buf, len);
 		if (aspa == NULL)
 			break;
-		aia = aspa->aia;
+		aia = cert->aia;
 		expires = &aspa->expires;
-		notbefore = &aspa->notbefore;
-		notafter = &aspa->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_CER:
-		cert = cert_parse_pre(file, buf, len);
+		cert = cert_parse(file, buf, len);
 		if (cert == NULL)
 			break;
 		is_ta = (cert->purpose == CERT_PURPOSE_TA);
-		if (!is_ta)
-			cert = cert_parse(file, cert);
-		if (cert == NULL)
-			break;
 		aia = cert->aia;
-		x509 = cert->x509;
-		if (X509_up_ref(x509) == 0)
-			errx(1, "%s: X509_up_ref failed", __func__);
 		expires = &cert->expires;
 		notbefore = &cert->notbefore;
 		notafter = &cert->notafter;
@@ -432,67 +499,67 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		crl_print(crl);
 		break;
 	case RTYPE_MFT:
-		mft = mft_parse(&x509, file, -1, buf, len);
+		mft = mft_parse(&cert, file, -1, buf, len);
 		if (mft == NULL)
 			break;
-		aia = mft->aia;
+		aia = cert->aia;
 		expires = &mft->expires;
 		notbefore = &mft->thisupdate;
 		notafter = &mft->nextupdate;
 		break;
 	case RTYPE_GBR:
-		gbr = gbr_parse(&x509, file, -1, buf, len);
+		gbr = gbr_parse(&cert, file, -1, buf, len);
 		if (gbr == NULL)
 			break;
-		aia = gbr->aia;
+		aia = cert->aia;
 		expires = &gbr->expires;
-		notbefore = &gbr->notbefore;
-		notafter = &gbr->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_GEOFEED:
-		geofeed = geofeed_parse(&x509, file, -1, buf, len);
+		geofeed = geofeed_parse(&cert, file, -1, buf, len);
 		if (geofeed == NULL)
 			break;
-		aia = geofeed->aia;
+		aia = cert->aia;
 		expires = &geofeed->expires;
-		notbefore = &geofeed->notbefore;
-		notafter = &geofeed->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_ROA:
-		roa = roa_parse(&x509, file, -1, buf, len);
+		roa = roa_parse(&cert, file, -1, buf, len);
 		if (roa == NULL)
 			break;
-		aia = roa->aia;
+		aia = cert->aia;
 		expires = &roa->expires;
-		notbefore = &roa->notbefore;
-		notafter = &roa->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_RSC:
-		rsc = rsc_parse(&x509, file, -1, buf, len);
+		rsc = rsc_parse(&cert, file, -1, buf, len);
 		if (rsc == NULL)
 			break;
-		aia = rsc->aia;
+		aia = cert->aia;
 		expires = &rsc->expires;
-		notbefore = &rsc->notbefore;
-		notafter = &rsc->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_SPL:
-		spl = spl_parse(&x509, file, -1, buf, len);
+		spl = spl_parse(&cert, file, -1, buf, len);
 		if (spl == NULL)
 			break;
-		aia = spl->aia;
+		aia = cert->aia;
 		expires = &spl->expires;
-		notbefore = &spl->notbefore;
-		notafter = &spl->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_TAK:
-		tak = tak_parse(&x509, file, -1, buf, len);
+		tak = tak_parse(&cert, file, -1, buf, len);
 		if (tak == NULL)
 			break;
-		aia = tak->aia;
+		aia = cert->aia;
 		expires = &tak->expires;
-		notbefore = &tak->notbefore;
-		notafter = &tak->notafter;
+		notbefore = &cert->notbefore;
+		notafter = &cert->notafter;
 		break;
 	case RTYPE_TAL:
 		tal = tal_parse(file, buf, len);
@@ -501,17 +568,16 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		tal_print(tal);
 		break;
 	default:
-		printf("%s: unsupported file type\n", file);
+		errstr = "unsupported file type";
 		break;
 	}
 
 	if (aia != NULL) {
-		x509_get_crl(x509, file, &crl_uri);
-		parse_load_crl(crl_uri);
+		parse_load_crl(cert->crl);
 		a = parse_load_certchain(aia);
-		c = crl_get(&crlt, a);
+		c = crl_get(&crls, a);
 
-		if ((status = valid_x509(file, ctx, x509, a, c, &errstr))) {
+		if ((status = valid_x509(file, ctx, cert->x509, a, c, &errstr))) {
 			switch (type) {
 			case RTYPE_ASPA:
 				status = aspa->valid;
@@ -531,14 +597,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 				break;
 			}
 		}
-		if (status && cert == NULL) {
-			struct cert *eecert;
-
-			eecert = cert_parse_ee_cert(file, a->cert->talid, x509);
-			if (eecert == NULL)
-				status = 0;
-			cert_free(eecert);
-		} else if (status) {
+		if (status) {
 			cert->talid = a->cert->talid;
 			constraints_validate(file, cert);
 		}
@@ -567,35 +626,35 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 
 	if (expires != NULL) {
 		if ((status && aia != NULL) || is_ta)
-			*expires = x509_find_expires(*notafter, a, &crlt);
+			*expires = x509_find_expires(*notafter, a, &crls);
 
 		switch (type) {
 		case RTYPE_ASPA:
-			aspa_print(x509, aspa);
+			aspa_print(cert, aspa);
 			break;
 		case RTYPE_CER:
 			cert_print(cert);
 			break;
 		case RTYPE_GBR:
-			gbr_print(x509, gbr);
+			gbr_print(cert, gbr);
 			break;
 		case RTYPE_GEOFEED:
-			geofeed_print(x509, geofeed);
+			geofeed_print(cert, geofeed);
 			break;
 		case RTYPE_MFT:
-			mft_print(x509, mft);
+			mft_print(cert, mft);
 			break;
 		case RTYPE_ROA:
-			roa_print(x509, roa);
+			roa_print(cert, roa);
 			break;
 		case RTYPE_RSC:
-			rsc_print(x509, rsc);
+			rsc_print(cert, rsc);
 			break;
 		case RTYPE_SPL:
-			spl_print(x509, spl);
+			spl_print(cert, spl);
 			break;
 		case RTYPE_TAK:
-			tak_print(x509, tak);
+			tak_print(cert, tak);
 			break;
 		default:
 			break;
@@ -632,31 +691,30 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		printf("\n");
 
 		if (aia != NULL && status) {
-			print_signature_path(crl_uri, aia, a);
+			print_signature_path(cert->crl, aia, a);
 			if (expires != NULL)
 				printf("Signature path expires:   %s\n",
 				    time2str(*expires));
 		}
 
-		if (x509 == NULL)
+		if (cert == NULL)
 			goto out;
 		if (type == RTYPE_TAL || type == RTYPE_CRL)
 			goto out;
 
 		if (verbose) {
-			if (!X509_print_fp(stdout, x509))
+			if (!X509_print_ex_fp(stdout, cert->x509,
+			    XN_FLAG_COMPAT, X509V3_EXT_DUMP_UNKNOWN))
 				errx(1, "X509_print_fp");
 		}
 
 		if (verbose > 1) {
-			if (!PEM_write_X509(stdout, x509))
+			if (!PEM_write_X509(stdout, cert->x509))
 				errx(1, "PEM_write_X509");
 		}
 	}
 
  out:
-	free(crl_uri);
-	X509_free(x509);
 	aspa_free(aspa);
 	cert_free(cert);
 	crl_free(crl);
@@ -803,7 +861,7 @@ proc_filemode(int fd)
 	}
 
 	auth_tree_free(&auths);
-	crl_tree_free(&crlt);
+	crl_tree_free(&crls);
 
 	X509_STORE_CTX_free(ctx);
 

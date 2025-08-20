@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.178 2024/11/02 07:58:58 mpi Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.182 2025/08/15 13:40:43 kettenis Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -2155,17 +2155,13 @@ pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 {
 	pt_entry_t *spte, *epte;
 	pt_entry_t clear = 0, set = 0;
-	vaddr_t blockend;
+	vaddr_t blkendva;
 	int shootall = 0, shootself;
 	vaddr_t va;
 	paddr_t scr3;
 
 	scr3 = pmap_map_ptes(pmap);
 	shootself = (scr3 == 0);
-
-	/* should be ok, but just in case ... */
-	sva &= PG_FRAME;
-	eva &= PG_FRAME;
 
 	if (!(prot & PROT_READ))
 		set |= pg_xo;
@@ -2177,10 +2173,11 @@ pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 	if ((eva - sva > 32 * PAGE_SIZE) && sva < VM_MIN_KERNEL_ADDRESS)
 		shootall = 1;
 
-	for (va = sva; va < eva ; va = blockend) {
-		blockend = (va & L2_FRAME) + NBPD_L2;
-		if (blockend > eva)
-			blockend = eva;
+	for (va = sva; va < eva; va = blkendva) {
+		/* determine range of block */
+		blkendva = x86_round_pdr(va + 1);
+		if (blkendva > eva)
+			blkendva = eva;
 
 		/*
 		 * XXXCDC: our PTE mappings should never be write-protected!
@@ -2205,7 +2202,7 @@ pmap_write_protect(struct pmap *pmap, vaddr_t sva, vaddr_t eva, vm_prot_t prot)
 #endif
 
 		spte = &PTE_BASE[pl1_i(va)];
-		epte = &PTE_BASE[pl1_i(blockend)];
+		epte = &PTE_BASE[pl1_i(blkendva)];
 
 		for (/*null */; spte < epte ; spte++) {
 			if (!pmap_valid_entry(*spte))
@@ -3185,7 +3182,6 @@ pmap_steal_memory(vsize_t size, vaddr_t *start, vaddr_t *end)
  */
 #ifdef MP_LOCKDEBUG
 #include <ddb/db_output.h>
-extern int __mp_lock_spinout;
 #endif
 
 volatile long tlb_shoot_wait __attribute__((section(".kudata")));
@@ -3195,7 +3191,6 @@ volatile vaddr_t tlb_shoot_addr2 __attribute__((section(".kudata")));
 volatile int tlb_shoot_first_pcid __attribute__((section(".kudata")));
 
 #if NVMM > 0
-#include <amd64/vmmvar.h>
 volatile uint64_t ept_shoot_mode __attribute__((section(".kudata")));
 volatile struct vmx_invept_descriptor ept_shoot_vid
     __attribute__((section(".kudata")));
@@ -3209,7 +3204,7 @@ pmap_start_tlb_shoot(long wait, const char *func)
 
 	while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
 #ifdef MP_LOCKDEBUG
-		int nticks = __mp_lock_spinout;
+		long nticks = __mp_lock_spinout;
 #endif
 		while (tlb_shoot_wait != 0) {
 			CPU_BUSY_CYCLE();
@@ -3422,7 +3417,7 @@ void
 pmap_tlb_shootwait(void)
 {
 #ifdef MP_LOCKDEBUG
-	int nticks = __mp_lock_spinout;
+	long nticks = __mp_lock_spinout;
 #endif
 	while (tlb_shoot_wait != 0) {
 		CPU_BUSY_CYCLE();

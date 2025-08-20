@@ -1,4 +1,4 @@
-#	$OpenBSD: GENERIC,v 1.300 2025/03/31 05:27:49 jsg Exp $
+#	$OpenBSD: GENERIC,v 1.302 2025/05/01 00:32:38 dlg Exp $
 #
 #	Machine-independent option; used by all architectures for their
 #	GENERIC kernel
@@ -16,7 +16,7 @@ option		KMEMSTATS	# collect malloc(9) statistics
 option		PTRACE		# ptrace(2) system call
 
 #option		KVA_GUARDPAGES	# slow virtual address recycling (+ guarding)
-#option		POOL_DEBUG	# pool corruption detection
+option		POOL_DEBUG	# pool corruption detection
 #option		VFSLCKDEBUG	# VFS locking checks
 
 option		CRYPTO		# Cryptographic framework
@@ -114,5 +114,7 @@ pseudo-device	wg		# WireGuard
 pseudo-device	bio	1	# ioctl multiplexing device
 
 pseudo-device	fuse		# fuse device
+
+pseudo-device	af_frame	# (Ethernet) frame sockets
 
 option		BOOT_CONFIG	# add support for boot -c

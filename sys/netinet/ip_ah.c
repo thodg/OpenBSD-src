@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ah.c,v 1.175 2025/03/02 21:28:32 bluhm Exp $ */
+/*	$OpenBSD: ip_ah.c,v 1.178 2025/08/04 14:03:32 bluhm Exp $ */
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr) and
@@ -49,7 +49,6 @@
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <netinet/ip_var.h>
 
 #ifdef INET6
 #include <netinet/ip6.h>
@@ -73,7 +72,7 @@
 #ifdef ENCDEBUG
 #define DPRINTF(fmt, args...)						\
 	do {								\
-		if (encdebug)						\
+		if (atomic_load_int(&encdebug))				\
 			printf("%s: " fmt "\n", __func__, ## args);	\
 	} while (0)
 #else
@@ -364,7 +363,7 @@ ah_massage_headers(struct mbuf **mp, int af, int skip, int alg, int out)
 		}
 
 		/* Let's deal with the remaining headers (if any). */
-		if (skip - sizeof(struct ip6_hdr) > 0) {
+		if (skip > sizeof(struct ip6_hdr)) {
 			if (m->m_len <= skip) {
 				ptr = malloc(skip - sizeof(struct ip6_hdr),
 				    M_XDATA, M_NOWAIT);
@@ -394,9 +393,9 @@ ah_massage_headers(struct mbuf **mp, int af, int skip, int alg, int out)
 
 		nxt = ip6.ip6_nxt;  /* Next header type. */
 
-		for (off = 0; off < skip - sizeof(struct ip6_hdr);) {
-			if (off + sizeof(struct ip6_ext) >
-			    skip - sizeof(struct ip6_hdr))
+		for (off = 0; off + sizeof(struct ip6_hdr) < skip;) {
+			if (off + sizeof(struct ip6_hdr) +
+			    sizeof(struct ip6_ext) > skip)
 				goto error6;
 			ip6e = (struct ip6_ext *)(ptr + off);
 
@@ -406,7 +405,7 @@ ah_massage_headers(struct mbuf **mp, int af, int skip, int alg, int out)
 				noff = off + ((ip6e->ip6e_len + 1) << 3);
 
 				/* Sanity check. */
-				if (noff > skip - sizeof(struct ip6_hdr))
+				if (noff + sizeof(struct ip6_hdr) > skip)
 					goto error6;
 
 				/*

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_veb.c,v 1.37 2025/03/02 21:28:32 bluhm Exp $ */
+/*	$OpenBSD: if_veb.c,v 1.43 2025/08/04 13:27:55 jan Exp $ */
 
 /*
  * Copyright (c) 2021 David Gwynne <dlg@openbsd.org>
@@ -21,7 +21,6 @@
 #include "vlan.h"
 
 #include <sys/param.h>
-#include <sys/kernel.h>
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/queue.h>
@@ -36,17 +35,10 @@
 #include <sys/pool.h>
 
 #include <net/if.h>
-#include <net/if_dl.h>
 #include <net/if_types.h>
 
 #include <netinet/in.h>
-#include <netinet/ip.h>
 #include <netinet/if_ether.h>
-
-#ifdef INET6
-#include <netinet6/in6_var.h>
-#include <netinet/ip6.h>
-#endif
 
 #if 0 && defined(IPSEC)
 /*
@@ -458,6 +450,9 @@ veb_ip_filter(const struct mbuf *m)
 {
 	const struct ether_header *eh;
 
+	if (ISSET(m->m_flags, M_VLANTAG))
+		return (1);
+
 	eh = mtod(m, struct ether_header *);
 	switch (ntohs(eh->ether_type)) {
 	case ETHERTYPE_IP:
@@ -477,6 +472,9 @@ veb_vlan_filter(const struct mbuf *m)
 {
 	const struct ether_header *eh;
 
+	if (ISSET(m->m_flags, M_VLANTAG))
+		return (1);
+
 	eh = mtod(m, struct ether_header *);
 	switch (ntohs(eh->ether_type)) {
 	case ETHERTYPE_VLAN:
@@ -494,6 +492,9 @@ veb_rule_arp_match(const struct veb_rule *vr, struct mbuf *m)
 {
 	struct ether_header *eh;
 	struct ether_arp ea;
+
+	if (ISSET(m->m_flags, M_VLANTAG))
+		return (0);
 
 	eh = mtod(m, struct ether_header *);
 
@@ -623,6 +624,9 @@ veb_pf(struct ifnet *ifp0, int dir, struct mbuf *m, struct netstack *ns)
 	 * other veb ports.
 	 */
 	if (ifp0->if_enqueue == vport_enqueue)
+		return (m);
+
+	if (ISSET(m->m_flags, M_VLANTAG))
 		return (m);
 
 	eh = mtod(m, struct ether_header *);
@@ -793,6 +797,9 @@ veb_ipsec_in(struct ifnet *ifp0, struct mbuf *m)
 	if (ifp0->if_enqueue == vport_enqueue)
 		return (m);
 
+	if (ISSET(m->m_flags, M_VLANTAG))
+		return (m);
+
 	eh = mtod(m, struct ether_header *);
 	switch (ntohs(eh->ether_type)) {
 	case ETHERTYPE_IP:
@@ -895,6 +902,9 @@ veb_ipsec_out(struct ifnet *ifp0, struct mbuf *m)
 	if (ifp0->if_enqueue == vport_enqueue)
 		return (m);
 
+	if (ISSET(m->m_flags, M_VLANTAG))
+		return (m);
+
 	eh = mtod(m, struct ether_header *);
 	switch (ntohs(eh->ether_type)) {
 	case ETHERTYPE_IP:
@@ -926,6 +936,83 @@ veb_ipsec_out(struct ifnet *ifp0, struct mbuf *m)
 	return (m);
 }
 #endif /* IPSEC */
+
+static struct mbuf *
+veb_offload(struct ifnet *ifp, struct ifnet *ifp0, struct mbuf *m)
+{
+	struct ether_extracted ext;
+	int csum = 0;
+
+#if NVLAN > 0
+	if (ISSET(m->m_flags, M_VLANTAG) &&
+	    !ISSET(ifp0->if_capabilities, IFCAP_VLAN_HWTAGGING)) {
+		/*
+		 * If the underlying interface has no VLAN hardware tagging
+		 * support, inject one in software.
+		 */
+		m = vlan_inject(m, ETHERTYPE_VLAN, m->m_pkthdr.ether_vtag);
+		if (m == NULL)
+			goto err;
+	}
+#endif
+
+	if (ISSET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT) &&
+	    !ISSET(ifp0->if_capabilities, IFCAP_CSUM_IPv4))
+		csum = 1;
+
+	if (ISSET(m->m_pkthdr.csum_flags, M_TCP_CSUM_OUT) &&
+	    (!ISSET(ifp0->if_capabilities, IFCAP_CSUM_TCPv4) ||
+	     !ISSET(ifp0->if_capabilities, IFCAP_CSUM_TCPv6)))
+		csum = 1;
+
+	if (ISSET(m->m_pkthdr.csum_flags, M_UDP_CSUM_OUT) &&
+	    (!ISSET(ifp0->if_capabilities, IFCAP_CSUM_UDPv4) ||
+	     !ISSET(ifp0->if_capabilities, IFCAP_CSUM_UDPv6)))
+		csum = 1;
+
+	if (csum) {
+		int ethlen;
+		int hlen;
+
+		ether_extract_headers(m, &ext);
+
+		ethlen = sizeof *ext.eh;
+		if (ext.evh)
+			ethlen = sizeof *ext.evh;
+
+		hlen = m->m_pkthdr.len - ext.paylen;
+
+		if (m->m_len < hlen) {
+			m = m_pullup(m, hlen);
+			if (m == NULL)
+				goto err;
+		}
+
+		/* hide ethernet header */
+		m->m_data += ethlen;
+		m->m_len -= ethlen;
+		m->m_pkthdr.len -= ethlen;
+
+		if (ext.ip4) {
+			in_hdr_cksum_out(m, ifp0);
+			in_proto_cksum_out(m, ifp0);
+#ifdef INET6
+		} else if (ext.ip6) {
+			in6_proto_cksum_out(m, ifp0);
+#endif
+		}
+
+		/* show ethernet header again */
+		m->m_data -= ethlen;
+		m->m_len += ethlen;
+		m->m_pkthdr.len += ethlen;
+	}
+
+	return m;
+ err:
+	counters_inc(ifp->if_counters, ifc_ierrors);
+	return NULL;
+}
 
 static void
 veb_broadcast(struct veb_softc *sc, struct veb_port *rp, struct mbuf *m0,
@@ -996,6 +1083,9 @@ veb_broadcast(struct veb_softc *sc, struct veb_port *rp, struct mbuf *m0,
 		if (veb_rule_filter(tp, VEB_RULE_LIST_OUT, m0, src, dst))
 			continue;
 
+		if ((m0 = veb_offload(ifp, ifp0, m0)) == NULL)
+			goto rele;
+
 		m = m_dup_pkt(m0, max_linkhdr + ETHER_ALIGN, M_NOWAIT);
 		if (m == NULL) {
 			/* XXX count error? */
@@ -1004,6 +1094,7 @@ veb_broadcast(struct veb_softc *sc, struct veb_port *rp, struct mbuf *m0,
 
 		(*tp->p_enqueue)(ifp0, m); /* XXX count error */
 	}
+ rele:
 	refcnt_rele_wake(&pm->m_refs);
 
 done:
@@ -1047,6 +1138,9 @@ veb_transmit(struct veb_softc *sc, struct veb_port *rp, struct veb_port *tp,
 
 	counters_pkt(ifp->if_counters, ifc_opackets, ifc_obytes,
 	    m->m_pkthdr.len);
+
+	if ((m = veb_offload(ifp, ifp0, m)) == NULL)
+		goto drop;
 
 	(*tp->p_enqueue)(ifp0, m); /* XXX count error */
 
@@ -1104,20 +1198,6 @@ veb_port_input(struct ifnet *ifp0, struct mbuf *m, uint64_t dst, void *brport,
 			goto drop;
 		}
 	}
-
-#if NVLAN > 0
-	/*
-	 * If the underlying interface removed the VLAN header itself,
-	 * add it back.
-	 */
-	if (ISSET(m->m_flags, M_VLANTAG)) {
-		m = vlan_inject(m, ETHERTYPE_VLAN, m->m_pkthdr.ether_vtag);
-		if (m == NULL) {
-			counters_inc(ifp->if_counters, ifc_ierrors);
-			goto drop;
-		}
-	}
-#endif
 
 	counters_pkt(ifp->if_counters, ifc_ipackets, ifc_ibytes,
 	    m->m_pkthdr.len);
@@ -2349,6 +2429,15 @@ vport_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_qstart = vport_start;
 	ifp->if_flags = IFF_BROADCAST | IFF_SIMPLEX | IFF_MULTICAST;
 	ifp->if_xflags = IFXF_CLONED | IFXF_MPSAFE;
+
+	ifp->if_capabilities = 0;
+#if NVLAN > 0
+	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
+#endif
+	ifp->if_capabilities |= IFCAP_CSUM_IPv4;
+	ifp->if_capabilities |= IFCAP_CSUM_TCPv4 | IFCAP_CSUM_UDPv4;
+	ifp->if_capabilities |= IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
+
 	ether_fakeaddr(ifp);
 
 	if_counters_alloc(ifp);

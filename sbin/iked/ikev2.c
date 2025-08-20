@@ -1,4 +1,4 @@
-/*	$OpenBSD: ikev2.c,v 1.391 2025/03/13 17:49:37 tobhe Exp $	*/
+/*	$OpenBSD: ikev2.c,v 1.394 2025/07/31 19:02:43 pascal Exp $	*/
 
 /*
  * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
@@ -1614,6 +1614,8 @@ ikev2_init_ike_auth(struct iked *env, struct iked_sa *sa)
 		return (0);
 	}
 
+	bzero(&peerid, sizeof(peerid));
+
 	/* New encrypted message buffer */
 	if ((e = ibuf_static()) == NULL)
 		goto done;
@@ -1630,7 +1632,6 @@ ikev2_init_ike_auth(struct iked *env, struct iked_sa *sa)
 	len = ibuf_size(id->id_buf);
 
 	if (pol->pol_peerid.id_type) {
-		bzero(&peerid, sizeof(peerid));
 		if (ikev2_policy2id(&pol->pol_peerid, &peerid, 0) != 0) {
 			log_debug("%s: failed to get remote id", __func__);
 			goto done;
@@ -1737,6 +1738,7 @@ ikev2_init_ike_auth(struct iked *env, struct iked_sa *sa)
 
  done:
 	ibuf_free(e);
+	ibuf_free(peerid.id_buf);
 
 	return (ret);
 }
@@ -3110,7 +3112,8 @@ ikev2_handle_delete(struct iked *env, struct iked_message *msg,
 			goto done;
 		}
 		ikev2_ikesa_recv_delete(env, sa);
-		return (0);
+		ret = 0;
+		goto done;
 	default:
 		log_info("%s: error: invalid SPI size", __func__);
 		goto done;
@@ -3122,7 +3125,7 @@ ikev2_handle_delete(struct iked *env, struct iked_message *msg,
 	if ((len / sz) != cnt) {
 		log_debug("%s: invalid payload length %zu/%zu != %zu",
 		    __func__, len, sz, cnt);
-		return (-1);
+		goto done;
 	}
 
 	if (((peersas = calloc(cnt, sizeof(struct iked_childsa *))) == NULL ||
@@ -3817,6 +3820,7 @@ ikev2_resp_ike_eap_mschap(struct iked *env, struct iked_sa *sa,
 	switch (eap->eam_state) {
 	case EAP_STATE_IDENTITY:
 		sa->sa_eapid = eap->eam_identity;
+		eap->eam_identity = NULL;
 		return (eap_challenge_request(env, sa, eap->eam_id));
 	case EAP_STATE_MSCHAPV2_CHALLENGE:
 		if (eap->eam_user) {
@@ -7549,7 +7553,7 @@ ikev2_info_sa(struct iked *env, struct imsg *imsg, int dolog, const char *msg,
 	    print_map(sa->sa_state, ikev2_state_map),
 	    sa->sa_hdr.sh_initiator ? 'i' : 'r',
 	    sa->sa_natt ? " natt" : "",
-	    sa->sa_udpencap ? " udpecap" : "",
+	    sa->sa_udpencap ? " udpencap" : "",
 	    sa->sa_nexti, sa->sa_policy);
 
 	if (buflen == -1 || buf == NULL)

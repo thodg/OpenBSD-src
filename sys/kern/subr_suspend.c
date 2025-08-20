@@ -1,4 +1,4 @@
-/* $OpenBSD: subr_suspend.c,v 1.18 2024/05/28 09:40:40 kettenis Exp $ */
+/* $OpenBSD: subr_suspend.c,v 1.21 2025/08/01 12:38:21 stsp Exp $ */
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
@@ -38,6 +38,9 @@
 
 /* Number of (active) wakeup devices in the system. */
 u_int wakeup_devices;
+
+/* Uptime of last resume. */
+time_t resume_time;
 
 void
 device_register_wakeup(struct device *dev)
@@ -178,6 +181,8 @@ fail_suspend:
 	clockintr_cpu_init(NULL);
 	clockintr_trigger();
 
+	resume_time = getuptime();
+
 	sleep_resume(v);
 	resume_randomness(rndbuf, rndbuflen);
 #ifdef MULTIPROCESSOR
@@ -213,5 +218,12 @@ fail_hiballoc:
 		cpu_setperf(perflevel);	/* Restore hw.setperf */
 	if (suspend_finish(v) == EAGAIN)
 		goto top;
+	resume_time = getuptime();
 	return (error);
+}
+
+int
+resuming(void)
+{
+	return (getuptime() < resume_time + 10);
 }

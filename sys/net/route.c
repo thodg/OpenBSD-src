@@ -1,4 +1,4 @@
-/*	$OpenBSD: route.c,v 1.444 2025/03/16 23:45:06 bluhm Exp $	*/
+/*	$OpenBSD: route.c,v 1.449 2025/08/13 13:00:29 bluhm Exp $	*/
 /*	$NetBSD: route.c,v 1.14 1996/02/13 22:00:46 christos Exp $	*/
 
 /*
@@ -105,11 +105,8 @@
 #include <sys/systm.h>
 #include <sys/mbuf.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/timeout.h>
 #include <sys/domain.h>
-#include <sys/ioctl.h>
-#include <sys/kernel.h>
 #include <sys/queue.h>
 #include <sys/pool.h>
 #include <sys/atomic.h>
@@ -215,7 +212,7 @@ route_cache(struct route *ro, const struct in_addr *dst,
 	    ro->ro_tableid == rtableid &&
 	    ro->ro_dstsa.sa_family == AF_INET &&
 	    ro->ro_dstsin.sin_addr.s_addr == dst->s_addr) {
-		if (src == NULL || !ipmultipath ||
+		if (src == NULL || !atomic_load_int(&ipmultipath) ||
 		    !ISSET(ro->ro_rt->rt_flags, RTF_MPATH) ||
 		    (ro->ro_srcin.s_addr != INADDR_ANY &&
 		    ro->ro_srcin.s_addr == src->s_addr)) {
@@ -272,7 +269,7 @@ route6_cache(struct route *ro, const struct in6_addr *dst,
 	    ro->ro_tableid == rtableid &&
 	    ro->ro_dstsa.sa_family == AF_INET6 &&
 	    IN6_ARE_ADDR_EQUAL(&ro->ro_dstsin6.sin6_addr, dst)) {
-		if (src == NULL || !ip6_multipath ||
+		if (src == NULL || !atomic_load_int(&ip6_multipath) ||
 		    !ISSET(ro->ro_rt->rt_flags, RTF_MPATH) ||
 		    (!IN6_IS_ADDR_UNSPECIFIED(&ro->ro_srcin6) &&
 		    IN6_ARE_ADDR_EQUAL(&ro->ro_srcin6, src))) {
@@ -426,7 +423,7 @@ rt_hash(struct rtentry *rt, const struct sockaddr *dst, uint32_t *src)
 	    {
 		const struct sockaddr_in *sin;
 
-		if (!ipmultipath)
+		if (!atomic_load_int(&ipmultipath))
 			return (-1);
 
 		sin = satosin_const(dst);
@@ -440,7 +437,7 @@ rt_hash(struct rtentry *rt, const struct sockaddr *dst, uint32_t *src)
 	    {
 		const struct sockaddr_in6 *sin6;
 
-		if (!ip6_multipath)
+		if (!atomic_load_int(&ip6_multipath))
 			return (-1);
 
 		sin6 = satosin6_const(dst);
@@ -910,7 +907,7 @@ rtrequest_delete(struct rt_addrinfo *info, u_int8_t prio, struct ifnet *ifp,
 		return (ESRCH);
 
 	/* Make sure that's the route the caller want to delete. */
-	if (ifp != NULL && ifp->if_index != rt->rt_ifidx) {
+	if (ifp->if_index != rt->rt_ifidx) {
 		rtfree(rt);
 		return (ESRCH);
 	}
@@ -984,7 +981,8 @@ rtrequest(int req, struct rt_addrinfo *info, u_int8_t prio,
 			return (EINVAL);
 		info->rti_ifa = rt->rt_ifa;
 		info->rti_flags = rt->rt_flags | (RTF_CLONED|RTF_HOST);
-		info->rti_flags &= ~(RTF_CLONING|RTF_CONNECTED|RTF_STATIC);
+		info->rti_flags &=
+		    ~(RTF_CLONING|RTF_CONNECTED|RTF_STATIC|RTF_MPATH);
 		info->rti_info[RTAX_GATEWAY] = sdltosa(&sa_dl);
 		info->rti_info[RTAX_LABEL] =
 		    rtlabel_id2sa(rt->rt_labelid, &sa_rl2);
@@ -2006,13 +2004,12 @@ rt_plentosa(sa_family_t af, int plen, struct sockaddr_in6 *sa_mask)
 }
 
 struct sockaddr *
-rt_plen2mask(struct rtentry *rt, struct sockaddr_in6 *sa_mask)
+rt_plen2mask(const struct rtentry *rt, struct sockaddr_in6 *sa_mask)
 {
 	return (rt_plentosa(rt_key(rt)->sa_family, rt_plen(rt), sa_mask));
 }
 
 #ifdef DDB
-#include <machine/db_machdep.h>
 #include <ddb/db_output.h>
 
 void	db_print_sa(struct sockaddr *);

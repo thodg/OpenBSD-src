@@ -1,6 +1,6 @@
-# $OpenBSD: Makefile,v 1.21 2025/01/15 10:54:17 tb Exp $
+# $OpenBSD: Makefile,v 1.23 2025/07/25 16:33:15 tb Exp $
 
-SUBDIR =	libressl openssl33 openssl34
+SUBDIR =	libressl openssl35
 
 # the above binaries must have been built before we can continue
 SUBDIR +=	netcat

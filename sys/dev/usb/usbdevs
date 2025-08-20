@@ -1,4 +1,4 @@
-$OpenBSD: usbdevs,v 1.776 2025/03/27 14:10:31 sthen Exp $
+$OpenBSD: usbdevs,v 1.781 2025/08/12 03:43:45 jsg Exp $
 /* $NetBSD: usbdevs,v 1.322 2003/05/10 17:47:14 hamajima Exp $ */
 
 /*
@@ -517,7 +517,7 @@ vendor TSUNAMI		0x1241	Tsunami
 vendor PHEENET		0x124a	Pheenet
 vendor RAPTORGAMING	0x1267	Raptor Gaming
 vendor TWINMOS		0x126f	TwinMOS
-vendor TENDA		0x1286	Tenda
+vendor MARVELL2		0x1286	Marvell
 vendor TESTO		0x128d	Testo AG
 vendor CREATIVE2	0x1292	Creative Labs
 vendor BELKIN2		0x1293	Belkin Components
@@ -2830,6 +2830,7 @@ product MACALLY MOUSE1		0x0101	mouse
 
 /* Marvell products */
 product MARVELL SHEEVAPLUG	0x9e8f	SheevaPlug
+product MARVELL2 TWL541U	0x1fab	TWL541U WLAN
 
 /* Matrix Orbital products */
 product MATRIXORB LCD_0100	0x0100	LCD
@@ -3168,7 +3169,7 @@ product MGE UPS2		0xffff	UPS
 product MICROCHIP USBLCD20X2	0x0002	USB-LCD-20x2
 product MICROCHIP USBLCD256X64	0xc002	USB-LCD-256x64
 
-/* Microdia / Sonix Techonology Co., Ltd. products */
+/* Microdia / Sonix Technology Co., Ltd. products */
 product MICRODIA YUREX		0x1010	YUREX
 product MICRODIA CAM_1		0x62c0	CAM_1
 product MICRODIA TEMPER		0x7401	TEMPer sensor
@@ -3844,6 +3845,7 @@ product REALTEK RTL8151		0x8151	RTL8151 PNA
 product REALTEK RTL8152		0x8152	RTL8152
 product REALTEK RTL8153		0x8153	RTL8153
 product REALTEK RTL8156		0x8156	RTL8156
+product REALTEK RTL8157		0x8157	RTL8157
 product REALTEK RTL8188CE_0	0x8170	RTL8188CE
 product REALTEK RTL8171		0x8171	RTL8171
 product REALTEK RTL8172		0x8172	RTL8172
@@ -4460,9 +4462,6 @@ product TEKRAM ZD1211_2		0x6630	ZD1211
 /* Telex Communications products */
 product TELEX MIC1		0x0001	Microphone
 
-/* Tenda */
-product TENDA TWL541U		0x1fab	TWL541U WLAN
-
 /* Ten X Technology, Inc. */
 product TENX MISSILE		0x0202	Missile Launcher
 product TENX TEMPER		0x660c	TEMPer sensor
@@ -4711,6 +4710,7 @@ product WCH CH341		0x5523	CH341 serial/parallel
 product WCH2 CH341A		0x5523	CH341A serial/parallel
 product WCH2 CH343		0x55d3	CH343 serial/parallel
 product WCH2 CH9102		0x55d4	CH9102 serial/parallel
+product WCH2 CH340K		0x7522	CH340K serial/parallel
 product WCH2 CH340		0x7523	CH340 serial/parallel
 product	WCH2 TEMPER		0xe025	TEMPer sensor
 

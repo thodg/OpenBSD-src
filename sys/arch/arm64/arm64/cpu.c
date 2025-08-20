@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.140 2025/02/26 23:05:17 jsg Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.142 2025/07/01 11:10:36 dlg Exp $	*/
 
 /*
  * Copyright (c) 2016 Dale Rahn <drahn@dalerahn.com>
@@ -273,6 +273,7 @@ extern char trampoline_vectors_loop_8[];
 extern char trampoline_vectors_loop_11[];
 extern char trampoline_vectors_loop_24[];
 extern char trampoline_vectors_loop_32[];
+extern char trampoline_vectors_loop_132[];
 #if NPSCI > 0
 extern char trampoline_vectors_psci_hvc[];
 extern char trampoline_vectors_psci_smc[];
@@ -404,12 +405,22 @@ cpu_mitigate_spectre_bhb(struct cpu_info *ci)
 		case CPU_PART_CORTEX_A78AE:
 		case CPU_PART_CORTEX_A78C:
 		case CPU_PART_CORTEX_X1:
+		case CPU_PART_CORTEX_X1C:
 		case CPU_PART_CORTEX_X2:
 		case CPU_PART_CORTEX_A710:
 		case CPU_PART_NEOVERSE_N2:
 		case CPU_PART_NEOVERSE_V1:
 			ci->ci_trampoline_vectors =
 			    (vaddr_t)trampoline_vectors_loop_32;
+			break;
+		case CPU_PART_CORTEX_X3:
+		case CPU_PART_CORTEX_X4:
+		case CPU_PART_CORTEX_X925:
+		case CPU_PART_NEOVERSE_V2:
+		case CPU_PART_NEOVERSE_V3:
+		case CPU_PART_NEOVERSE_V3AE:
+			ci->ci_trampoline_vectors =
+			    (vaddr_t)trampoline_vectors_loop_132;
 			break;
 		}
 		break;
@@ -1084,6 +1095,13 @@ cpu_identify(struct cpu_info *ci)
 
 	if (ID_AA64PFR0_DIT(id) >= ID_AA64PFR0_DIT_IMPL) {
 		printf("%sDIT", sep);
+		sep = ",";
+	}
+
+	if (ID_AA64PFR0_AMU(id) >= ID_AA64PFR0_AMU_IMPL) {
+		printf("%sAMU", sep);
+		if (ID_AA64PFR0_AMU(id) >= ID_AA64PFR0_AMU_IMPL_V1P1)
+			printf("v1p1");
 		sep = ",";
 	}
 

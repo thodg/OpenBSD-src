@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.307 2025/03/08 17:12:55 tb Exp $
+# $OpenBSD: Makefile,v 1.312 2025/07/17 10:31:50 schwarze Exp $
 
 .include <bsd.own.mk>
 
@@ -133,12 +133,16 @@ MAN=	\
 	DSA_size.3 \
 	ECDH_compute_key.3 \
 	ECDSA_SIG_new.3 \
-	EC_GROUP_copy.3 \
-	EC_GROUP_new.3 \
+	EC_GROUP_check.3 \
+	EC_GROUP_get_curve_name.3 \
+	EC_GROUP_new_by_curve_name.3 \
+	EC_GROUP_new_curve_GFp.3 \
 	EC_KEY_METHOD_new.3 \
 	EC_KEY_new.3 \
 	EC_POINT_add.3 \
+	EC_POINT_get_affine_coordinates.3 \
 	EC_POINT_new.3 \
+	EC_POINT_point2oct.3 \
 	ENGINE_new.3 \
 	ERR.3 \
 	ERR_GET_LIB.3 \
@@ -212,7 +216,6 @@ MAN=	\
 	IPAddressRange_new.3 \
 	MD5.3 \
 	NAME_CONSTRAINTS_new.3 \
-	OBJ_NAME_add.3 \
 	OBJ_create.3 \
 	OBJ_find_sigid_algs.3 \
 	OBJ_nid2obj.3 \
@@ -228,12 +231,11 @@ MAN=	\
 	OPENSSL_cleanse.3 \
 	OPENSSL_config.3 \
 	OPENSSL_init_crypto.3 \
-	OPENSSL_load_builtin_modules.3 \
 	OPENSSL_malloc.3 \
 	OPENSSL_sk_new.3 \
 	OpenSSL_add_all_algorithms.3 \
 	PEM_ASN1_read.3 \
-	PEM_X509_INFO_read.3 \
+	PEM_X509_INFO_read_bio.3 \
 	PEM_bytes_read_bio.3 \
 	PEM_read.3 \
 	PEM_read_bio_PrivateKey.3 \
@@ -289,11 +291,9 @@ MAN=	\
 	RSA_size.3 \
 	SHA1.3 \
 	SMIME_crlf_copy.3 \
-	SMIME_read_ASN1.3 \
 	SMIME_read_CMS.3 \
 	SMIME_read_PKCS7.3 \
 	SMIME_text.3 \
-	SMIME_write_ASN1.3 \
 	SMIME_write_CMS.3 \
 	SMIME_write_PKCS7.3 \
 	STACK_OF.3 \
@@ -326,7 +326,6 @@ MAN=	\
 	X509_NAME_new.3 \
 	X509_NAME_print_ex.3 \
 	X509_OBJECT_get0_X509.3 \
-	X509_PKEY_new.3 \
 	X509_PUBKEY_new.3 \
 	X509_PURPOSE_set.3 \
 	X509_REQ_add1_attr.3 \

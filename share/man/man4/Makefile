@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.860 2025/03/25 04:21:07 hastings Exp $
+#	$OpenBSD: Makefile,v 1.869 2025/08/20 13:13:03 kettenis Exp $
 
 MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	acpi.4 acpiac.4 acpials.4 acpiasus.4 acpibat.4 \
@@ -6,12 +6,12 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	acpiec.4 acpige.4 acpihid.4 acpihpet.4 acpihve.4 \
 	acpimadt.4 acpimcfg.4 acpipci.4 acpiprt.4 acpipwrres.4 \
 	acpisbs.4 acpisony.4 acpisurface.4 acpithinkpad.4 acpitoshiba.4 \
-	acpitimer.4 acpivideo.4 acpivout.4 acpitz.4 \
+	acpitimer.4 acpitz.4 acpivideo.4 acpivout.4 acpiwmi.4 \
 	acx.4 adc.4 addcom.4 adl.4 admcts.4 admlc.4 admtemp.4 \
 	admtm.4 admtmp.4 admtt.4 adt.4 adtfsm.4 adv.4 age.4 alc.4 ale.4 \
 	aggr.4 agp.4 \
 	ahc.4 ahci.4 ahd.4 aibs.4 aic.4 \
-	akbd.4 alipm.4 amas.4 amdgpio.4 amdiic.4 amdpm.4 ami.4 \
+	akbd.4 alipm.4 amas.4 amdgpio.4 amdiic.4 amdpm.4 amdpmc.4 ami.4 \
 	amlclock.4 amldwusb.4 amliic.4 amlmmc.4 amlpciephy.4 amlpinctrl.4 \
 	amlpwm.4 amlreset.4 amlrng.4 amlsm.4 amltemp.4 amluart.4 amlusbphy.4 \
 	amphy.4 ams.4 an.4 andl.4 aplgpio.4 aps.4 aq.4 arc.4 arcofi.4 \
@@ -19,8 +19,9 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	auacer.4 audio.4 aue.4 auglx.4 auich.4 auixp.4 autri.4 auvia.4 \
 	axe.4 axen.4 axppmic.4 azalia.4 \
 	bce.4 bcmaux.4 bcmbsc.4 bcmclock.4 bcmdmac.4 bcmdog.4 bcmgpio.4 \
-	bcmirng.4 bcmmbox.4 bcmpcie.4 bcmrng.4 bcmsdhost.4 bcmtemp.4 \
-	bcmtmon.4 bdpmic.4 \
+	bcmirng.4 bcmmbox.4 bcmpcie.4 bcmrng.4 bcmsdhost.4 \
+	bcmstbgpio.4 bcmstbpinctrl.4 bcmstbrescal.4 bcmstbreset.4 \
+	bcmtemp.4 bcmtmon.4 bdpmic.4 \
 	berkwdt.4 bge.4 bgw.4 bio.4 bpe.4 bktr.4 bmtphy.4 bnx.4 bnxt.4 \
 	boca.4 bpf.4 brgphy.4 bridge.4 brswphy.4 bse.4 bwfm.4 bwi.4 bytgpio.4 \
 	cac.4 cad.4 cas.4 cardbus.4 carp.4 ccp.4 ccpmic.4 cd.4 cdce.4 \
@@ -32,7 +33,8 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	dwctwo.4 dwdog.4 dwge.4 dwgpio.4 dwiic.4 dwmmc.4 dwmshc.4 dwpcie.4 \
 	dwqe.4 dwxe.4 \
 	eap.4 ec.4 eephy.4 ef.4 efi.4 eg.4 ehci.4 eisa.4 el.4 em.4 emc.4 gcu.4 \
-	emu.4 enc.4 endrun.4 envy.4 eoip.4 ep.4 epic.4 esa.4 escodec.4 \
+	emu.4 enc.4 endrun.4 envy.4 eoip.4 ep.4 epic.4 \
+	erspan.4 esa.4 escodec.4 \
 	eso.4 ess.4 et.4 etherip.4 etphy.4 ex.4 exphy.4 exrtc.4 \
 	fanpwr.4 fd.4 fdc.4 fec.4 fido.4 fins.4 fintek.4 fms.4 frame.4 \
 	fusbtc.4 fuse.4 fxp.4 \
@@ -42,7 +44,7 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	hds.4 hiclock.4 hidwusb.4 hil.4 hilid.4 hilkbd.4 hilms.4 \
 	hireset.4 hitemp.4 hme.4 hotplug.4 hsq.4 \
 	hvn.4 hvs.4 hyperv.4 \
-	iatp.4 iavf.4 icc.4 ice.4 ichiic.4 ichwdt.4 \
+	iasuskbd.4 iatp.4 iavf.4 icc.4 ice.4 ichiic.4 ichwdt.4 \
 	icmp.4 icmp6.4 icsphy.4 ietp.4 ifmedia.4 \
 	igc.4 iha.4 ihidev.4 iic.4 iicmux.4 ikbd.4 ims.4 imt.4 imxanatop.4 \
 	imxdog.4 imxesdhc.4 imxgpc.4 imxgpio.4 imxiic.4 imxpciephy.4 \
@@ -75,7 +77,8 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	pgt.4 piixpm.4 pijuice.4 pinctrl.4 pipex.4 plgpio.4 plrtc.4 pluart.4 \
 	pms.4 ppb.4 ppp.4 pppoe.4 pppx.4 psci.4 psp.4 pty.4 puc.4 pvbus.4 \
 	pvclock.4 pwdog.4 pwmbl.4 pwmfan.4 pwmleds.4 pwmreg.4 \
-	qccpu.4 qccpucp.4 qcdwusb.4 qcgpio.4 qciic.4 qcpdc.4 qcpmic.4 \
+	qccpu.4 qccpucp.4 qcdpc.4 qcdrm.4 qcdwusb.4 qcgpio.4 \
+	qciic.4 qcpdc.4 qcpmic.4 \
 	qcpmicgpio.4 qcpon.4 qcpwm.4 qcrng.4 qcrtc.4 qcspmi.4 \
 	qla.4 qle.4 qlw.4 qsphy.4 qwx.4 \
 	radio.4 ral.4 random.4 rdomain.4 rd.4 rdac.4 re.4 rdcphy.4 rgephy.4 \

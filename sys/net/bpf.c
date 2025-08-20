@@ -1,4 +1,4 @@
-/*	$OpenBSD: bpf.c,v 1.232 2025/03/04 01:01:25 dlg Exp $	*/
+/*	$OpenBSD: bpf.c,v 1.234 2025/07/07 02:28:50 jsg Exp $	*/
 /*	$NetBSD: bpf.c,v 1.33 1997/02/21 23:59:35 thorpej Exp $	*/
 
 /*
@@ -38,21 +38,16 @@
  *	@(#)bpf.c	8.2 (Berkeley) 3/28/94
  */
 
-#include "bpfilter.h"
-
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/mbuf.h>
-#include <sys/proc.h>
+#include <sys/timeout.h>
 #include <sys/signalvar.h>
 #include <sys/ioctl.h>
 #include <sys/conf.h>
 #include <sys/vnode.h>
-#include <sys/fcntl.h>
 #include <sys/socket.h>
-#include <sys/kernel.h>
 #include <sys/sysctl.h>
-#include <sys/rwlock.h>
 #include <sys/atomic.h>
 #include <sys/event.h>
 #include <sys/mutex.h>
@@ -71,9 +66,6 @@
 #include <netinet/if_ether.h>
 
 #include "vlan.h"
-#if NVLAN > 0
-#include <net/if_vlan_var.h>
-#endif
 
 #define BPF_BUFSIZE 32768
 
@@ -1808,6 +1800,7 @@ bpfsdetach(void *p)
 	free(bp, M_DEVBUF, sizeof(*bp));
 }
 
+#ifndef SMALL_KERNEL
 int
 bpf_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
     size_t newlen)
@@ -1829,6 +1822,7 @@ bpf_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 
 	/* NOTREACHED */
 }
+#endif /* SMALL_KERNEL */
 
 struct bpf_d *
 bpfilter_lookup(int unit)

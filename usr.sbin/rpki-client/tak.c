@@ -1,4 +1,4 @@
-/*	$OpenBSD: tak.c,v 1.22 2025/04/02 09:42:57 tb Exp $ */
+/*	$OpenBSD: tak.c,v 1.27 2025/08/19 11:30:20 job Exp $ */
 /*
  * Copyright (c) 2022 Job Snijders <job@fastly.com>
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
@@ -17,6 +17,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <assert.h>
 #include <err.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,35 +32,14 @@
 #include <openssl/x509v3.h>
 
 #include "extern.h"
-
-extern ASN1_OBJECT	*tak_oid;
+#include "rpki-asn1.h"
 
 /*
- * ASN.1 templates for Trust Anchor Keys (draft-ietf-sidrops-signed-tal-12)
+ * TAK eContent definition in RFC 9691, Appendix A.
  */
 
 ASN1_ITEM_EXP TAKey_it;
 ASN1_ITEM_EXP TAK_it;
-
-DECLARE_STACK_OF(ASN1_IA5STRING);
-
-#ifndef DEFINE_STACK_OF
-#define sk_ASN1_IA5STRING_num(st) SKM_sk_num(ASN1_IA5STRING, (st))
-#define sk_ASN1_IA5STRING_value(st, i) SKM_sk_value(ASN1_IA5STRING, (st), (i))
-#endif
-
-typedef struct {
-	STACK_OF(ASN1_UTF8STRING)	*comments;
-	STACK_OF(ASN1_IA5STRING)	*certificateURIs;
-	X509_PUBKEY			*subjectPublicKeyInfo;
-} TAKey;
-
-typedef struct {
-	ASN1_INTEGER			*version;
-	TAKey				*current;
-	TAKey				*predecessor;
-	TAKey				*successor;
-} TAK;
 
 ASN1_SEQUENCE(TAKey) = {
 	ASN1_SEQUENCE_OF(TAKey, comments, ASN1_UTF8STRING),
@@ -74,8 +54,8 @@ ASN1_SEQUENCE(TAK) = {
 	ASN1_EXP_OPT(TAK, successor, TAKey, 1),
 } ASN1_SEQUENCE_END(TAK);
 
-DECLARE_ASN1_FUNCTIONS(TAK);
 IMPLEMENT_ASN1_FUNCTIONS(TAK);
+
 
 /*
  * On success return pointer to allocated & valid takey structure,
@@ -200,12 +180,12 @@ tak_parse_econtent(const char *fn, struct tak *tak, const unsigned char *d,
 }
 
 /*
- * Parse a full draft-ietf-sidrops-signed-tal file.
+ * Parse a full RFC 9691 Trust Anchor Key file.
  * Returns the TAK or NULL if the object was malformed.
  */
 struct tak *
-tak_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
-    size_t len)
+tak_parse(struct cert **out_cert, const char *fn, int talid,
+    const unsigned char *der, size_t len)
 {
 	struct tak		*tak;
 	struct cert		*cert = NULL;
@@ -214,7 +194,10 @@ tak_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 	time_t			 signtime = 0;
 	int			 rc = 0;
 
-	cms = cms_parse_validate(x509, fn, der, len, tak_oid, &cmsz, &signtime);
+	assert(*out_cert == NULL);
+
+	cms = cms_parse_validate(&cert, fn, talid, der, len, tak_oid, &cmsz,
+	    &signtime);
 	if (cms == NULL)
 		return NULL;
 
@@ -222,27 +205,7 @@ tak_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 		err(1, NULL);
 	tak->signtime = signtime;
 
-	if (!x509_get_aia(*x509, fn, &tak->aia))
-		goto out;
-	if (!x509_get_aki(*x509, fn, &tak->aki))
-		goto out;
-	if (!x509_get_sia(*x509, fn, &tak->sia))
-		goto out;
-	if (!x509_get_ski(*x509, fn, &tak->ski))
-		goto out;
-	if (tak->aia == NULL || tak->aki == NULL || tak->sia == NULL ||
-	    tak->ski == NULL) {
-		warnx("%s: RFC 6487 section 4.8: "
-		    "missing AIA, AKI, SIA, or SKI X509 extension", fn);
-		goto out;
-	}
-
-	if (!x509_get_notbefore(*x509, fn, &tak->notbefore))
-		goto out;
-	if (!x509_get_notafter(*x509, fn, &tak->notafter))
-		goto out;
-
-	if (!x509_inherits(*x509)) {
+	if (!x509_inherits(cert->x509)) {
 		warnx("%s: RFC 3779 extension not set to inherit", fn);
 		goto out;
 	}
@@ -250,21 +213,19 @@ tak_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 	if (!tak_parse_econtent(fn, tak, cms, cmsz))
 		goto out;
 
-	if ((cert = cert_parse_ee_cert(fn, talid, *x509)) == NULL)
-		goto out;
-
-	if (strcmp(tak->aki, tak->current->ski) != 0) {
+	if (strcmp(cert->aki, tak->current->ski) != 0) {
 		warnx("%s: current TAKey's SKI does not match EE AKI", fn);
 		goto out;
 	}
+
+	*out_cert = cert;
+	cert = NULL;
 
 	rc = 1;
  out:
 	if (rc == 0) {
 		tak_free(tak);
 		tak = NULL;
-		X509_free(*x509);
-		*x509 = NULL;
 	}
 	cert_free(cert);
 	free(cms);
@@ -308,10 +269,5 @@ tak_free(struct tak *t)
 	takey_free(t->current);
 	takey_free(t->predecessor);
 	takey_free(t->successor);
-
-	free(t->aia);
-	free(t->aki);
-	free(t->sia);
-	free(t->ski);
 	free(t);
 }

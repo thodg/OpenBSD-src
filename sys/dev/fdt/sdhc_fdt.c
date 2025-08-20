@@ -1,4 +1,4 @@
-/*	$OpenBSD: sdhc_fdt.c,v 1.21 2024/10/09 00:38:26 jsg Exp $	*/
+/*	$OpenBSD: sdhc_fdt.c,v 1.23 2025/08/15 13:31:58 kettenis Exp $	*/
 /*
  * Copyright (c) 2017 Mark Kettenis
  *
@@ -95,6 +95,7 @@ struct sdhc_fdt_softc {
 	void			*sc_ih;
 	int			sc_node;
 	uint32_t		sc_gpio[3];
+	uint32_t		sc_vmmc;
 	uint32_t		sc_vqmmc;
 
 	/* Marvell Xenon */
@@ -129,6 +130,7 @@ sdhc_fdt_match(struct device *parent, void *match, void *aux)
 	return (OF_is_compatible(faa->fa_node, "arasan,sdhci-5.1") ||
 	    OF_is_compatible(faa->fa_node, "arasan,sdhci-8.9a") ||
 	    OF_is_compatible(faa->fa_node, "brcm,bcm2711-emmc2") ||
+	    OF_is_compatible(faa->fa_node, "brcm,bcm2712-sdhci") ||
 	    OF_is_compatible(faa->fa_node, "brcm,bcm2835-sdhci") ||
 	    OF_is_compatible(faa->fa_node, "marvell,armada-3700-sdhci") ||
 	    OF_is_compatible(faa->fa_node, "marvell,armada-ap806-sdhci") ||
@@ -141,7 +143,7 @@ sdhc_fdt_attach(struct device *parent, struct device *self, void *aux)
 	struct sdhc_fdt_softc *sc = (struct sdhc_fdt_softc *)self;
 	struct fdt_attach_args *faa = aux;
 	struct regmap *rm = NULL;
-	uint64_t capmask = 0, capset = 0;
+	uint64_t capmask, capset;
 	uint32_t reg, phandle, freq;
 	char pad_type[16] = { 0 };
 
@@ -173,6 +175,9 @@ sdhc_fdt_attach(struct device *parent, struct device *self, void *aux)
 		goto unmap;
 	}
 
+	capmask = OF_getpropint64(sc->sc_node, "sdhci-caps-mask", 0);
+	capset = OF_getpropint64(sc->sc_node, "sdhci-caps", 0);
+
 	if (OF_getproplen(faa->fa_node, "cd-gpios") > 0 ||
 	    OF_getproplen(faa->fa_node, "non-removable") == 0) {
 		OF_getpropintarray(faa->fa_node, "cd-gpios", sc->sc_gpio,
@@ -181,6 +186,7 @@ sdhc_fdt_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc.sc_card_detect = sdhc_fdt_card_detect;
 	}
 
+	sc->sc_vmmc = OF_getpropint(sc->sc_node, "vmmc-supply", 0);
 	sc->sc_vqmmc = OF_getpropint(sc->sc_node, "vqmmc-supply", 0);
 
 	printf("\n");
@@ -318,6 +324,9 @@ sdhc_fdt_attach(struct device *parent, struct device *self, void *aux)
 		sc->sc.sc_clkbase = freq / 1000;
 		sc->sc.sc_bus_clock_post = sdhc_fdt_xenon_bus_clock_post;
 	}
+
+	if (sc->sc_vmmc)
+		regulator_enable(sc->sc_vmmc);
 
 	sdhc_host_found(&sc->sc, sc->sc_iot, sc->sc_ioh, sc->sc_size, 1,
 	    capmask, capset);

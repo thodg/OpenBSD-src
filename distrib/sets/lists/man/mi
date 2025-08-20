@@ -521,6 +521,7 @@
 ./usr/share/man/man1/vis.1
 ./usr/share/man/man1/w.1
 ./usr/share/man/man1/wall.1
+./usr/share/man/man1/watch.1
 ./usr/share/man/man1/wc.1
 ./usr/share/man/man1/what.1
 ./usr/share/man/man1/whereis.1
@@ -1298,6 +1299,7 @@
 ./usr/share/man/man4/acpitz.4
 ./usr/share/man/man4/acpivideo.4
 ./usr/share/man/man4/acpivout.4
+./usr/share/man/man4/acpiwmi.4
 ./usr/share/man/man4/acrtc.4
 ./usr/share/man/man4/acx.4
 ./usr/share/man/man4/adc.4
@@ -1362,6 +1364,7 @@
 ./usr/share/man/man4/amdgpio.4
 ./usr/share/man/man4/amdiic.4
 ./usr/share/man/man4/amdpm.4
+./usr/share/man/man4/amdpmc.4
 ./usr/share/man/man4/ami.4
 ./usr/share/man/man4/amlclock.4
 ./usr/share/man/man4/amldwusb.4
@@ -1483,6 +1486,8 @@
 ./usr/share/man/man4/bcmpcie.4
 ./usr/share/man/man4/bcmrng.4
 ./usr/share/man/man4/bcmsdhost.4
+./usr/share/man/man4/bcmstbgpio.4
+./usr/share/man/man4/bcmstbpinctrl.4
 ./usr/share/man/man4/bcmtemp.4
 ./usr/share/man/man4/bcmtmon.4
 ./usr/share/man/man4/bdpmic.4
@@ -1566,6 +1571,7 @@
 ./usr/share/man/man4/eoip.4
 ./usr/share/man/man4/ep.4
 ./usr/share/man/man4/epic.4
+./usr/share/man/man4/erspan.4
 ./usr/share/man/man4/esa.4
 ./usr/share/man/man4/escodec.4
 ./usr/share/man/man4/eso.4
@@ -1679,6 +1685,7 @@
 ./usr/share/man/man4/i386/uha.4
 ./usr/share/man/man4/i386/wds.4
 ./usr/share/man/man4/i386/wdt.4
+./usr/share/man/man4/iasuskbd.4
 ./usr/share/man/man4/iatp.4
 ./usr/share/man/man4/iavf.4
 ./usr/share/man/man4/icc.4
@@ -1991,6 +1998,8 @@
 ./usr/share/man/man4/pwmreg.4
 ./usr/share/man/man4/qccpu.4
 ./usr/share/man/man4/qccpucp.4
+./usr/share/man/man4/qcdpc.4
+./usr/share/man/man4/qcdrm.4
 ./usr/share/man/man4/qcdwusb.4
 ./usr/share/man/man4/qcgpio.4
 ./usr/share/man/man4/qciic.4
@@ -2561,6 +2570,7 @@
 ./usr/share/man/man8/bgplgsh.8
 ./usr/share/man/man8/bioctl.8
 ./usr/share/man/man8/boot_config.8
+./usr/share/man/man8/bpflogd.8
 ./usr/share/man/man8/btrace.8
 ./usr/share/man/man8/bulk.8
 ./usr/share/man/man8/chat.8
@@ -2654,6 +2664,8 @@
 ./usr/share/man/man8/ldconfig.8
 ./usr/share/man/man8/ldpctl.8
 ./usr/share/man/man8/ldpd.8
+./usr/share/man/man8/lldp.8
+./usr/share/man/man8/lldpd.8
 ./usr/share/man/man8/locate.mklocatedb.8
 ./usr/share/man/man8/locate.updatedb.8
 ./usr/share/man/man8/login_chpass.8

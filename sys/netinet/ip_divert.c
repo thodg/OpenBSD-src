@@ -1,4 +1,4 @@
-/*      $OpenBSD: ip_divert.c,v 1.102 2025/03/11 15:31:03 mvs Exp $ */
+/*      $OpenBSD: ip_divert.c,v 1.107 2025/07/08 00:47:41 jsg Exp $ */
 
 /*
  * Copyright (c) 2009 Michele Marchetto <michele@openbsd.org>
@@ -21,13 +21,11 @@
 #include <sys/mbuf.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/sysctl.h>
 
 #include <net/if.h>
 #include <net/route.h>
 #include <net/if_var.h>
-#include <net/netisr.h>
 
 #include <netinet/in.h>
 #include <netinet/in_var.h>
@@ -49,18 +47,8 @@
 struct	inpcbtable	divbtable;
 struct	cpumem		*divcounters;
 
-#ifndef DIVERT_SENDSPACE
-#define DIVERT_SENDSPACE	(65536 + 100)
-#endif
 u_int   divert_sendspace = DIVERT_SENDSPACE;	/* [a] */
-#ifndef DIVERT_RECVSPACE
-#define DIVERT_RECVSPACE	(65536 + 100)
-#endif
 u_int   divert_recvspace = DIVERT_RECVSPACE;	/* [a] */
-
-#ifndef DIVERTHASHSIZE
-#define DIVERTHASHSIZE	128
-#endif
 
 const struct sysctl_bounded_args divertctl_vars[] = {
 	{ DIVERTCTL_RECVSPACE, &divert_recvspace, 0, SB_MAX },
@@ -78,14 +66,12 @@ const struct pr_usrreqs divert_usrreqs = {
 	.pru_peeraddr	= in_peeraddr,
 };
 
-int divbhashsize = DIVERTHASHSIZE;
-
 int	divert_output(struct inpcb *, struct mbuf *, struct mbuf *,
 	    struct mbuf *);
 void
 divert_init(void)
 {
-	in_pcbinit(&divbtable, divbhashsize);
+	in_pcbinit(&divbtable, DIVERT_HASHSIZE);
 	divcounters = counters_alloc(divs_ncounters);
 }
 
@@ -257,8 +243,7 @@ divert_packet(struct mbuf *m, int dir, u_int16_t divert_port)
 	return;
 
  bad:
-	if (inp != NULL)
-		in_pcbunref(inp);
+	in_pcbunref(inp);
 	m_freem(m);
 }
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: x509.h,v 1.121 2025/03/09 15:17:22 tb Exp $ */
+/* $OpenBSD: x509.h,v 1.124 2025/08/10 06:36:45 beck Exp $ */
 /* Copyright (C) 1995-1998 Eric Young (eay@cryptsoft.com)
  * All rights reserved.
  *
@@ -178,6 +178,7 @@ DECLARE_STACK_OF(X509)
 #define	X509_FLAG_NO_SIGDUMP		(1L << 9)
 #define	X509_FLAG_NO_AUX		(1L << 10)
 #define	X509_FLAG_NO_ATTRIBUTES		(1L << 11)
+#define	X509_FLAG_NO_IDS		(1L << 12)
 
 /* Flags specific to X509_NAME_print_ex() */
 
@@ -244,23 +245,7 @@ typedef struct X509_crl_info_st X509_CRL_INFO;
 DECLARE_STACK_OF(X509_CRL)
 
 typedef struct private_key_st {
-	int version;
-	/* The PKCS#8 data types */
-	X509_ALGOR *enc_algor;
-	ASN1_OCTET_STRING *enc_pkey;	/* encrypted pub key */
-
-	/* When decrypted, the following will not be NULL */
 	EVP_PKEY *dec_pkey;
-
-	/* used to encrypt and decrypt */
-	int key_length;
-	char *key_data;
-	int key_free;	/* true if we should auto free key_data */
-
-	/* expanded version of 'enc_algor' */
-	EVP_CIPHER_INFO cipher;
-
-	int references;
 } X509_PKEY;
 
 #ifndef OPENSSL_NO_EVP
@@ -646,9 +631,6 @@ int X509_CRL_get0_by_serial(X509_CRL *crl,
 		X509_REVOKED **ret, ASN1_INTEGER *serial);
 int X509_CRL_get0_by_cert(X509_CRL *crl, X509_REVOKED **ret, X509 *x);
 
-X509_PKEY *	X509_PKEY_new(void );
-void		X509_PKEY_free(X509_PKEY *a);
-
 NETSCAPE_SPKI *NETSCAPE_SPKI_new(void);
 void NETSCAPE_SPKI_free(NETSCAPE_SPKI *a);
 NETSCAPE_SPKI *d2i_NETSCAPE_SPKI(NETSCAPE_SPKI **a, const unsigned char **in, long len);
@@ -1013,6 +995,7 @@ void ERR_load_X509_strings(void);
 #define X509_R_ERR_ASN1_LIB				 102
 #define X509_R_INVALID_DIRECTORY			 113
 #define X509_R_INVALID_FIELD_NAME			 119
+#define X509_R_INVALID_POLICY_EXTENSION			 201
 #define X509_R_INVALID_TRUST				 123
 #define X509_R_INVALID_VERSION				 137
 #define X509_R_KEY_TYPE_MISMATCH			 115

@@ -1,4 +1,4 @@
-/*	$OpenBSD: http.c,v 1.93 2025/03/11 14:53:03 job Exp $ */
+/*	$OpenBSD: http.c,v 1.99 2025/08/18 11:27:13 job Exp $ */
 /*
  * Copyright (c) 2020 Nils Fisher <nils_fisher@hotmail.com>
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
@@ -137,6 +137,7 @@ struct http_connection {
 	int			fd;
 	int			chunked;
 	int			gzipped;
+	int			was_gzipped;
 	int			keep_alive;
 	short			events;
 	enum http_state		state;
@@ -219,7 +220,7 @@ static enum res	data_inflate_write(struct http_connection *);
 static const char *
 http_info(const char *uri)
 {
-	static char buf[80];
+	static char buf[200];
 
 	if (strnvis(buf, uri, sizeof buf, VIS_SAFE) >= (int)sizeof buf) {
 		/* overflow, add indicator */
@@ -250,7 +251,7 @@ ip_info(const struct http_connection *conn)
 static const char *
 conn_info(const struct http_connection *conn)
 {
-	static char	 buf[100 + NI_MAXHOST];
+	static char	 buf[220 + NI_MAXHOST];
 	const char	*uri;
 
 	if (conn->req == NULL)
@@ -624,7 +625,7 @@ http_req_done(unsigned int id, enum http_result res, const char *last_modified)
 	b = io_new_buffer();
 	io_simple_buffer(b, &id, sizeof(id));
 	io_simple_buffer(b, &res, sizeof(res));
-	io_str_buffer(b, last_modified);
+	io_opt_str_buffer(b, last_modified);
 	io_close_buffer(msgq, b);
 }
 
@@ -640,7 +641,7 @@ http_req_fail(unsigned int id)
 	b = io_new_buffer();
 	io_simple_buffer(b, &id, sizeof(id));
 	io_simple_buffer(b, &res, sizeof(res));
-	io_str_buffer(b, NULL);
+	io_opt_str_buffer(b, NULL);
 	io_close_buffer(msgq, b);
 }
 
@@ -799,6 +800,7 @@ http_inflate_advance(struct http_connection *conn)
 		/* all compressed data processed */
 		conn->gzipped = 0;
 		http_inflate_done(conn);
+		conn->was_gzipped = 1;
 
 		if (conn->iosz == 0) {
 			if (!conn->chunked) {
@@ -911,7 +913,13 @@ http_done(struct http_connection *conn, enum http_result res)
 	if (conn->gzipped) {
 		conn->gzipped = 0;
 		http_inflate_done(conn);
+		conn->was_gzipped = 1;
 	}
+
+	if (!conn->was_gzipped && conn->totalsz > (1024 * 1024))
+		logx("%s: downloaded %zu bytes without HTTP "
+		    "compression", conn_info(conn), conn->totalsz);
+	conn->was_gzipped = 0;
 
 	conn->state = STATE_IDLE;
 	conn->idle_time = getmonotime() + HTTP_IDLE_TIMEOUT;
@@ -1526,6 +1534,7 @@ http_read(struct http_connection *conn)
 		goto again;
 
 read_more:
+	assert(conn->bufpos < conn->bufsz);
 	s = tls_read(conn->tls, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
@@ -1750,6 +1759,7 @@ proxy_read(struct http_connection *conn)
 	char *buf;
 	int done;
 
+	assert(conn->bufpos < conn->bufsz);
 	s = read(conn->fd, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
@@ -1811,6 +1821,7 @@ proxy_write(struct http_connection *conn)
 
 	assert(conn->state == STATE_PROXY_REQUEST);
 
+	assert(conn->bufpos < conn->bufsz);
 	s = write(conn->fd, conn->buf + conn->bufpos,
 	    conn->bufsz - conn->bufpos);
 	if (s == -1) {
@@ -2158,9 +2169,12 @@ proc_http(char *bind_addr, int fd)
 				char *uri;
 				char *mod;
 
+				if (!ibuf_fd_avail(b))
+					errx(1, "expected fd not received");
+
 				io_read_buf(b, &id, sizeof(id));
 				io_read_str(b, &uri);
-				io_read_str(b, &mod);
+				io_read_opt_str(b, &mod);
 
 				/* queue up new requests */
 				http_req_new(id, uri, mod, 0, ibuf_fd_get(b));

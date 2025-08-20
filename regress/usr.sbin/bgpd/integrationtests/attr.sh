@@ -1,5 +1,5 @@
 #!/bin/ksh
-#	$OpenBSD: attr.sh,v 1.3 2025/04/01 05:09:10 anton Exp $
+#	$OpenBSD: attr.sh,v 1.5 2025/06/05 18:30:10 claudio Exp $
 
 set -e
 
@@ -82,7 +82,6 @@ ifconfig ${PAIR2} alias ${PAIR2IP3}/32
 ifconfig ${PAIR1} patch ${PAIR2}
 ifconfig lo${RDOMAIN1} inet 127.0.0.1/8
 ifconfig lo${RDOMAIN2} inet 127.0.0.1/8
-[ -p attr.fifo ] || mkfifo attr.fifo
 
 echo run bgpd
 route -T ${RDOMAIN1} exec ${BGPD} \
@@ -93,7 +92,7 @@ sleep 1
 echo start exabgp
 run_exabgp attr exabgp.attr.conf > exabgp.attr.out 2>&1 &
 
-sleep 6
+sleep 10
 
 echo test RFC 7606 attribute handling
 route -T ${RDOMAIN1} exec bgpctl sh rib in | tee attr.out

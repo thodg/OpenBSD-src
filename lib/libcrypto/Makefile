@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.231 2024/12/19 23:56:32 tb Exp $
+# $OpenBSD: Makefile,v 1.242 2025/08/14 15:48:48 beck Exp $
 
 LIB=	crypto
 LIBREBUILD=y
@@ -25,6 +25,7 @@ CFLAGS+= -DLIBRESSL_NAMESPACE -DLIBRESSL_CRYPTO_NAMESPACE
 CFLAGS+= -DHAVE_FUNOPEN
 
 CFLAGS+= -I${LCRYPTO_SRC}
+CFLAGS+= -I${LCRYPTO_SRC}/aes
 CFLAGS+= -I${LCRYPTO_SRC}/arch/${MACHINE_CPU}
 CFLAGS+= -I${LCRYPTO_SRC}/asn1
 CFLAGS+= -I${LCRYPTO_SRC}/bio
@@ -67,7 +68,6 @@ SRCS+= crypto_memory.c
 # aes/
 SRCS+= aes.c
 SRCS+= aes_core.c
-SRCS+= aes_ige.c
 
 # asn1/
 SRCS+= a_bitstr.c
@@ -119,10 +119,8 @@ SRCS+= x_attrib.c
 SRCS+= x_bignum.c
 SRCS+= x_crl.c
 SRCS+= x_exten.c
-SRCS+= x_info.c
 SRCS+= x_long.c
 SRCS+= x_name.c
-SRCS+= x_pkey.c
 SRCS+= x_pubkey.c
 SRCS+= x_req.c
 SRCS+= x_sig.c
@@ -152,13 +150,13 @@ SRCS+= bss_conn.c
 SRCS+= bss_dgram.c
 SRCS+= bss_fd.c
 SRCS+= bss_file.c
-SRCS+= bss_log.c
 SRCS+= bss_mem.c
 SRCS+= bss_null.c
 SRCS+= bss_sock.c
 
 # bn/
 SRCS+= bn_add.c
+SRCS+= bn_add_sub.c
 SRCS+= bn_bpsw.c
 SRCS+= bn_const.c
 SRCS+= bn_convert.c
@@ -172,6 +170,7 @@ SRCS+= bn_kron.c
 SRCS+= bn_lib.c
 SRCS+= bn_mod.c
 SRCS+= bn_mod_sqrt.c
+SRCS+= bn_mod_words.c
 SRCS+= bn_mont.c
 SRCS+= bn_mul.c
 SRCS+= bn_prime.c
@@ -281,11 +280,13 @@ SRCS+= ec_asn1.c
 SRCS+= ec_convert.c
 SRCS+= ec_curve.c
 SRCS+= ec_err.c
+SRCS+= ec_field.c
 SRCS+= ec_key.c
 SRCS+= ec_lib.c
 SRCS+= ec_mult.c
 SRCS+= ec_pmeth.c
 SRCS+= eck_prn.c
+SRCS+= ecp_hp_methods.c
 SRCS+= ecp_methods.c
 SRCS+= ecx_methods.c
 
@@ -373,8 +374,10 @@ SRCS+= md4.c
 SRCS+= md5.c
 
 # mlkem/
+SRCS+= mlkem.c
 SRCS+= mlkem768.c
 SRCS+= mlkem1024.c
+SRCS+= mlkem_key.c
 
 # modes/
 SRCS+= cbc128.c
@@ -450,11 +453,7 @@ SRCS+= rand_lib.c
 SRCS+= randfile.c
 
 # rc2/
-SRCS+= rc2_cbc.c
-SRCS+= rc2_ecb.c
-SRCS+= rc2_skey.c
-SRCS+= rc2cfb64.c
-SRCS+= rc2ofb64.c
+SRCS+= rc2.c
 
 # rc4/
 SRCS+= rc4.c
@@ -671,6 +670,7 @@ HDRS=\
 	${LCRYPTO_SRC}/lhash/lhash.h \
 	${LCRYPTO_SRC}/md4/md4.h \
 	${LCRYPTO_SRC}/md5/md5.h \
+	${LCRYPTO_SRC}/mlkem/mlkem.h \
 	${LCRYPTO_SRC}/modes/modes.h \
 	${LCRYPTO_SRC}/objects/objects.h \
 	${LCRYPTO_SRC}/ocsp/ocsp.h \

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mld6.c,v 1.65 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: mld6.c,v 1.68 2025/07/08 00:47:41 jsg Exp $	*/
 /*	$KAME: mld6.c,v 1.26 2001/02/16 14:50:35 itojun Exp $	*/
 
 /*
@@ -70,11 +70,9 @@
 #include <sys/mbuf.h>
 #include <sys/socket.h>
 #include <sys/protosw.h>
-#include <sys/syslog.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/route.h>
 
 #include <netinet/in.h>
 #include <netinet6/in6_var.h>
@@ -179,7 +177,7 @@ mld6_input(struct mbuf *m, int off)
 	/* XXX: These are necessary for KAME's link-local hack */
 	struct in6_addr all_nodes = IN6ADDR_LINKLOCAL_ALLNODES_INIT;
 
-	IP6_EXTHDR_GET(mldh, struct mld_hdr *, m, off, sizeof(*mldh));
+	mldh = ip6_exthdr_get(&m, off, sizeof(*mldh));
 	if (mldh == NULL) {
 		icmp6stat_inc(icp6s_tooshort);
 		return;

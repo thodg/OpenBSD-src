@@ -1,4 +1,4 @@
-/*	$OpenBSD: specialreg.h,v 1.116 2024/08/04 11:05:18 kettenis Exp $	*/
+/*	$OpenBSD: specialreg.h,v 1.120 2025/07/16 07:15:41 jsg Exp $	*/
 /*	$NetBSD: specialreg.h,v 1.1 2003/04/26 18:39:48 fvdl Exp $	*/
 /*	$NetBSD: x86/specialreg.h,v 1.2 2003/04/25 21:54:30 fvdl Exp $	*/
 
@@ -286,8 +286,9 @@
  */
 #define	TPM_SENSOR	0x00000001	 /* Digital temp sensor */
 #define	TPM_ARAT	0x00000004	 /* APIC Timer Always Running */
+#define	TPM_PTS		0x00000040	 /* Intel Package Thermal Status */ 
 #define TPM_EAX_BITS \
-    ("\20" "\01SENSOR" "\03ARAT" )
+    ("\20" "\01SENSOR" "\03ARAT" "\07PTS")
 /* Thermal and Power Management (CPUID function 0x6) ECX bits */
 #define	TPM_EFFFREQ	0x00000001	 /* APERF & MPERF MSR present */
 #define TPM_ECX_BITS \
@@ -405,7 +406,7 @@
 #define CPUIDEAX_SEVSNP		(1ULL << 4)  /* SEV-SNP */
 #define CPUIDEAX_VMPL		(1ULL << 5)  /* VM Permission Levels */
 #define CPUIDEAX_RMPQUERY	(1ULL << 6)  /* RMPQUERY */
-#define CPUIDEAX_VMPLSSS	(1ULL << 7)  /* VMPL Supservisor Shadow Stack */
+#define CPUIDEAX_VMPLSSS	(1ULL << 7)  /* VMPL Supervisor Shadow Stack */
 #define CPUIDEAX_SECTSC		(1ULL << 8)  /* Secure TSC */
 #define CPUIDEAX_TSCAUXVIRT	(1ULL << 9)  /* TSC Aux Virtualization */
 #define CPUIDEAX_HWECACHECOH	(1ULL << 10) /* Coherency Across Enc. Domains */
@@ -723,8 +724,13 @@
 #define		NB_CFG_DISIOREQLOCK	0x0000000000000004ULL
 #define		NB_CFG_DISDATMSK	0x0000001000000000ULL
 
+#define MSR_SEV_GHCB	0xc0010130
+#define		SEV_CPUID_REQ		0x00000004
+#define		SEV_CPUID_RESP		0x00000005
+
 #define MSR_SEV_STATUS	0xc0010131
 #define		SEV_STAT_ENABLED	0x00000001
+#define		SEV_STAT_ES_ENABLED	0x00000002
 
 #define	MSR_LS_CFG	0xc0011020
 #define		LS_CFG_DIS_LS2_SQUISH	0x02000000

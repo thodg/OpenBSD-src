@@ -1,4 +1,4 @@
-/*	$OpenBSD: geofeed.c,v 1.17 2024/11/12 09:23:07 tb Exp $ */
+/*	$OpenBSD: geofeed.c,v 1.22 2025/08/01 14:57:15 tb Exp $ */
 /*
  * Copyright (c) 2022 Job Snijders <job@fastly.com>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -20,6 +20,7 @@
 
 #include <arpa/inet.h>
 
+#include <assert.h>
 #include <ctype.h>
 #include <err.h>
 #include <stdlib.h>
@@ -30,8 +31,6 @@
 #include <openssl/x509.h>
 
 #include "extern.h"
-
-extern ASN1_OBJECT	*geofeed_oid;
 
 /*
  * Take a CIDR prefix (in presentation format) and add it to parse results.
@@ -81,6 +80,8 @@ geofeed_parse_geoip(struct geofeed *geofeed, char *cidr, char *loc)
 	geoip->ip->ip = *ipaddr;
 	geoip->ip->afi = afi;
 
+	free(ipaddr);
+
 	if ((geoip->loc = strdup(loc)) == NULL)
 		err(1, NULL);
 
@@ -91,13 +92,15 @@ geofeed_parse_geoip(struct geofeed *geofeed, char *cidr, char *loc)
 }
 
 /*
- * Parse a full RFC 9092 file.
+ * Parse a full RFC 9632 file.
  * Returns the Geofeed, or NULL if the object was malformed.
  */
 struct geofeed *
-geofeed_parse(X509 **x509, const char *fn, int talid, char *buf, size_t len)
+geofeed_parse(struct cert **out_cert, const char *fn, int talid, char *buf,
+    size_t len)
 {
 	struct geofeed	*geofeed;
+	struct cert	*cert = NULL;
 	char		*delim, *line, *loc, *nl;
 	ssize_t		 linelen;
 	BIO		*bio;
@@ -105,9 +108,10 @@ geofeed_parse(X509 **x509, const char *fn, int talid, char *buf, size_t len)
 	size_t		 b64sz = 0;
 	unsigned char	*der = NULL;
 	size_t		 dersz;
-	struct cert	*cert = NULL;
 	int		 rpki_signature_seen = 0, end_signature_seen = 0;
 	int		 rc = 0;
+
+	assert(*out_cert == NULL);
 
 	bio = BIO_new(BIO_s_mem());
 	if (bio == NULL)
@@ -223,32 +227,11 @@ geofeed_parse(X509 **x509, const char *fn, int talid, char *buf, size_t len)
 		goto out;
 	}
 
-	if (!cms_parse_validate_detached(x509, fn, der, dersz, geofeed_oid,
-	    bio, &geofeed->signtime))
+	if (!cms_parse_validate_detached(&cert, fn, talid, der, dersz,
+	    geofeed_oid, bio, &geofeed->signtime))
 		goto out;
 
-	if (!x509_get_aia(*x509, fn, &geofeed->aia))
-		goto out;
-	if (!x509_get_aki(*x509, fn, &geofeed->aki))
-		goto out;
-	if (!x509_get_ski(*x509, fn, &geofeed->ski))
-		goto out;
-
-	if (geofeed->aia == NULL || geofeed->aki == NULL ||
-	    geofeed->ski == NULL) {
-		warnx("%s: missing AIA, AKI, or SKI X509 extension", fn);
-		goto out;
-	}
-
-	if (!x509_get_notbefore(*x509, fn, &geofeed->notbefore))
-		goto out;
-	if (!x509_get_notafter(*x509, fn, &geofeed->notafter))
-		goto out;
-
-	if ((cert = cert_parse_ee_cert(fn, talid, *x509)) == NULL)
-		goto out;
-
-	if (x509_any_inherits(*x509)) {
+	if (x509_any_inherits(cert->x509)) {
 		warnx("%s: inherit elements not allowed in EE cert", fn);
 		goto out;
 	}
@@ -260,13 +243,14 @@ geofeed_parse(X509 **x509, const char *fn, int talid, char *buf, size_t len)
 
 	geofeed->valid = valid_geofeed(fn, cert, geofeed);
 
+	*out_cert = cert;
+	cert = NULL;
+
 	rc = 1;
  out:
 	if (rc == 0) {
 		geofeed_free(geofeed);
 		geofeed = NULL;
-		X509_free(*x509);
-		*x509 = NULL;
 	}
 	cert_free(cert);
 	BIO_free(bio);
@@ -294,8 +278,5 @@ geofeed_free(struct geofeed *p)
 	}
 
 	free(p->geoips);
-	free(p->aia);
-	free(p->aki);
-	free(p->ski);
 	free(p);
 }

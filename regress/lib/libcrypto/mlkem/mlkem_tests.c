@@ -1,4 +1,4 @@
-/*	$OpenBSD: mlkem_tests.c,v 1.2 2024/12/26 00:10:19 tb Exp $ */
+/*	$OpenBSD: mlkem_tests.c,v 1.10 2025/08/15 21:47:39 tb Exp $ */
 /*
  * Copyright (c) 2024 Google Inc.
  * Copyright (c) 2024 Theo Buehler <tb@openbsd.org>
@@ -23,12 +23,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "bytestring.h"
-#include "mlkem.h"
+#include <openssl/mlkem.h>
 
+#include "bytestring.h"
 #include "mlkem_internal.h"
 
-#include "mlkem_tests_util.h"
 #include "parse_test_file.h"
 
 enum test_type {
@@ -39,11 +38,7 @@ enum test_type {
 struct decap_ctx {
 	struct parse *parse_ctx;
 
-	void *private_key;
-	size_t private_key_len;
-
-	mlkem_parse_private_key_fn parse_private_key;
-	mlkem_decap_fn decap;
+	int rank;
 };
 
 enum decap_states {
@@ -102,8 +97,10 @@ static int
 MlkemDecapFileTest(struct decap_ctx *decap)
 {
 	struct parse *p = decap->parse_ctx;
-	uint8_t shared_secret_buf[MLKEM_SHARED_SECRET_BYTES];
+	MLKEM_private_key *priv_key = NULL;
 	CBS ciphertext, shared_secret, private_key;
+	uint8_t *shared_secret_buf = NULL;
+	size_t shared_secret_buf_len = 0;
 	int should_fail;
 	int failed = 1;
 
@@ -112,20 +109,31 @@ MlkemDecapFileTest(struct decap_ctx *decap)
 	parse_get_cbs(p, DECAP_PRIVATE_KEY, &private_key);
 	parse_get_int(p, DECAP_RESULT, &should_fail);
 
-	if (!decap->parse_private_key(decap->private_key, &private_key)) {
+	if ((priv_key = MLKEM_private_key_new(decap->rank)) == NULL)
+		parse_errx(p, "MLKEM_private_key_new");
+
+	if (!MLKEM_parse_private_key(priv_key,
+	    CBS_data(&private_key), CBS_len(&private_key))) {
 		if ((failed = !should_fail))
 			parse_info(p, "parse private key");
 		goto err;
 	}
-	if (!decap->decap(shared_secret_buf,
-	    CBS_data(&ciphertext), CBS_len(&ciphertext), decap->private_key)) {
+	if (!MLKEM_decap(priv_key, CBS_data(&ciphertext), CBS_len(&ciphertext),
+	    &shared_secret_buf, &shared_secret_buf_len)) {
 		if ((failed = !should_fail))
 			parse_info(p, "decap");
 		goto err;
 	}
 
+	if (shared_secret_buf_len != MLKEM_SHARED_SECRET_LENGTH) {
+		if ((failed = !should_fail))
+			parse_info(p, "shared secret length %zu != %d",
+			    shared_secret_buf_len, MLKEM_SHARED_SECRET_LENGTH);
+		goto err;
+	}
+
 	failed = !parse_data_equal(p, "shared_secret", &shared_secret,
-	    shared_secret_buf, sizeof(shared_secret_buf));
+	    shared_secret_buf, shared_secret_buf_len);
 
 	if (should_fail != failed) {
 		parse_info(p, "FAIL: should_fail %d, failed %d",
@@ -134,6 +142,9 @@ MlkemDecapFileTest(struct decap_ctx *decap)
 	}
 
  err:
+	MLKEM_private_key_free(priv_key);
+	freezero(shared_secret_buf, shared_secret_buf_len);
+
 	return failed;
 }
 
@@ -192,35 +203,49 @@ static int
 MlkemNistDecapFileTest(struct decap_ctx *decap)
 {
 	struct parse *p = decap->parse_ctx;
-	uint8_t shared_secret[MLKEM_SHARED_SECRET_BYTES];
+	MLKEM_private_key *priv_key = NULL;
 	CBS dk, c, k;
+	uint8_t *shared_secret = NULL;
+	size_t shared_secret_len = 0;
 	int failed = 1;
 
 	parse_instruction_get_cbs(p, NIST_DECAP_DK, &dk);
 	parse_get_cbs(p, NIST_DECAP_C, &c);
 	parse_get_cbs(p, NIST_DECAP_K, &k);
 
+	if ((priv_key = MLKEM_private_key_new(decap->rank)) == NULL)
+		parse_errx(p, "MLKEM_private_key_new");
+
 	if (!parse_length_equal(p, "private key",
-	    decap->private_key_len, CBS_len(&dk)))
+	    MLKEM_private_key_encoded_length(priv_key), CBS_len(&dk)))
 		goto err;
 	if (!parse_length_equal(p, "shared secret",
-	    MLKEM_SHARED_SECRET_BYTES, CBS_len(&k)))
+	    MLKEM_SHARED_SECRET_LENGTH, CBS_len(&k)))
 		goto err;
 
-	if (!decap->parse_private_key(decap->private_key, &dk)) {
+	if (!MLKEM_parse_private_key(priv_key, CBS_data(&dk), CBS_len(&dk))) {
 		parse_info(p, "parse private key");
 		goto err;
 	}
-	if (!decap->decap(shared_secret, CBS_data(&c), CBS_len(&c),
-	    decap->private_key)) {
+	if (!MLKEM_decap(priv_key, CBS_data(&c), CBS_len(&c),
+	    &shared_secret, &shared_secret_len)) {
 		parse_info(p, "decap");
 		goto err;
 	}
 
+	if (shared_secret_len != MLKEM_SHARED_SECRET_LENGTH) {
+		parse_info(p, "shared secret length %zu != %d",
+		    shared_secret_len, MLKEM_SHARED_SECRET_LENGTH);
+		goto err;
+	}
+
 	failed = !parse_data_equal(p, "shared secret", &k,
-	    shared_secret, MLKEM_SHARED_SECRET_BYTES);
+	    shared_secret, shared_secret_len);
 
  err:
+	MLKEM_private_key_free(priv_key);
+	freezero(shared_secret, shared_secret_len);
+
 	return failed;
 }
 
@@ -244,46 +269,24 @@ static const struct test_parse nist_decap_parse = {
 };
 
 static int
-mlkem_decap_tests(const char *fn, size_t size, enum test_type test_type)
+mlkem_decap_tests(const char *fn, int rank, enum test_type test_type)
 {
-	struct MLKEM768_private_key private_key768;
-	struct decap_ctx decap768 = {
-		.private_key = &private_key768,
-		.private_key_len = MLKEM768_PRIVATE_KEY_BYTES,
-
-		.parse_private_key = mlkem768_parse_private_key,
-		.decap = mlkem768_decap,
-	};
-	struct MLKEM1024_private_key private_key1024;
-	struct decap_ctx decap1024 = {
-		.private_key = &private_key1024,
-		.private_key_len = MLKEM1024_PRIVATE_KEY_BYTES,
-
-		.parse_private_key = mlkem1024_parse_private_key,
-		.decap = mlkem1024_decap,
+	struct decap_ctx decap = {
+		.rank = rank,
 	};
 
-	if (size == 768 && test_type == TEST_TYPE_NORMAL)
-		return parse_test_file(fn, &decap_parse, &decap768);
-	if (size == 768 && test_type == TEST_TYPE_NIST)
-		return parse_test_file(fn, &nist_decap_parse, &decap768);
-	if (size == 1024 && test_type == TEST_TYPE_NORMAL)
-		return parse_test_file(fn, &decap_parse, &decap1024);
-	if (size == 1024 && test_type == TEST_TYPE_NIST)
-		return parse_test_file(fn, &nist_decap_parse, &decap1024);
+	if (test_type == TEST_TYPE_NORMAL)
+		return parse_test_file(fn, &decap_parse, &decap);
+	if (test_type == TEST_TYPE_NIST)
+		return parse_test_file(fn, &nist_decap_parse, &decap);
 
-	errx(1, "unknown decap test: size %zu, type %d", size, test_type);
+	errx(1, "unknown decap test: rank %d, type %d", rank, test_type);
 }
 
 struct encap_ctx {
 	struct parse *parse_ctx;
 
-	void *public_key;
-	uint8_t *ciphertext;
-	size_t ciphertext_len;
-
-	mlkem_parse_public_key_fn parse_public_key;
-	mlkem_encap_external_entropy_fn encap_external_entropy;
+	int rank;
 };
 
 enum encap_states {
@@ -349,8 +352,12 @@ static int
 MlkemEncapFileTest(struct encap_ctx *encap)
 {
 	struct parse *p = encap->parse_ctx;
-	uint8_t shared_secret_buf[MLKEM_SHARED_SECRET_BYTES];
+	MLKEM_public_key *pub_key = NULL;
 	CBS entropy, public_key, ciphertext, shared_secret;
+	uint8_t *ciphertext_buf = NULL;
+	size_t ciphertext_buf_len = 0;
+	uint8_t *shared_secret_buf = NULL;
+	size_t shared_secret_buf_len = 0;
 	int should_fail;
 	int failed = 1;
 
@@ -360,18 +367,34 @@ MlkemEncapFileTest(struct encap_ctx *encap)
 	parse_get_cbs(p, ENCAP_SHARED_SECRET, &shared_secret);
 	parse_get_int(p, ENCAP_RESULT, &should_fail);
 
-	if (!encap->parse_public_key(encap->public_key, &public_key)) {
+	if ((pub_key = MLKEM_public_key_new(encap->rank)) == NULL)
+		parse_errx(p, "MLKEM_public_key_new");
+
+	if (!MLKEM_parse_public_key(pub_key,
+	    CBS_data(&public_key), CBS_len(&public_key))) {
 		if ((failed = !should_fail))
 			parse_info(p, "parse public key");
 		goto err;
 	}
-	encap->encap_external_entropy(encap->ciphertext, shared_secret_buf,
-	    encap->public_key, CBS_data(&entropy));
+	if (!MLKEM_encap_external_entropy(pub_key, CBS_data(&entropy),
+	    &ciphertext_buf, &ciphertext_buf_len,
+	    &shared_secret_buf, &shared_secret_buf_len)) {
+		if ((failed = !should_fail))
+			parse_info(p, "encap_external_entropy");
+		goto err;
+	}
+
+	if (shared_secret_buf_len != MLKEM_SHARED_SECRET_LENGTH) {
+		if ((failed = !should_fail))
+			parse_info(p, "shared secret length %zu != %d",
+			    shared_secret_buf_len, MLKEM_SHARED_SECRET_LENGTH);
+		goto err;
+	}
 
 	failed = !parse_data_equal(p, "shared_secret", &shared_secret,
-	    shared_secret_buf, sizeof(shared_secret_buf));
+	    shared_secret_buf, shared_secret_buf_len);
 	failed |= !parse_data_equal(p, "ciphertext", &ciphertext,
-	    encap->ciphertext, encap->ciphertext_len);
+	    ciphertext_buf, ciphertext_buf_len);
 
 	if (should_fail != failed) {
 		parse_info(p, "FAIL: should_fail %d, failed %d",
@@ -380,6 +403,10 @@ MlkemEncapFileTest(struct encap_ctx *encap)
 	}
 
  err:
+	MLKEM_public_key_free(pub_key);
+	freezero(ciphertext_buf, ciphertext_buf_len);
+	freezero(shared_secret_buf, shared_secret_buf_len);
+
 	return failed;
 }
 
@@ -400,48 +427,19 @@ static const struct test_parse encap_parse = {
 };
 
 static int
-mlkem_encap_tests(const char *fn, size_t size)
+mlkem_encap_tests(const char *fn, int rank)
 {
-	struct MLKEM768_public_key public_key768;
-	uint8_t ciphertext768[MLKEM768_CIPHERTEXT_BYTES];
-	struct encap_ctx encap768 = {
-		.public_key = &public_key768,
-		.ciphertext = ciphertext768,
-		.ciphertext_len = sizeof(ciphertext768),
-
-		.parse_public_key = mlkem768_parse_public_key,
-		.encap_external_entropy = mlkem768_encap_external_entropy,
-	};
-	struct MLKEM1024_public_key public_key1024;
-	uint8_t ciphertext1024[MLKEM1024_CIPHERTEXT_BYTES];
-	struct encap_ctx encap1024 = {
-		.public_key = &public_key1024,
-		.ciphertext = ciphertext1024,
-		.ciphertext_len = sizeof(ciphertext1024),
-
-		.parse_public_key = mlkem1024_parse_public_key,
-		.encap_external_entropy = mlkem1024_encap_external_entropy,
+	struct encap_ctx encap = {
+		.rank = rank,
 	};
 
-	if (size == 768)
-		return parse_test_file(fn, &encap_parse, &encap768);
-	if (size == 1024)
-		return parse_test_file(fn, &encap_parse, &encap1024);
-
-	errx(1, "unknown encap test: size %zu", size);
+	return parse_test_file(fn, &encap_parse, &encap);
 }
 
 struct keygen_ctx {
 	struct parse *parse_ctx;
 
-	void *private_key;
-	void *encoded_public_key;
-	size_t encoded_public_key_len;
-	size_t private_key_len;
-	size_t public_key_len;
-
-	mlkem_generate_key_external_entropy_fn generate_key_external_entropy;
-	mlkem_encode_private_key_fn encode_private_key;
+	int rank;
 };
 
 enum keygen_states {
@@ -492,27 +490,38 @@ static int
 MlkemKeygenFileTest(struct keygen_ctx *keygen)
 {
 	struct parse *p = keygen->parse_ctx;
+	MLKEM_private_key *priv_key = NULL;
 	CBS seed, public_key, private_key;
 	uint8_t *encoded_private_key = NULL;
 	size_t encoded_private_key_len = 0;
+	uint8_t *encoded_public_key = NULL;
+	size_t encoded_public_key_len = 0;
 	int failed = 1;
 
 	parse_get_cbs(p, KEYGEN_SEED, &seed);
 	parse_get_cbs(p, KEYGEN_PUBLIC_KEY, &public_key);
 	parse_get_cbs(p, KEYGEN_PRIVATE_KEY, &private_key);
 
-	if (!parse_length_equal(p, "seed", MLKEM_SEED_BYTES, CBS_len(&seed)))
-		goto err;
-	if (!parse_length_equal(p, "public key",
-	    keygen->public_key_len, CBS_len(&public_key)))
-		goto err;
-	if (!parse_length_equal(p, "private key",
-	    keygen->private_key_len, CBS_len(&private_key)))
+	if (!parse_length_equal(p, "seed", MLKEM_SEED_LENGTH, CBS_len(&seed)))
 		goto err;
 
-	keygen->generate_key_external_entropy(keygen->encoded_public_key,
-	    keygen->private_key, CBS_data(&seed));
-	if (!keygen->encode_private_key(keygen->private_key,
+	if ((priv_key = MLKEM_private_key_new(keygen->rank)) == NULL)
+		parse_errx(p, "MLKEM_public_key_free");
+
+	if (!MLKEM_generate_key_external_entropy(priv_key,
+	    &encoded_public_key, &encoded_public_key_len, CBS_data(&seed))) {
+		parse_info(p, "generate_key_external_entropy");
+		goto err;
+	}
+
+	if (!parse_length_equal(p, "public key",
+	    encoded_public_key_len, CBS_len(&public_key)))
+		goto err;
+	if (!parse_length_equal(p, "private key",
+	    MLKEM_private_key_encoded_length(priv_key), CBS_len(&private_key)))
+		goto err;
+
+	if (!MLKEM_marshal_private_key(priv_key,
 	    &encoded_private_key, &encoded_private_key_len)) {
 		parse_info(p, "encode private key");
 		goto err;
@@ -521,10 +530,12 @@ MlkemKeygenFileTest(struct keygen_ctx *keygen)
 	failed = !parse_data_equal(p, "private key", &private_key,
 	    encoded_private_key, encoded_private_key_len);
 	failed |= !parse_data_equal(p, "public key", &public_key,
-	    keygen->encoded_public_key, keygen->encoded_public_key_len);
+	    encoded_public_key, encoded_public_key_len);
 
  err:
+	MLKEM_private_key_free(priv_key);
 	freezero(encoded_private_key, encoded_private_key_len);
+	freezero(encoded_public_key, encoded_public_key_len);
 
 	return failed;
 }
@@ -584,12 +595,15 @@ static int
 MlkemNistKeygenFileTest(struct keygen_ctx *keygen)
 {
 	struct parse *p = keygen->parse_ctx;
+	MLKEM_private_key *priv_key = NULL;
 	CBB seed_cbb;
 	CBS z, d, ek, dk;
-	uint8_t seed[MLKEM_SEED_BYTES];
+	uint8_t seed[MLKEM_SEED_LENGTH];
 	size_t seed_len;
 	uint8_t *encoded_private_key = NULL;
 	size_t encoded_private_key_len = 0;
+	uint8_t *encoded_public_key = NULL;
+	size_t encoded_public_key_len = 0;
 	int failed = 1;
 
 	parse_get_cbs(p, NIST_KEYGEN_Z, &z);
@@ -606,24 +620,33 @@ MlkemNistKeygenFileTest(struct keygen_ctx *keygen)
 	if (!CBB_finish(&seed_cbb, NULL, &seed_len))
 		parse_errx(p, "CBB_finish");
 
-	if (!parse_length_equal(p, "bogus z or d", MLKEM_SEED_BYTES, seed_len))
+	if (!parse_length_equal(p, "bogus z or d", MLKEM_SEED_LENGTH, seed_len))
 		goto err;
 
-	keygen->generate_key_external_entropy(keygen->encoded_public_key,
-	    keygen->private_key, seed);
-	if (!keygen->encode_private_key(keygen->private_key,
+	if ((priv_key = MLKEM_private_key_new(keygen->rank)) == NULL)
+		parse_errx(p, "MLKEM_private_key_new");
+
+	if (!MLKEM_generate_key_external_entropy(priv_key,
+	    &encoded_public_key, &encoded_public_key_len, seed)) {
+		parse_info(p, "MLKEM_generate_key_external_entropy");
+		goto err;
+	}
+
+	if (!MLKEM_marshal_private_key(priv_key,
 	    &encoded_private_key, &encoded_private_key_len)) {
 		parse_info(p, "encode private key");
 		goto err;
 	}
 
 	failed = !parse_data_equal(p, "public key", &ek,
-	    keygen->encoded_public_key, keygen->encoded_public_key_len);
+	    encoded_public_key, encoded_public_key_len);
 	failed |= !parse_data_equal(p, "private key", &dk,
 	    encoded_private_key, encoded_private_key_len);
 
  err:
+	MLKEM_private_key_free(priv_key);
 	freezero(encoded_private_key, encoded_private_key_len);
+	freezero(encoded_public_key, encoded_public_key_len);
 
 	return failed;
 }
@@ -645,73 +668,45 @@ static const struct test_parse nist_keygen_parse = {
 };
 
 static int
-mlkem_keygen_tests(const char *fn, size_t size, enum test_type test_type)
+mlkem_keygen_tests(const char *fn, int rank, enum test_type test_type)
 {
-	struct MLKEM768_private_key private_key768;
-	uint8_t encoded_public_key768[MLKEM768_PUBLIC_KEY_BYTES];
-	struct keygen_ctx keygen768 = {
-		.private_key = &private_key768,
-		.encoded_public_key = encoded_public_key768,
-		.encoded_public_key_len = sizeof(encoded_public_key768),
-		.private_key_len = MLKEM768_PRIVATE_KEY_BYTES,
-		.public_key_len = MLKEM768_PUBLIC_KEY_BYTES,
-		.generate_key_external_entropy =
-		    mlkem768_generate_key_external_entropy,
-		.encode_private_key =
-		    mlkem768_encode_private_key,
-	};
-	struct MLKEM1024_private_key private_key1024;
-	uint8_t encoded_public_key1024[MLKEM1024_PUBLIC_KEY_BYTES];
-	struct keygen_ctx keygen1024 = {
-		.private_key = &private_key1024,
-		.encoded_public_key = encoded_public_key1024,
-		.encoded_public_key_len = sizeof(encoded_public_key1024),
-		.private_key_len = MLKEM1024_PRIVATE_KEY_BYTES,
-		.public_key_len = MLKEM1024_PUBLIC_KEY_BYTES,
-
-		.generate_key_external_entropy =
-		    mlkem1024_generate_key_external_entropy,
-		.encode_private_key =
-		    mlkem1024_encode_private_key,
+	struct keygen_ctx keygen = {
+		.rank = rank,
 	};
 
-	if (size == 768 && test_type == TEST_TYPE_NORMAL)
-		return parse_test_file(fn, &keygen_parse, &keygen768);
-	if (size == 768 && test_type == TEST_TYPE_NIST)
-		return parse_test_file(fn, &nist_keygen_parse, &keygen768);
-	if (size == 1024 && test_type == TEST_TYPE_NORMAL)
-		return parse_test_file(fn, &keygen_parse, &keygen1024);
-	if (size == 1024 && test_type == TEST_TYPE_NIST)
-		return parse_test_file(fn, &nist_keygen_parse, &keygen1024);
+	if (test_type == TEST_TYPE_NORMAL)
+		return parse_test_file(fn, &keygen_parse, &keygen);
+	if (test_type == TEST_TYPE_NIST)
+		return parse_test_file(fn, &nist_keygen_parse, &keygen);
 
-	errx(1, "unknown keygen test: size %zu, type %d", size, test_type);
+	errx(1, "unknown keygen test: rank %d, type %d", rank, test_type);
 }
 
 static int
 run_mlkem_test(const char *test, const char *fn)
 {
 	if (strcmp(test, "mlkem768_decap_tests") == 0)
-		return mlkem_decap_tests(fn, 768, TEST_TYPE_NORMAL);
+		return mlkem_decap_tests(fn, RANK768, TEST_TYPE_NORMAL);
 	if (strcmp(test, "mlkem768_nist_decap_tests") == 0)
-		return mlkem_decap_tests(fn, 768, TEST_TYPE_NIST);
+		return mlkem_decap_tests(fn, RANK768, TEST_TYPE_NIST);
 	if (strcmp(test, "mlkem1024_decap_tests") == 0)
-		return mlkem_decap_tests(fn, 1024, TEST_TYPE_NORMAL);
+		return mlkem_decap_tests(fn, RANK1024, TEST_TYPE_NORMAL);
 	if (strcmp(test, "mlkem1024_nist_decap_tests") == 0)
-		return mlkem_decap_tests(fn, 1024, TEST_TYPE_NIST);
+		return mlkem_decap_tests(fn, RANK1024, TEST_TYPE_NIST);
 
 	if (strcmp(test, "mlkem768_encap_tests") == 0)
-		return mlkem_encap_tests(fn, 768);
+		return mlkem_encap_tests(fn, RANK768);
 	if (strcmp(test, "mlkem1024_encap_tests") == 0)
-		return mlkem_encap_tests(fn, 1024);
+		return mlkem_encap_tests(fn, RANK1024);
 
 	if (strcmp(test, "mlkem768_keygen_tests") == 0)
-		return mlkem_keygen_tests(fn, 768, TEST_TYPE_NORMAL);
+		return mlkem_keygen_tests(fn, RANK768, TEST_TYPE_NORMAL);
 	if (strcmp(test, "mlkem768_nist_keygen_tests") == 0)
-		return mlkem_keygen_tests(fn, 768, TEST_TYPE_NIST);
+		return mlkem_keygen_tests(fn, RANK768, TEST_TYPE_NIST);
 	if (strcmp(test, "mlkem1024_keygen_tests") == 0)
-		return mlkem_keygen_tests(fn, 1024, TEST_TYPE_NORMAL);
+		return mlkem_keygen_tests(fn, RANK1024, TEST_TYPE_NORMAL);
 	if (strcmp(test, "mlkem1024_nist_keygen_tests") == 0)
-		return mlkem_keygen_tests(fn, 1024, TEST_TYPE_NIST);
+		return mlkem_keygen_tests(fn, RANK1024, TEST_TYPE_NIST);
 
 	errx(1, "unknown test %s (test file %s)", test, fn);
 }

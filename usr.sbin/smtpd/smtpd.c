@@ -1,4 +1,4 @@
-/*	$OpenBSD: smtpd.c,v 1.354 2024/11/21 13:22:21 claudio Exp $	*/
+/*	$OpenBSD: smtpd.c,v 1.357 2025/07/30 20:26:29 op Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -162,6 +162,8 @@ parent_imsg(struct mproc *p, struct imsg *imsg)
 	case IMSG_LKA_OPEN_FORWARD:
 		CHECK_IMSG_DATA_SIZE(imsg, sizeof *fwreq);
 		fwreq = imsg->data;
+		fwreq->directory[sizeof(fwreq->directory) - 1] = '\0';
+		fwreq->user[sizeof(fwreq->user) - 1] = '\0';
 		fd = parent_forward_open(fwreq->user, fwreq->directory,
 		    fwreq->uid, fwreq->gid);
 		fwreq->status = 0;
@@ -185,6 +187,9 @@ parent_imsg(struct mproc *p, struct imsg *imsg)
 		m_get_string(&m, &username);
 		m_get_string(&m, &password);
 		m_end(&m);
+
+		if (username == NULL || password == NULL)
+			fatalx("parent_imsg: missing username or password");
 
 		ret = parent_auth_user(username, password);
 
@@ -210,6 +215,9 @@ parent_imsg(struct mproc *p, struct imsg *imsg)
 		m_get_id(&m, &reqid);
 		m_get_string(&m, &cause);
 		m_end(&m);
+
+		if (cause == NULL)
+			fatalx("parent_imsg: missing cause");
 
 		i = NULL;
 		while ((n = tree_iter(&children, &i, NULL, (void**)&c)))
@@ -247,6 +255,9 @@ parent_imsg(struct mproc *p, struct imsg *imsg)
 		m_msg(&m, imsg);
 		m_get_string(&m, &procname);
 		m_end(&m);
+
+		if (procname == NULL)
+			fatalx("parent_imsg: missing procname");
 
 		processor = dict_xget(env->sc_filter_processes_dict, procname);
 		m_create(p_lka, IMSG_LKA_PROCESSOR_ERRFD, 0, 0, processor->errfd);
@@ -1205,43 +1216,52 @@ static void
 purge_task(void)
 {
 	struct passwd	*pw;
-	DIR		*d;
-	int		 n;
+	DIR		*dp;
+	struct dirent	*d;
+	int		 purge;
 	uid_t		 uid;
 	gid_t		 gid;
 
-	n = 0;
-	if ((d = opendir(PATH_SPOOL PATH_PURGE))) {
-		while (readdir(d) != NULL)
-			n++;
-		closedir(d);
-	} else
+	if ((dp = opendir(PATH_SPOOL PATH_PURGE)) == NULL) {
 		log_warn("warn: purge_task: opendir");
+		return;
+	}
 
-	if (n > 2) {
-		switch (purge_pid = fork()) {
-		case -1:
-			log_warn("warn: purge_task: fork");
-			break;
-		case 0:
-			if ((pw = getpwnam(SMTPD_QUEUE_USER)) == NULL)
-				fatalx("unknown user " SMTPD_QUEUE_USER);
-			if (chroot(PATH_SPOOL PATH_PURGE) == -1)
-				fatal("smtpd: chroot");
-			if (chdir("/") == -1)
-				fatal("smtpd: chdir");
-			uid = pw->pw_uid;
-			gid = pw->pw_gid;
-			if (setgroups(1, &gid) ||
-			    setresgid(gid, gid, gid) ||
-			    setresuid(uid, uid, uid))
-				fatal("smtpd: cannot drop privileges");
-			rmtree("/", 1);
-			_exit(0);
-			break;
-		default:
-			break;
-		}
+	purge = 0;
+	while ((d = readdir(dp)) != NULL) {
+		if (strcmp(d->d_name, ".") == 0 ||
+		    strcmp(d->d_name, "..") == 0)
+			continue;
+		purge = 1;
+		break;
+	}
+	closedir(dp);
+
+	if (!purge)
+		return;
+
+	switch (purge_pid = fork()) {
+	case -1:
+		log_warn("warn: purge_task: fork");
+		break;
+	case 0:
+		if ((pw = getpwnam(SMTPD_QUEUE_USER)) == NULL)
+			fatalx("unknown user " SMTPD_QUEUE_USER);
+		if (chroot(PATH_SPOOL PATH_PURGE) == -1)
+			fatal("smtpd: chroot");
+		if (chdir("/") == -1)
+			fatal("smtpd: chdir");
+		uid = pw->pw_uid;
+		gid = pw->pw_gid;
+		if (setgroups(1, &gid) ||
+		    setresgid(gid, gid, gid) ||
+		    setresuid(uid, uid, uid))
+			fatal("smtpd: cannot drop privileges");
+		rmtree("/", 1);
+		_exit(0);
+		break;
+	default:
+		break;
 	}
 }
 

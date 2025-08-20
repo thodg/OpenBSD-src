@@ -1,4 +1,4 @@
-/* $OpenBSD: sshkey.h,v 1.66 2025/04/02 04:28:03 tb Exp $ */
+/* $OpenBSD: sshkey.h,v 1.69 2025/07/24 06:12:08 djm Exp $ */
 
 /*
  * Copyright (c) 2000, 2001 Markus Friedl.  All rights reserved.
@@ -30,9 +30,6 @@
 
 #ifdef WITH_OPENSSL
 #include <openssl/rsa.h>
-#ifdef WITH_DSA
-#include <openssl/dsa.h>
-#endif
 #include <openssl/ec.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
@@ -40,7 +37,6 @@
 #else /* OPENSSL */
 #define BIGNUM		void
 #define RSA		void
-#define DSA		void
 #define EC_KEY		void
 #define EC_GROUP	void
 #define EC_POINT	void
@@ -56,11 +52,9 @@ struct sshbuf;
 /* Key types */
 enum sshkey_types {
 	KEY_RSA,
-	KEY_DSA,
 	KEY_ECDSA,
 	KEY_ED25519,
 	KEY_RSA_CERT,
-	KEY_DSA_CERT,
 	KEY_ECDSA_CERT,
 	KEY_ED25519_CERT,
 	KEY_XMSS,
@@ -123,8 +117,6 @@ struct sshkey_cert {
 struct sshkey {
 	int	 type;
 	int	 flags;
-	/* KEY_DSA */
-	DSA	*dsa;
 	/* KEY_ECDSA and KEY_ECDSA_SK */
 	int	 ecdsa_nid;	/* NID of curve */
 	/* libcrypto-backed keys */
@@ -277,6 +269,7 @@ int	 sshkey_puts_opts(const struct sshkey *, struct sshbuf *,
     enum sshkey_serialize_rep);
 int	 sshkey_plain_to_blob(const struct sshkey *, u_char **, size_t *);
 int	 sshkey_putb_plain(const struct sshkey *, struct sshbuf *);
+int	 sshkey_puts_plain(const struct sshkey *, struct sshbuf *);
 
 int	 sshkey_sign(struct sshkey *, u_char **, size_t *,
     const u_char *, size_t, const char *, const char *, const char *, u_int);
@@ -342,12 +335,19 @@ int	sshkey_serialize_private_sk(const struct sshkey *key,
 int	sshkey_private_deserialize_sk(struct sshbuf *buf, struct sshkey *k);
 #ifdef WITH_OPENSSL
 int	check_rsa_length(const RSA *rsa); /* XXX remove */
+int	ssh_rsa_hash_id_from_keyname(const char *);
+const char *ssh_rsa_hash_alg_ident(int);
+int	ssh_rsa_encode_store_sig(int, const u_char *, size_t,
+	    u_char **, size_t *);
+int	ssh_ecdsa_encode_store_sig(const struct sshkey *,
+	    const BIGNUM *, const BIGNUM *, u_char **, size_t *);
 #endif
+int	ssh_ed25519_encode_store_sig(const u_char *, size_t,
+	    u_char **, size_t *);
 #endif
 
 #ifndef WITH_OPENSSL
 #undef RSA
-#undef DSA
 #undef EC_KEY
 #undef EC_GROUP
 #undef EC_POINT

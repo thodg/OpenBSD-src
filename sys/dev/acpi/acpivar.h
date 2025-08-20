@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpivar.h,v 1.134 2024/08/08 07:02:38 kettenis Exp $	*/
+/*	$OpenBSD: acpivar.h,v 1.137 2025/07/07 00:55:15 jsg Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -45,6 +45,7 @@ extern int acpi_debug;
 
 extern int acpi_hasprocfvs;
 extern int acpi_haspci;
+extern int acpi_legacy_free;
 
 struct acpiec_softc;
 struct acpipwrres_softc;
@@ -266,7 +267,6 @@ struct acpi_softc {
 	int			sc_state;
 	int			sc_wakeup;
 	int			sc_wakeups;
-	time_t			sc_resume_time;
 	struct acpiec_softc	*sc_ec;		/* XXX assume single EC */
 
 	struct acpi_ac_head	sc_ac;
@@ -326,7 +326,6 @@ int	 acpi_sleep_cpu(struct acpi_softc *, int);
 void	 acpi_sleep_pm(struct acpi_softc *, int);
 void	 acpi_resume_pm(struct acpi_softc *, int);
 void	 acpi_resume_cpu(struct acpi_softc *, int);
-int	 acpi_resuming(struct acpi_softc *);
 
 #define ACPI_IOREAD 0
 #define ACPI_IOWRITE 1
@@ -378,7 +377,6 @@ int	acpi_record_event(struct acpi_softc *, u_int);
 void	acpi_addtask(struct acpi_softc *, void (*)(void *, int), void *, int);
 int	acpi_dotask(struct acpi_softc *);
 
-void	acpi_powerdown_task(void *, int);
 void	acpi_sleep_task(void *, int);
 
 /* Section 5.2.10.1: global lock acquire/release functions */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_node.c,v 1.200 2025/03/22 07:24:08 kevlo Exp $	*/
+/*	$OpenBSD: ieee80211_node.c,v 1.203 2025/08/01 20:39:26 stsp Exp $	*/
 /*	$NetBSD: ieee80211_node.c,v 1.14 2004/05/09 09:18:47 dyoung Exp $	*/
 
 /*-
@@ -931,8 +931,29 @@ ieee80211_create_ibss(struct ieee80211com* ic, struct ieee80211_channel *chan)
 		mode = IEEE80211_MODE_11AC;
 	else if (ic->ic_flags & IEEE80211_F_HTON)
 		mode = IEEE80211_MODE_11N;
-	else
-		mode = ieee80211_chan2mode(ic, ni->ni_chan);
+	else {
+		/* Was a specific 11a/b/g phy mode set by ifconfig? */
+		switch (IFM_MODE(ic->ic_media.ifm_cur->ifm_media)) {
+		case IFM_IEEE80211_11A:
+			mode = IEEE80211_MODE_11A;
+			break;
+		case IFM_IEEE80211_11G:
+			mode = IEEE80211_MODE_11G;
+			break;
+		case IFM_IEEE80211_11B:
+			mode = IEEE80211_MODE_11B;
+			break;
+		default: /* If we get here, our phy mode is MODE_AUTO. */
+			if (IEEE80211_IS_CHAN_5GHZ(ni->ni_chan))
+				mode = IEEE80211_MODE_11A;
+			else if ((ni->ni_chan->ic_flags &
+			    (IEEE80211_CHAN_OFDM | IEEE80211_CHAN_DYN)) != 0)
+				mode = IEEE80211_MODE_11G;
+			else
+				mode = IEEE80211_MODE_11B;
+			break;
+		}
+	}
 	ieee80211_setmode(ic, mode);
 	/* Pick an appropriate mode for supported legacy rates. */
 	if (ic->ic_curmode == IEEE80211_MODE_11AC) {
@@ -1303,7 +1324,7 @@ ieee80211_node_join_bss(struct ieee80211com *ic, struct ieee80211_node *selbs)
 	uint32_t assoc_fail = 0;
 
 	/* Reinitialize media mode and channels if needed. */
-	mode = ieee80211_chan2mode(ic, selbs->ni_chan);
+	mode = ieee80211_node_abg_mode(ic, selbs);
 	if (mode != ic->ic_curmode)
 		ieee80211_setmode(ic, mode);
 
@@ -1316,8 +1337,6 @@ ieee80211_node_join_bss(struct ieee80211com *ic, struct ieee80211_node *selbs)
 	(*ic->ic_node_copy)(ic, ic->ic_bss, selbs);
 	ni = ic->ic_bss;
 	ni->ni_assoc_fail |= assoc_fail;
-
-	ic->ic_curmode = ieee80211_chan2mode(ic, ni->ni_chan);
 
 	/* Make sure we send valid rates in an association request. */
 	if (ic->ic_opmode == IEEE80211_M_STA)
@@ -1561,7 +1580,7 @@ ieee80211_end_scan(struct ifnet *ifp)
 				ieee80211_setmode(ic, IEEE80211_MODE_11N);
 			else
 				ieee80211_setmode(ic,
-				    ieee80211_chan2mode(ic, ni->ni_chan));
+				    ieee80211_node_abg_mode(ic, ni));
 			return;
 		}
 	
@@ -2633,8 +2652,46 @@ ieee80211_setup_rates(struct ieee80211com *ic, struct ieee80211_node *ni,
 		}
 		memcpy(rs->rs_rates + rs->rs_nrates, xrates+2, nxrates);
 		rs->rs_nrates += nxrates;
+
+		/* 11g support implies ERP support */
+		if (nxrates > 0 && IEEE80211_IS_CHAN_2GHZ(ni->ni_chan))
+			ni->ni_flags |= IEEE80211_NODE_ERP;
 	}
 	return ieee80211_fix_rate(ic, ni, flags);
+}
+
+/* 
+ * Return the 11a/b/g mode mutually supported for the given node.
+ * ni->ni_chan must be set before calling this, and ieee80211_setup_rates()
+ * should be called beforehand to properly differentiate 11b and 11g.
+ */
+enum ieee80211_phymode
+ieee80211_node_abg_mode(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+	/* Handle the case where our own phy mode was fixed by ifconfig. */
+	switch (IFM_MODE(ic->ic_media.ifm_cur->ifm_media)) {
+	case IFM_IEEE80211_11A:
+		return IEEE80211_MODE_11A; /* Peer uses 11a. */
+	case IFM_IEEE80211_11B:
+		return IEEE80211_MODE_11B; /* Peer uses 11b. */
+	case IFM_IEEE80211_11G:
+		/* Peer could be using either 11g or 11b, check below. */
+		break;
+	default:
+		break;
+	}
+
+	/* Our own phy mode is either 11G or AUTO. */
+
+	if (IEEE80211_IS_CHAN_5GHZ(ni->ni_chan))
+		return IEEE80211_MODE_11A;
+
+	if ((ni->ni_flags & IEEE80211_NODE_ERP) &&
+	    (ni->ni_chan->ic_flags &
+	    (IEEE80211_CHAN_OFDM | IEEE80211_CHAN_DYN)) != 0)
+		return IEEE80211_MODE_11G;
+
+	return IEEE80211_MODE_11B;
 }
 
 void
@@ -2685,31 +2742,6 @@ ieee80211_node_addba_request_ac_vo_to(void *arg)
 }
 
 #ifndef IEEE80211_STA_ONLY
-/*
- * Check if the specified node supports ERP.
- */
-int
-ieee80211_iserp_sta(const struct ieee80211_node *ni)
-{
-	static const u_int8_t rates[] = { 2, 4, 11, 22, 12, 24, 48 };
-	const struct ieee80211_rateset *rs = &ni->ni_rates;
-	int i, j;
-
-	/*
-	 * A STA supports ERP operation if it includes all the Clause 19
-	 * mandatory rates in its supported rate set.
-	 */
-	for (i = 0; i < nitems(rates); i++) {
-		for (j = 0; j < rs->rs_nrates; j++) {
-			if ((rs->rs_rates[j] & IEEE80211_RATE_VAL) == rates[i])
-				break;
-		}
-		if (j == rs->rs_nrates)
-			return 0;
-	}
-	return 1;
-}
-
 /*
  * This function is called to notify the 802.1X PACP machine that a new
  * 802.1X port is enabled and must be authenticated. For 802.11, a port
@@ -2804,7 +2836,7 @@ ieee80211_count_nonerpsta(void *arg, struct ieee80211_node *ni)
 	if (ni->ni_associd == 0 || ni->ni_state == IEEE80211_STA_COLLECT)
 		return;
 
-	if (!ieee80211_iserp_sta(ni))
+	if ((ni->ni_flags & IEEE80211_NODE_ERP) == 0)
 		(*nonerpsta)++;
 }
 
@@ -2857,7 +2889,7 @@ ieee80211_node_join_11g(struct ieee80211com *ic, struct ieee80211_node *ni)
 		    ether_sprintf(ni->ni_macaddr), longslotsta));
 	}
 
-	if (!ieee80211_iserp_sta(ni)) {
+	if ((ni->ni_flags & IEEE80211_NODE_ERP) == 0) {
 		/*
 		 * Joining STA is non-ERP.
 		 */
@@ -2874,8 +2906,7 @@ ieee80211_node_join_11g(struct ieee80211com *ic, struct ieee80211_node *ni)
 
 		if (!(ni->ni_capinfo & IEEE80211_CAPINFO_SHORT_PREAMBLE))
 			ic->ic_flags &= ~IEEE80211_F_SHPREAMBLE;
-	} else
-		ni->ni_flags |= IEEE80211_NODE_ERP;
+	}
 }
 
 void

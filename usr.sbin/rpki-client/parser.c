@@ -1,4 +1,4 @@
-/*	$OpenBSD: parser.c,v 1.151 2025/03/27 05:03:09 tb Exp $ */
+/*	$OpenBSD: parser.c,v 1.169 2025/08/19 08:32:24 tb Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -23,6 +23,7 @@
 #include <err.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +42,16 @@
 extern int certid;
 
 static struct auth_tree	 auths = RB_INITIALIZER(&auths);
-static struct crl_tree	 crlt = RB_INITIALIZER(&crlt);
+static struct crl_tree	 crls = RB_INITIALIZER(&crls);
+
+static struct entityq	 globalq = TAILQ_HEAD_INITIALIZER(globalq);
+static pthread_mutex_t	 globalq_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t	 globalq_cond  = PTHREAD_COND_INITIALIZER;
+static struct ibufqueue	*globalmsgq;
+static pthread_mutex_t	 globalmsgq_mtx = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t	 globalmsgq_cond  = PTHREAD_COND_INITIALIZER;
+
+static volatile int	 quit;
 
 struct parse_repo {
 	RB_ENTRY(parse_repo)	 entry;
@@ -51,6 +61,7 @@ struct parse_repo {
 };
 
 static RB_HEAD(repo_tree, parse_repo)	repos = RB_INITIALIZER(&repos);
+static pthread_rwlock_t			repos_lk = PTHREAD_RWLOCK_INITIALIZER;
 
 static inline int
 repocmp(struct parse_repo *a, struct parse_repo *b)
@@ -63,15 +74,22 @@ RB_GENERATE_STATIC(repo_tree, parse_repo, entry, repocmp);
 static struct parse_repo *
 repo_get(unsigned int id)
 {
-	struct parse_repo needle = { .id = id };
+	struct parse_repo needle = { .id = id }, *r;
+	int error;
 
-	return RB_FIND(repo_tree, &repos, &needle);
+	if ((error = pthread_rwlock_rdlock(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_rdlock: %s", strerror(error));
+	r = RB_FIND(repo_tree, &repos, &needle);
+	if ((error = pthread_rwlock_unlock(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_unlock: %s", strerror(error));
+	return r;
 }
 
 static void
 repo_add(unsigned int id, char *path, char *validpath)
 {
 	struct parse_repo *rp;
+	int error;
 
 	if ((rp = calloc(1, sizeof(*rp))) == NULL)
 		err(1, NULL);
@@ -79,12 +97,15 @@ repo_add(unsigned int id, char *path, char *validpath)
 	if (path != NULL)
 		if ((rp->path = strdup(path)) == NULL)
 			err(1, NULL);
-	if (validpath != NULL)
-		if ((rp->validpath = strdup(validpath)) == NULL)
-			err(1, NULL);
+	if ((rp->validpath = strdup(validpath)) == NULL)
+		err(1, NULL);
 
+	if ((error = pthread_rwlock_wrlock(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_wrlock: %s", strerror(error));
 	if (RB_INSERT(repo_tree, &repos, rp) != NULL)
 		errx(1, "repository already added: id %d, %s", id, path);
+	if ((error = pthread_rwlock_unlock(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_unlock: %s", strerror(error));
 }
 
 /*
@@ -165,35 +186,34 @@ proc_parser_roa(char *file, const unsigned char *der, size_t len,
     const struct entity *entp, X509_STORE_CTX *ctx)
 {
 	struct roa		*roa;
-	X509			*x509 = NULL;
+	struct cert		*cert = NULL;
 	struct auth		*a;
 	struct crl		*crl;
 	const char		*errstr;
 
-	if ((roa = roa_parse(&x509, file, entp->talid, der, len)) == NULL)
+	if ((roa = roa_parse(&cert, file, entp->talid, der, len)) == NULL)
 		goto out;
 
-	a = find_issuer(file, entp->certid, roa->aki, entp->mftaki);
+	a = find_issuer(file, entp->certid, cert->aki, entp->mftaki);
 	if (a == NULL)
 		goto out;
-	crl = crl_get(&crlt, a);
+	crl = crl_get(&crls, a);
 
-	if (!valid_x509(file, ctx, x509, a, crl, &errstr)) {
+	if (!valid_x509(file, ctx, cert->x509, a, crl, &errstr)) {
 		warnx("%s: %s", file, errstr);
 		goto out;
 	}
-	X509_free(x509);
-	x509 = NULL;
 
 	roa->talid = a->cert->talid;
 
-	roa->expires = x509_find_expires(roa->notafter, a, &crlt);
+	roa->expires = x509_find_expires(cert->notafter, a, &crls);
+	cert_free(cert);
 
 	return roa;
 
  out:
 	roa_free(roa);
-	X509_free(x509);
+	cert_free(cert);
 
 	return NULL;
 }
@@ -207,35 +227,34 @@ proc_parser_spl(char *file, const unsigned char *der, size_t len,
     const struct entity *entp, X509_STORE_CTX *ctx)
 {
 	struct spl		*spl;
-	X509			*x509 = NULL;
+	struct cert		*cert = NULL;
 	struct auth		*a;
 	struct crl		*crl;
 	const char		*errstr;
 
-	if ((spl = spl_parse(&x509, file, entp->talid, der, len)) == NULL)
+	if ((spl = spl_parse(&cert, file, entp->talid, der, len)) == NULL)
 		goto out;
 
-	a = find_issuer(file, entp->certid, spl->aki, entp->mftaki);
+	a = find_issuer(file, entp->certid, cert->aki, entp->mftaki);
 	if (a == NULL)
 		goto out;
-	crl = crl_get(&crlt, a);
+	crl = crl_get(&crls, a);
 
-	if (!valid_x509(file, ctx, x509, a, crl, &errstr)) {
+	if (!valid_x509(file, ctx, cert->x509, a, crl, &errstr)) {
 		warnx("%s: %s", file, errstr);
 		goto out;
 	}
-	X509_free(x509);
-	x509 = NULL;
 
 	spl->talid = a->cert->talid;
 
-	spl->expires = x509_find_expires(spl->notafter, a, &crlt);
+	spl->expires = x509_find_expires(cert->notafter, a, &crls);
+	cert_free(cert);
 
 	return spl;
 
  out:
 	spl_free(spl);
-	X509_free(x509);
+	cert_free(cert);
 
 	return NULL;
 }
@@ -350,7 +369,7 @@ proc_parser_mft_pre(struct entity *entp, char *file, struct crl **crl,
     X509_STORE_CTX *ctx, BN_CTX *bn_ctx)
 {
 	struct mft	*mft;
-	X509		*x509;
+	struct cert	*cert = NULL;
 	struct auth	*a;
 	unsigned char	*der;
 	size_t		 len;
@@ -368,7 +387,7 @@ proc_parser_mft_pre(struct entity *entp, char *file, struct crl **crl,
 	if (der == NULL && errno != ENOENT)
 		warn("parse file %s", file);
 
-	if ((mft = mft_parse(&x509, file, entp->talid, der, len)) == NULL) {
+	if ((mft = mft_parse(&cert, file, entp->talid, der, len)) == NULL) {
 		free(der);
 		return NULL;
 	}
@@ -390,10 +409,10 @@ proc_parser_mft_pre(struct entity *entp, char *file, struct crl **crl,
 	a = find_issuer(file, entp->certid, mft->aki, NULL);
 	if (a == NULL)
 		goto err;
-	if (!valid_x509(file, ctx, x509, a, *crl, errstr))
+	if (!valid_x509(file, ctx, cert->x509, a, *crl, errstr))
 		goto err;
-	X509_free(x509);
-	x509 = NULL;
+	cert_free(cert);
+	cert = NULL;
 
 	mft->repoid = entp->repoid;
 	mft->talid = a->cert->talid;
@@ -464,7 +483,7 @@ proc_parser_mft_pre(struct entity *entp, char *file, struct crl **crl,
 	return mft;
 
  err:
-	X509_free(x509);
+	cert_free(cert);
 	mft_free(mft);
 	crl_free(*crl);
 	*crl = NULL;
@@ -540,7 +559,7 @@ proc_parser_mft(struct entity *entp, struct mft **mp, char **crlfile,
 
 	if (*mp != NULL) {
 		*crlmtime = crl->thisupdate;
-		if (crl_insert(&crlt, crl))
+		if (crl_insert(&crls, crl))
 			crl = NULL;
 	}
 	crl_free(crl);
@@ -566,15 +585,14 @@ proc_parser_cert(char *file, const unsigned char *der, size_t len,
 
 	/* Extract certificate data. */
 
-	cert = cert_parse_pre(file, der, len);
-	cert = cert_parse(file, cert);
+	cert = cert_parse(file, der, len);
 	if (cert == NULL)
 		goto out;
 
 	a = find_issuer(file, entp->certid, cert->aki, entp->mftaki);
 	if (a == NULL)
 		goto out;
-	crl = crl_get(&crlt, a);
+	crl = crl_get(&crls, a);
 
 	if (!valid_x509(file, ctx, cert->x509, a, crl, &errstr) ||
 	    !valid_cert(file, a, cert)) {
@@ -600,8 +618,9 @@ proc_parser_cert(char *file, const unsigned char *der, size_t len,
 	/*
 	 * Add validated CA certs to the RPKI auth tree.
 	 */
-	if (cert->purpose == CERT_PURPOSE_CA)
+	if (cert->purpose == CERT_PURPOSE_CA) {
 		auth_insert(file, &auths, cert, a);
+	}
 
 	return cert;
 
@@ -670,7 +689,7 @@ proc_parser_root_cert(struct entity *entp, struct cert **out_cert)
 
 	file2 = parse_filepath(entp->repoid, entp->path, entp->file, DIR_VALID);
 	der = load_file(file2, &der_len);
-	cert2 = cert_parse_pre(file2, der, der_len);
+	cert2 = cert_parse(file2, der, der_len);
 	free(der);
 	cert2 = ta_parse(file2, cert2, pkey, pkeysz);
 
@@ -678,7 +697,7 @@ proc_parser_root_cert(struct entity *entp, struct cert **out_cert)
 		file1 = parse_filepath(entp->repoid, entp->path, entp->file,
 		    DIR_TEMP);
 		der = load_file(file1, &der_len);
-		cert1 = cert_parse_pre(file1, der, der_len);
+		cert1 = cert_parse(file1, der, der_len);
 		free(der);
 		cert1 = ta_parse(file1, cert1, pkey, pkeysz);
 	}
@@ -721,33 +740,34 @@ proc_parser_gbr(char *file, const unsigned char *der, size_t len,
     const struct entity *entp, X509_STORE_CTX *ctx)
 {
 	struct gbr	*gbr;
-	X509		*x509 = NULL;
+	struct cert	*cert = NULL;
 	struct crl	*crl;
 	struct auth	*a;
 	const char	*errstr;
 
-	if ((gbr = gbr_parse(&x509, file, entp->talid, der, len)) == NULL)
+	if ((gbr = gbr_parse(&cert, file, entp->talid, der, len)) == NULL)
 		goto out;
 
-	a = find_issuer(file, entp->certid, gbr->aki, entp->mftaki);
+	a = find_issuer(file, entp->certid, cert->aki, entp->mftaki);
 	if (a == NULL)
 		goto out;
-	crl = crl_get(&crlt, a);
+	crl = crl_get(&crls, a);
 
-	if (!valid_x509(file, ctx, x509, a, crl, &errstr)) {
+	if (!valid_x509(file, ctx, cert->x509, a, crl, &errstr)) {
 		warnx("%s: %s", file, errstr);
 		goto out;
 	}
-	X509_free(x509);
-	x509 = NULL;
 
 	gbr->talid = a->cert->talid;
+
+	gbr->expires = x509_find_expires(cert->notafter, a, &crls);
+	cert_free(cert);
 
 	return gbr;
 
  out:
 	gbr_free(gbr);
-	X509_free(x509);
+	cert_free(cert);
 
 	return NULL;
 }
@@ -760,35 +780,34 @@ proc_parser_aspa(char *file, const unsigned char *der, size_t len,
     const struct entity *entp, X509_STORE_CTX *ctx)
 {
 	struct aspa	*aspa;
-	X509		*x509 = NULL;
+	struct cert	*cert = NULL;
 	struct auth	*a;
 	struct crl	*crl;
 	const char	*errstr;
 
-	if ((aspa = aspa_parse(&x509, file, entp->talid, der, len)) == NULL)
+	if ((aspa = aspa_parse(&cert, file, entp->talid, der, len)) == NULL)
 		goto out;
 
-	a = find_issuer(file, entp->certid, aspa->aki, entp->mftaki);
+	a = find_issuer(file, entp->certid, cert->aki, entp->mftaki);
 	if (a == NULL)
 		goto out;
-	crl = crl_get(&crlt, a);
+	crl = crl_get(&crls, a);
 
-	if (!valid_x509(file, ctx, x509, a, crl, &errstr)) {
+	if (!valid_x509(file, ctx, cert->x509, a, crl, &errstr)) {
 		warnx("%s: %s", file, errstr);
 		goto out;
 	}
-	X509_free(x509);
-	x509 = NULL;
 
 	aspa->talid = a->cert->talid;
 
-	aspa->expires = x509_find_expires(aspa->notafter, a, &crlt);
+	aspa->expires = x509_find_expires(cert->notafter, a, &crls);
+	cert_free(cert);
 
 	return aspa;
 
  out:
 	aspa_free(aspa);
-	X509_free(x509);
+	cert_free(cert);
 
 	return NULL;
 }
@@ -801,25 +820,23 @@ proc_parser_tak(char *file, const unsigned char *der, size_t len,
     const struct entity *entp, X509_STORE_CTX *ctx)
 {
 	struct tak	*tak;
-	X509		*x509 = NULL;
+	struct cert	*cert = NULL;
 	struct crl	*crl;
 	struct auth	*a;
 	const char	*errstr;
 
-	if ((tak = tak_parse(&x509, file, entp->talid, der, len)) == NULL)
+	if ((tak = tak_parse(&cert, file, entp->talid, der, len)) == NULL)
 		goto out;
 
-	a = find_issuer(file, entp->certid, tak->aki, entp->mftaki);
+	a = find_issuer(file, entp->certid, cert->aki, entp->mftaki);
 	if (a == NULL)
 		goto out;
-	crl = crl_get(&crlt, a);
+	crl = crl_get(&crls, a);
 
-	if (!valid_x509(file, ctx, x509, a, crl, &errstr)) {
+	if (!valid_x509(file, ctx, cert->x509, a, crl, &errstr)) {
 		warnx("%s: %s", file, errstr);
 		goto out;
 	}
-	X509_free(x509);
-	x509 = NULL;
 
 	/* TAK EE must be signed by self-signed CA */
 	if (a->issuer != NULL)
@@ -827,11 +844,14 @@ proc_parser_tak(char *file, const unsigned char *der, size_t len,
 
 	tak->talid = a->cert->talid;
 
+	tak->expires = x509_find_expires(cert->notafter, a, &crls);
+	cert_free(cert);
+
 	return tak;
 
  out:
 	tak_free(tak);
-	X509_free(x509);
+	cert_free(cert);
 
 	return NULL;
 }
@@ -860,7 +880,7 @@ parse_load_file(struct entity *entp, unsigned char **f, size_t *flen)
  * Process an entity and respond to parent process.
  */
 static void
-parse_entity(struct entityq *q, struct msgbuf *msgq, X509_STORE_CTX *ctx,
+parse_entity(struct entityq *q, struct ibufqueue *msgq, X509_STORE_CTX *ctx,
     BN_CTX *bn_ctx)
 {
 	struct entity	*entp;
@@ -881,13 +901,6 @@ parse_entity(struct entityq *q, struct msgbuf *msgq, X509_STORE_CTX *ctx,
 
 	while ((entp = TAILQ_FIRST(q)) != NULL) {
 		TAILQ_REMOVE(q, entp, entries);
-
-		/* handle RTYPE_REPO first */
-		if (entp->type == RTYPE_REPO) {
-			repo_add(entp->repoid, entp->path, entp->file);
-			entity_free(entp);
-			continue;
-		}
 
 		/* pass back at least type, repoid and filename */
 		b = io_new_buffer();
@@ -965,7 +978,7 @@ parse_entity(struct entityq *q, struct msgbuf *msgq, X509_STORE_CTX *ctx,
 				    sizeof(crlmtime));
 				free(crlfile);
 
-				io_close_buffer(msgq, b2);
+				io_close_queue(msgq, b2);
 			}
 			mft_free(mft);
 			break;
@@ -1044,9 +1057,160 @@ parse_entity(struct entityq *q, struct msgbuf *msgq, X509_STORE_CTX *ctx,
 
 		free(f);
 		free(file);
-		io_close_buffer(msgq, b);
+		io_close_queue(msgq, b);
 		entity_free(entp);
 	}
+
+}
+
+static void *
+parse_worker(void *arg)
+{
+	struct entityq q = TAILQ_HEAD_INITIALIZER(q);
+	struct entity *entp;
+	struct ibufqueue *myq;
+	X509_STORE_CTX *ctx;
+	BN_CTX *bn_ctx;
+	int error, n;
+
+	if ((ctx = X509_STORE_CTX_new()) == NULL)
+		err(1, "X509_STORE_CTX_new");
+	if ((bn_ctx = BN_CTX_new()) == NULL)
+		err(1, "BN_CTX_new");
+	if ((myq = ibufq_new()) == NULL)
+		err(1, "ibufqueue_new");
+
+	while (!quit) {
+		if ((error = pthread_mutex_lock(&globalq_mtx)) != 0)
+			errx(1, "pthread_mutex_lock: %s", strerror(error));
+		while (TAILQ_EMPTY(&globalq) && !quit) {
+			error = pthread_cond_wait(&globalq_cond, &globalq_mtx);
+			if (error != 0)
+				errx(1, "pthread_cond_wait: %s",
+				    strerror(error));
+		}
+		n = 0;
+		while ((entp = TAILQ_FIRST(&globalq)) != NULL) {
+			TAILQ_REMOVE(&globalq, entp, entries);
+			TAILQ_INSERT_TAIL(&q, entp, entries);
+			if (++n > 16)
+				break;
+		}
+		if (n > 16) {
+			if ((error = pthread_cond_signal(&globalq_cond)) != 0)
+				errx(1, "pthread_cond_signal: %s",
+				    strerror(error));
+		}
+		if ((error = pthread_mutex_unlock(&globalq_mtx)) != 0)
+			errx(1, "pthread_mutex_unlock: %s",
+			    strerror(error));
+
+		parse_entity(&q, myq, ctx, bn_ctx);
+
+		if (ibufq_queuelen(myq) > 0) {
+			if ((error = pthread_mutex_lock(&globalmsgq_mtx)) != 0)
+				errx(1, "pthread_mutex_lock: %s",
+				    strerror(error));
+			ibufq_concat(globalmsgq, myq);
+			error = pthread_cond_signal(&globalmsgq_cond);
+			if (error != 0)
+				errx(1, "pthread_cond_signal: %s",
+				    strerror(error));
+			error = pthread_mutex_unlock(&globalmsgq_mtx);
+			if (error != 0)
+				errx(1, "pthread_mutex_unlock: %s",
+				    strerror(error));
+		}
+	}
+
+	X509_STORE_CTX_free(ctx);
+	BN_CTX_free(bn_ctx);
+	ibufq_free(myq);
+	return NULL;
+}
+
+static void *
+parse_writer(void *arg)
+{
+	struct msgbuf *myq;
+	struct pollfd pfd;
+	int error;
+
+	if ((myq = msgbuf_new()) == NULL)
+		err(1, NULL);
+	pfd.fd = *(int *)arg;
+	while (!quit) {
+		if (msgbuf_queuelen(myq) == 0) {
+			error = pthread_mutex_lock(&globalmsgq_mtx);
+			if (error != 0)
+				errx(1, "pthread_mutex_lock: %s",
+				    strerror(error));
+			while (ibufq_queuelen(globalmsgq) == 0 && !quit) {
+				error = pthread_cond_wait(&globalmsgq_cond,
+				    &globalmsgq_mtx);
+				if (error != 0)
+					errx(1, "pthread_cond_wait: %s",
+					    strerror(error));
+			}
+			/* enqueue messages to local msgbuf */
+			msgbuf_concat(myq, globalmsgq);
+			error = pthread_mutex_unlock(&globalmsgq_mtx);
+			if (error != 0)
+				errx(1, "pthread_mutex_lock: %s",
+				    strerror(error));
+		}
+
+		if (msgbuf_queuelen(myq) > 0) {
+			pfd.events = POLLOUT;
+
+			if (poll(&pfd, 1, INFTIM) == -1) {
+				if (errno == EINTR)
+					continue;
+				err(1, "poll");
+			}
+			if ((pfd.revents & (POLLERR|POLLNVAL)))
+				errx(1, "poll: bad descriptor");
+
+			/* If the parent closes, return immediately. */
+			if ((pfd.revents & POLLHUP)) {
+				quit = 1;
+				break;
+			}
+
+			if (pfd.revents & POLLOUT) {
+				if (msgbuf_write(pfd.fd, myq) == -1) {
+					if (errno == EPIPE)
+						errx(1, "write: "
+						    "connection closed");
+					else
+						err(1, "write");
+				}
+			}
+		}
+	}
+
+	msgbuf_free(myq);
+	return NULL;
+}
+
+static void
+repo_tree_free(struct repo_tree *tree)
+{
+	struct parse_repo *repo, *trepo;
+	int error;
+
+	if ((error = pthread_rwlock_wrlock(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_wrlock: %s", strerror(error));
+	RB_FOREACH_SAFE(repo, repo_tree, tree, trepo) {
+		RB_REMOVE(repo_tree, tree, repo);
+		free(repo->path);
+		free(repo->validpath);
+		free(repo);
+	}
+	if ((error = pthread_rwlock_unlock(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_unlock: %s", strerror(error));
+	if ((error = pthread_rwlock_destroy(&repos_lk)) != 0)
+		errx(1, "pthread_rwlock_destroy: %s", strerror(error));
 }
 
 /*
@@ -1057,15 +1221,15 @@ parse_entity(struct entityq *q, struct msgbuf *msgq, X509_STORE_CTX *ctx,
  * The process will exit cleanly only when fd is closed.
  */
 void
-proc_parser(int fd)
+proc_parser(int fd, int nthreads)
 {
-	struct entityq	 q;
+	struct entityq	 myq = TAILQ_HEAD_INITIALIZER(myq);
 	struct pollfd	 pfd;
-	X509_STORE_CTX	*ctx;
-	BN_CTX		*bn_ctx;
-	struct msgbuf	*msgq;
+	struct msgbuf	*inbufq;
 	struct entity	*entp;
-	struct ibuf	*b, *inbuf = NULL;
+	struct ibuf	*b;
+	pthread_t	 writer, *workers;
+	int		 error, i;
 
 	/* Only allow access to the cache directory. */
 	if (unveil(".", "r") == -1)
@@ -1079,24 +1243,26 @@ proc_parser(int fd)
 	x509_init_oid();
 	constraints_parse();
 
-	if ((ctx = X509_STORE_CTX_new()) == NULL)
-		err(1, "X509_STORE_CTX_new");
-	if ((bn_ctx = BN_CTX_new()) == NULL)
-		err(1, "BN_CTX_new");
-
-	TAILQ_INIT(&q);
-
-	if ((msgq = msgbuf_new_reader(sizeof(size_t), io_parse_hdr, NULL)) ==
+	if ((globalmsgq = ibufq_new()) == NULL)
+		err(1, NULL);
+	if ((inbufq = msgbuf_new_reader(sizeof(size_t), io_parse_hdr, NULL)) ==
 	    NULL)
 		err(1, NULL);
 
+	if ((workers = calloc(nthreads, sizeof(*workers))) == NULL)
+		err(1, NULL);
+
+	if ((error = pthread_create(&writer, NULL, &parse_writer, &fd)) != 0)
+		errx(1, "pthread_create: %s", strerror(error));
+	for (i = 0; i < nthreads; i++) {
+		error = pthread_create(&workers[i], NULL, &parse_worker, NULL);
+		if (error != 0)
+			errx(1, "pthread_create: %s", strerror(error));
+	}
+
 	pfd.fd = fd;
-
-	for (;;) {
+	while (!quit) {
 		pfd.events = POLLIN;
-		if (msgbuf_queuelen(msgq) > 0)
-			pfd.events |= POLLOUT;
-
 		if (poll(&pfd, 1, INFTIM) == -1) {
 			if (errno == EINTR)
 				continue;
@@ -1106,52 +1272,92 @@ proc_parser(int fd)
 			errx(1, "poll: bad descriptor");
 
 		/* If the parent closes, return immediately. */
-
-		if ((pfd.revents & POLLHUP))
+		if ((pfd.revents & POLLHUP)) {
+			quit = 1;
 			break;
+		}
 
 		if ((pfd.revents & POLLIN)) {
-			switch (ibuf_read(fd, msgq)) {
+			switch (ibuf_read(fd, inbufq)) {
 			case -1:
 				err(1, "ibuf_read");
 			case 0:
 				errx(1, "ibuf_read: connection closed");
 			}
-			while ((b = io_buf_get(msgq)) != NULL) {
+			while ((b = io_buf_get(inbufq)) != NULL) {
 				entp = calloc(1, sizeof(struct entity));
 				if (entp == NULL)
 					err(1, NULL);
 				entity_read_req(b, entp);
-				TAILQ_INSERT_TAIL(&q, entp, entries);
 				ibuf_free(b);
+
+				/* handle RTYPE_REPO first */
+				if (entp->type == RTYPE_REPO) {
+					repo_add(entp->repoid, entp->path,
+					    entp->file);
+					entity_free(entp);
+					continue;
+				}
+
+				TAILQ_INSERT_TAIL(&myq, entp, entries);
+			}
+			if (!TAILQ_EMPTY(&myq)) {
+				error = pthread_mutex_lock(&globalq_mtx);
+				if (error != 0)
+					errx(1, "pthread_mutex_lock: %s",
+					    strerror(error));
+				TAILQ_CONCAT(&globalq, &myq, entries);
+				error = pthread_cond_signal(&globalq_cond);
+				if (error != 0)
+					errx(1, "pthread_cond_signal: %s",
+					    strerror(error));
+				error = pthread_mutex_unlock(&globalq_mtx);
+				if (error != 0)
+					errx(1, "pthread_mutex_unlock: %s",
+					    strerror(error));
 			}
 		}
-
-		if (pfd.revents & POLLOUT) {
-			if (msgbuf_write(fd, msgq) == -1) {
-				if (errno == EPIPE)
-					errx(1, "write: connection closed");
-				else
-					err(1, "write");
-			}
-		}
-
-		parse_entity(&q, msgq, ctx, bn_ctx);
 	}
 
-	while ((entp = TAILQ_FIRST(&q)) != NULL) {
-		TAILQ_REMOVE(&q, entp, entries);
+	/* signal all threads */
+	if ((error = pthread_cond_broadcast(&globalq_cond)) != 0)
+		errx(1, "pthread_cond_broadcast: %s", strerror(error));
+	if ((error = pthread_cond_broadcast(&globalmsgq_cond)) != 0)
+		errx(1, "pthread_cond_broadcast: %s", strerror(error));
+
+	if ((error = pthread_mutex_lock(&globalq_mtx)) != 0)
+		errx(1, "pthread_mutex_lock: %s", strerror(error));
+	while ((entp = TAILQ_FIRST(&globalq)) != NULL) {
+		TAILQ_REMOVE(&globalq, entp, entries);
 		entity_free(entp);
 	}
+	if ((error = pthread_mutex_unlock(&globalq_mtx)) != 0)
+		errx(1, "pthread_mutex_unlock: %s", strerror(error));
+
+	if ((error = pthread_join(writer, NULL)) != 0)
+		errx(1, "pthread_join writer: %s", strerror(error));
+	for (i = 0; i < nthreads; i++) {
+		if ((error = pthread_join(workers[i], NULL)) != 0)
+			errx(1, "pthread_join worker %d: %s",
+			    i, strerror(error));
+	}
+	free(workers);	/* karl marx */
+
+	if ((error = pthread_cond_destroy(&globalq_cond)) != 0)
+		errx(1, "pthread_cond_destroy: %s", strerror(error));
+	if ((error = pthread_mutex_destroy(&globalq_mtx)) != 0)
+		errx(1, "pthread_mutex_destroy: %s", strerror(error));
+	if ((error = pthread_cond_destroy(&globalmsgq_cond)) != 0)
+		errx(1, "pthread_cond_destroy: %s", strerror(error));
+	if ((error = pthread_mutex_destroy(&globalmsgq_mtx)) != 0)
+		errx(1, "pthread_mutex_destroy: %s", strerror(error));
 
 	auth_tree_free(&auths);
-	crl_tree_free(&crlt);
+	crl_tree_free(&crls);
+	repo_tree_free(&repos);
 
-	X509_STORE_CTX_free(ctx);
-	BN_CTX_free(bn_ctx);
-
-	msgbuf_free(msgq);
-	ibuf_free(inbuf);
+	msgbuf_free(inbufq);
+	ibufq_free(globalmsgq);
 
 	if (certid > CERTID_MAX)
 		errx(1, "processing incomplete: too many certificates");

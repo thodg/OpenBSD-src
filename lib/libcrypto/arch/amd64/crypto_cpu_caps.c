@@ -1,4 +1,4 @@
-/*	$OpenBSD: crypto_cpu_caps.c,v 1.4 2024/11/16 13:05:35 jsing Exp $ */
+/*	$OpenBSD: crypto_cpu_caps.c,v 1.8 2025/08/14 15:11:01 jsing Exp $ */
 /*
  * Copyright (c) 2024 Joel Sing <jsing@openbsd.org>
  *
@@ -98,10 +98,14 @@ crypto_cpu_caps_init(void)
 	if ((edx & IA32CAP_MASK0_SSE2) != 0)
 		caps |= CPUCAP_MASK_SSE2;
 
-	if ((ecx & IA32CAP_MASK1_AESNI) != 0)
+	if ((ecx & IA32CAP_MASK1_AESNI) != 0) {
 		caps |= CPUCAP_MASK_AESNI;
-	if ((ecx & IA32CAP_MASK1_PCLMUL) != 0)
+		crypto_cpu_caps_amd64 |= CRYPTO_CPU_CAPS_AMD64_AES;
+	}
+	if ((ecx & IA32CAP_MASK1_PCLMUL) != 0) {
 		caps |= CPUCAP_MASK_PCLMUL;
+		crypto_cpu_caps_amd64 |= CRYPTO_CPU_CAPS_AMD64_CLMUL;
+	}
 	if ((ecx & IA32CAP_MASK1_SSSE3) != 0)
 		caps |= CPUCAP_MASK_SSSE3;
 
@@ -115,6 +119,10 @@ crypto_cpu_caps_init(void)
 	if (max_cpuid >= 7) {
 		cpuid(7, NULL, &ebx, NULL, NULL);
 
+		/* Intel ADX feature bit - ebx[19]. */
+		if (((ebx >> 19) & 1) != 0)
+			crypto_cpu_caps_amd64 |= CRYPTO_CPU_CAPS_AMD64_ADX;
+
 		/* Intel SHA extensions feature bit - ebx[29]. */
 		if (((ebx >> 29) & 1) != 0)
 			crypto_cpu_caps_amd64 |= CRYPTO_CPU_CAPS_AMD64_SHA;
@@ -125,10 +133,4 @@ crypto_cpu_caps_init(void)
 		crypto_cpu_caps |= CRYPTO_CPU_CAPS_ACCELERATED_AES;
 
 	OPENSSL_ia32cap_P = caps;
-}
-
-uint64_t
-crypto_cpu_caps_ia32(void)
-{
-	return OPENSSL_ia32cap_P;
 }

@@ -1,9 +1,9 @@
-#	$OpenBSD: Makefile,v 1.21 2023/04/16 19:46:17 otto Exp $
+#	$OpenBSD: Makefile,v 1.24 2025/08/14 09:31:21 kettenis Exp $
 
 .include <bsd.own.mk>
 LIB=    stubs
 SRCS=	db.c setlocale.c sha1.c sha2.c getgrent.c getpwent.c \
-	ethers.c pthread_mutex.c pthread_once.c \
+	ethers.c \
 	malloc.c mbrtowc_sb.c sscanf.c vfprintf.c vfscanf.c
 SRCS+=	asr.c			\
 	asr_utils.c		\
@@ -26,6 +26,10 @@ SRCS+=	asr.c			\
 	res_send_async.c	\
 	sethostent.c
 
+.if ${MACHINE_ARCH} == "aarch64"
+SRCS+=	aarch64_lse.c
+.endif
+
 NOPIC=	Yes
 NOPROFILE=Yes
 
@@ -35,7 +39,11 @@ CFLAGS+=-DSHA2_SMALL -UYP -DNO_LOG_BAD_DNS_RESPONSES \
 	-I${LIBCSRCDIR}/asr -I${LIBCSRCDIR}/locale -I${LIBCSRCDIR}/gdtoa \
 	-I${LIBCSRCDIR}/arch/${MACHINE_CPU}/gdtoa -I${LIBCSRCDIR}/stdio \
 	-include namespace.h
-CFLAGS+=
+.if ${MACHINE_ARCH} == "hppa" || ${MACHINE_ARCH} == "m88k" || \
+    ${MACHINE_ARCH} == "sh"
+.else
+CFLAGS+= -DFUTEX
+.endif
 
 LIBCSRCDIR=${.CURDIR}/../../../lib/libc
 

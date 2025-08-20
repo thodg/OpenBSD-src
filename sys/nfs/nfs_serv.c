@@ -1,4 +1,4 @@
-/*	$OpenBSD: nfs_serv.c,v 1.131.4.1 2025/05/04 21:01:58 bluhm Exp $	*/
+/*	$OpenBSD: nfs_serv.c,v 1.132 2025/04/30 18:38:20 miod Exp $	*/
 /*     $NetBSD: nfs_serv.c,v 1.34 1997/05/12 23:37:12 fvdl Exp $       */
 
 /*

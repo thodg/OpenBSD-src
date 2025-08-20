@@ -1,4 +1,4 @@
-/*	$Id: test-cert.c,v 1.24 2024/04/22 05:54:01 claudio Exp $ */
+/*	$Id: test-cert.c,v 1.26 2025/07/15 09:26:19 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -34,7 +34,7 @@
 
 int outformats;
 int verbose;
-int filemode;
+int filemode = 1;
 int experimental;
 
 int
@@ -84,7 +84,7 @@ main(int argc, char *argv[])
 				break;
 
 			buf = load_file(cert_path, &len);
-			p = cert_parse_pre(cert_path, buf, len);
+			p = cert_parse(cert_path, buf, len);
 			free(buf);
 			if (p == NULL)
 				break;
@@ -103,11 +103,8 @@ main(int argc, char *argv[])
 			size_t		 len;
 
 			buf = load_file(argv[i], &len);
-			p = cert_parse_pre(argv[i], buf, len);
+			p = cert_parse(argv[i], buf, len);
 			free(buf);
-			if (p == NULL)
-				break;
-			p = cert_parse(argv[i], p);
 			if (p == NULL)
 				break;
 			if (verb)

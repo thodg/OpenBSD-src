@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.4 2024/10/28 16:27:14 tb Exp $
+# $OpenBSD: Makefile,v 1.7 2025/07/23 07:35:21 tb Exp $
 
 C2SP_TESTVECTORS = /usr/local/share/c2sp-testvectors/
 
@@ -13,12 +13,12 @@ PROGS += cctv
 SRCS_cctv =
 
 cctv: cctv.go
-	go build -o $@ ${.CURDIR}/cctv.go
+	env GOCACHE=${.OBJDIR}/go-build go build -o $@ ${.CURDIR}/cctv.go
 
 OSSL_LIB =	/usr/local/lib/eopenssl
 OSSL_INC =	/usr/local/include/eopenssl
 
-. for V in 11 32 33 34
+. for V in 35
 .  if exists(/usr/local/bin/eopenssl$V)
 PROGS +=	cctv-openssl$V
 SRCS_cctv-openssl$V =
@@ -29,9 +29,16 @@ CGO_LDFLAGS_$V += 	-L${OSSL_LIB}$V
 
 cctv-openssl$V: cctv.go
 	env CGO_CFLAGS="${CGO_CFLAGS_$V}" CGO_LDFLAGS="${CGO_LDFLAGS_$V}" \
+	    GOCACHE=${.OBJDIR}/go-build \
 	    go build -o $@ ${.CURDIR}/cctv.go
 .  endif
 . endfor
+
+REGRESS_CLEANUP =	clean-go-cache
+
+clean-go-cache:
+	env GOCACHE=${.OBJDIR}/go-build go clean -cache
+	rm -rf ${.OBJDIR}/go-build
 
 .endif
 

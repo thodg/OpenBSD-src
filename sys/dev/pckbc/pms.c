@@ -1,4 +1,4 @@
-/* $OpenBSD: pms.c,v 1.99 2024/08/18 15:09:49 deraadt Exp $ */
+/* $OpenBSD: pms.c,v 1.102 2025/07/15 13:40:02 jsg Exp $ */
 /* $NetBSD: psm.c,v 1.11 2000/06/05 22:20:57 sommerfeld Exp $ */
 
 /*-
@@ -781,13 +781,13 @@ pmsactivate(struct device *self, int act)
 	int rv;
 
 	switch (act) {
-	case DVACT_SUSPEND:
+	case DVACT_QUIESCE:
 		rv = config_activate_children(self, act);
 		if (sc->sc_state == PMS_STATE_ENABLED)
 			pms_change_state(sc, PMS_STATE_SUSPENDED,
 			    PMS_DEV_IGNORE);
 		break;
-	case DVACT_RESUME:
+	case DVACT_WAKEUP:
 		if (sc->sc_state == PMS_STATE_SUSPENDED)
 			pms_change_state(sc, PMS_STATE_ENABLED,
 			    PMS_DEV_IGNORE);
@@ -1670,7 +1670,7 @@ pms_proc_alps(struct pms_softc *sc)
 		return;
 
 	/*
-	 * XXX The Y-axis is in the oposit direction compared to
+	 * XXX The Y-axis is in the opposite direction compared to
 	 * Synaptics touchpads and PS/2 mouses.
 	 * It's why we need to translate the y value here for both
 	 * NATIVE and COMPAT modes.

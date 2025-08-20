@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifq.c,v 1.59 2025/03/04 01:13:37 dlg Exp $ */
+/*	$OpenBSD: ifq.c,v 1.62 2025/07/28 05:25:44 dlg Exp $ */
 
 /*
  * Copyright (c) 2015 David Gwynne <dlg@openbsd.org>
@@ -21,7 +21,6 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/socket.h>
 #include <sys/mbuf.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
@@ -75,7 +74,6 @@ struct priq {
 
 void	ifq_start_task(void *);
 void	ifq_restart_task(void *);
-void	ifq_barrier_task(void *);
 void	ifq_bundle_task(void *);
 
 static inline void
@@ -188,7 +186,7 @@ void
 ifq_barrier(struct ifqueue *ifq)
 {
 	struct cond c = COND_INITIALIZER();
-	struct task t = TASK_INITIALIZER(ifq_barrier_task, &c);
+	struct task t = TASK_INITIALIZER(cond_signal_handler, &c);
 
 	task_del(ifq->ifq_softnet, &ifq->ifq_bundle);
 
@@ -198,14 +196,6 @@ ifq_barrier(struct ifqueue *ifq)
 	ifq_serialize(ifq, &t);
 
 	cond_wait(&c, "ifqbar");
-}
-
-void
-ifq_barrier_task(void *p)
-{
-	struct cond *c = p;
-
-	cond_signal(c);
 }
 
 /*
@@ -874,6 +864,7 @@ ifiq_process(void *arg)
 	if_input_process(ifiq->ifiq_if, &ml, ifiq->ifiq_idx);
 }
 
+#ifndef SMALL_KERNEL
 int
 net_ifiq_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, 
     void *newp, size_t newlen)
@@ -913,6 +904,7 @@ net_ifiq_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 
 	return (error);
 }
+#endif /* SMALL_KERNEL */
 
 /*
  * priq implementation

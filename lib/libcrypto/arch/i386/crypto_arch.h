@@ -1,4 +1,4 @@
-/*	$OpenBSD: crypto_arch.h,v 1.4 2025/02/14 12:01:58 jsing Exp $ */
+/*	$OpenBSD: crypto_arch.h,v 1.12 2025/07/22 09:18:02 jsing Exp $ */
 /*
  * Copyright (c) 2024 Joel Sing <jsing@openbsd.org>
  *
@@ -15,19 +15,34 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <stdint.h>
+
 #ifndef HEADER_CRYPTO_ARCH_H
 #define HEADER_CRYPTO_ARCH_H
 
 #define HAVE_CRYPTO_CPU_CAPS_INIT
-#define HAVE_CRYPTO_CPU_CAPS_IA32
+
+#ifndef __ASSEMBLER__
+extern uint64_t crypto_cpu_caps_i386;
+#endif
+
+#define CRYPTO_CPU_CAPS_I386_AES	(1ULL << 0)
+#define CRYPTO_CPU_CAPS_I386_CLMUL	(1ULL << 1)
+#define CRYPTO_CPU_CAPS_I386_MMX	(1ULL << 2)
 
 #ifndef OPENSSL_NO_ASM
 
-#define HAVE_AES_CBC_ENCRYPT_INTERNAL
 #define HAVE_AES_SET_ENCRYPT_KEY_INTERNAL
 #define HAVE_AES_SET_DECRYPT_KEY_INTERNAL
 #define HAVE_AES_ENCRYPT_INTERNAL
 #define HAVE_AES_DECRYPT_INTERNAL
+#define HAVE_AES_CBC_ENCRYPT_INTERNAL
+#define HAVE_AES_CCM64_ENCRYPT_INTERNAL
+#define HAVE_AES_CTR32_ENCRYPT_INTERNAL
+#define HAVE_AES_ECB_ENCRYPT_INTERNAL
+#define HAVE_AES_XTS_ENCRYPT_INTERNAL
+
+#define HAVE_GCM128_INIT
 
 #define HAVE_RC4_INTERNAL
 #define HAVE_RC4_SET_KEY_INTERNAL

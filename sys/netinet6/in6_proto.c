@@ -1,4 +1,4 @@
-/*	$OpenBSD: in6_proto.c,v 1.124 2025/01/05 12:36:48 bluhm Exp $	*/
+/*	$OpenBSD: in6_proto.c,v 1.149 2025/07/31 09:05:11 mvs Exp $	*/
 /*	$KAME: in6_proto.c,v 1.66 2000/10/10 15:35:47 itojun Exp $	*/
 
 /*
@@ -64,19 +64,14 @@
 #include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/protosw.h>
-#include <sys/kernel.h>
 #include <sys/domain.h>
-#include <sys/mbuf.h>
 
 #include <net/if.h>
 #include <net/if_var.h>
-#include <net/route.h>
-#include <net/rtable.h>
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/ip_var.h>
-#include <netinet/in_pcb.h>
 #include <netinet/ip6.h>
 #include <netinet6/ip6_var.h>
 #include <netinet/icmp6.h>
@@ -87,12 +82,9 @@
 #include <netinet/udp.h>
 #include <netinet/udp_var.h>
 #include <netinet/ip_ipsp.h>
-#include <netinet/ip_ah.h>
-#include <netinet/ip_esp.h>
 #include <netinet/ip_ipip.h>
 
 #include <netinet6/in6_var.h>
-#include <netinet6/nd6.h>
 
 #include "gif.h"
 #if NGIF > 0
@@ -106,7 +98,7 @@
 
 #include "pf.h"
 #if NPF > 0
-#include <netinet6/ip6_divert.h>
+#include <netinet/ip_divert.h>
 #endif
 
 #include "etherip.h"
@@ -128,6 +120,7 @@ const struct protosw inet6sw[] = {
 {
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_IPV6,
+  .pr_flags	= PR_MPSYSCTL,
   .pr_init	= ip6_init,
   .pr_slowtimo	= frag6_slowtimo,
   .pr_sysctl	= ip6_sysctl
@@ -141,18 +134,23 @@ const struct protosw inet6sw[] = {
   .pr_ctlinput	= udp6_ctlinput,
   .pr_ctloutput	= ip6_ctloutput,
   .pr_usrreqs	= &udp6_usrreqs,
+#ifndef SMALL_KERNEL
   .pr_sysctl	= udp_sysctl
+#endif /* SMALL_KERNEL */
 },
 {
   .pr_type	= SOCK_STREAM,
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_TCP,
-  .pr_flags	= PR_CONNREQUIRED|PR_WANTRCVD|PR_ABRTACPTDIS|PR_SPLICE,
+  .pr_flags	= PR_CONNREQUIRED|PR_WANTRCVD|PR_ABRTACPTDIS|PR_SPLICE|
+		    PR_MPINPUT|PR_MPSYSCTL,
   .pr_input	= tcp_input,
   .pr_ctlinput	= tcp6_ctlinput,
   .pr_ctloutput	= tcp_ctloutput,
   .pr_usrreqs	= &tcp6_usrreqs,
+#ifndef SMALL_KERNEL
   .pr_sysctl	= tcp_sysctl
+#endif /* SMALL_KERNEL */
 },
 {
   .pr_type	= SOCK_RAW,
@@ -163,7 +161,9 @@ const struct protosw inet6sw[] = {
   .pr_ctlinput	= rip6_ctlinput,
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreqs	= &rip6_usrreqs,
+#ifndef SMALL_KERNEL
   .pr_sysctl	= rip6_sysctl
+#endif /* SMALL_KERNEL */
 },
 {
   .pr_type	= SOCK_RAW,
@@ -176,27 +176,29 @@ const struct protosw inet6sw[] = {
   .pr_usrreqs	= &rip6_usrreqs,
   .pr_init	= icmp6_init,
   .pr_fasttimo	= icmp6_fasttimo,
+#ifndef SMALL_KERNEL
   .pr_sysctl	= icmp6_sysctl
+#endif /* SMALL_KERNEL */
 },
 {
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_DSTOPTS,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= dest6_input
 },
 {
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_ROUTING,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= route6_input
 },
 {
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_FRAGMENT,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPINPUT,
   .pr_input	= frag6_input
 },
 #ifdef IPSEC
@@ -214,7 +216,7 @@ const struct protosw inet6sw[] = {
   .pr_type	= SOCK_RAW,
   .pr_domain	= &inet6domain,
   .pr_protocol	= IPPROTO_ESP,
-  .pr_flags	= PR_ATOMIC|PR_ADDR,
+  .pr_flags	= PR_ATOMIC|PR_ADDR|PR_MPSYSCTL,
   .pr_input	= esp46_input,
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreqs	= &rip6_usrreqs,
@@ -293,7 +295,6 @@ const struct protosw inet6sw[] = {
   .pr_ctloutput	= rip6_ctloutput,
   .pr_usrreqs	= &divert6_usrreqs,
   .pr_init	= divert6_init,
-  .pr_sysctl	= divert6_sysctl
 },
 #endif /* NPF > 0 */
 #if NETHERIP > 0
@@ -341,25 +342,30 @@ const struct domain inet6domain = {
 };
 
 /*
+ * Locks used to protect global variables in this file:
+ *	a	atomic operations
+ */
+
+/*
  * Internet configuration info
  */
 int	ip6_forwarding = 0;	/* [a] no forwarding unless sysctl to enable */
-int	ip6_mforwarding = 0;	/* no multicast forwarding unless ... */
-int	ip6_multipath = 0;	/* no using multipath routes unless ... */
+int	ip6_mforwarding = 0;	/* [a] no multicast forwarding unless ... */
+int	ip6_multipath = 0;	/* [a] no using multipath routes unless ... */
 int	ip6_sendredirects = 1;	/* [a] */
-int	ip6_defhlim = IPV6_DEFHLIM;
-int	ip6_defmcasthlim = IPV6_DEFAULT_MULTICAST_HOPS;
-int	ip6_maxfragpackets = 200;
-int	ip6_maxfrags = 200;
-int	ip6_log_interval = 5;
-int	ip6_hdrnestlimit = 10;	/* appropriate? */
-int	ip6_dad_count = 1;	/* DupAddrDetectionTransmits */
+int	ip6_defhlim = IPV6_DEFHLIM;			/* [a] */
+int	ip6_defmcasthlim = IPV6_DEFAULT_MULTICAST_HOPS; /* [a] */
+int	ip6_maxfragpackets = 200;			/* [a] */
+int	ip6_maxfrags = 200;	/* [a] */
+int	ip6_log_interval = 5;	/* [a] */
+int	ip6_hdrnestlimit = 10;	/* [a] appropriate? */
+int	ip6_dad_count = 1;	/* [a] DupAddrDetectionTransmits */
 int	ip6_dad_pending;	/* number of currently running DADs */
-int	ip6_auto_flowlabel = 1;
-int	ip6_use_deprecated = 1;	/* allow deprecated addr (RFC2462 5.5.4) */
-int	ip6_mcast_pmtu = 0;	/* enable pMTU discovery for multicast? */
-int	ip6_neighborgcthresh = 2048; /* Threshold # of NDP entries for GC */
-int	ip6_maxdynroutes = 4096; /* Max # of routes created via redirect */
+int	ip6_auto_flowlabel = 1;	/* [a] */
+int	ip6_use_deprecated = 1;	/* [a] allow deprecated addr (RFC2462 5.5.4) */
+int	ip6_mcast_pmtu = 0;	/* [a] enable pMTU discovery for multicast? */
+int	ip6_neighborgcthresh = 2048; /* [a] Threshold # of NDP entries for GC */
+int	ip6_maxdynroutes = 4096; /* [a] Max # of routes created via redirect */
 time_t	ip6_log_time = (time_t)0L;
 
 /* raw IP6 parameters */
@@ -375,4 +381,4 @@ u_long	rip6_recvspace = RIPV6RCVQ;
 /* ICMPV6 parameters */
 int	icmp6_redirtimeout = 10 * 60;	/* 10 minutes */
 int	icmp6errppslim = 100;		/* 100pps */
-int	ip6_mtudisc_timeout = IPMTUDISCTIMEOUT;
+int	ip6_mtudisc_timeout = IPMTUDISCTIMEOUT;	/* [a] */

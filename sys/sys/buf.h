@@ -1,4 +1,4 @@
-/*	$OpenBSD: buf.h,v 1.115 2025/03/27 23:30:54 tedu Exp $	*/
+/*	$OpenBSD: buf.h,v 1.120 2025/08/14 16:13:52 beck Exp $	*/
 /*	$NetBSD: buf.h,v 1.25 1997/04/09 21:12:17 mycroft Exp $	*/
 
 /*
@@ -84,12 +84,10 @@ struct bufq {
 };
 
 int		 bufq_init(struct bufq *, int);
-int		 bufq_switch(struct bufq *, int);
 void		 bufq_destroy(struct bufq *);
 
 void		 bufq_queue(struct bufq *, struct buf *);
 struct buf	*bufq_dequeue(struct bufq *);
-void		 bufq_requeue(struct bufq *, struct buf *);
 int		 bufq_peek(struct bufq *);
 void		 bufq_drain(struct bufq *);
 
@@ -164,9 +162,6 @@ struct bufcache {
 	struct bufqueue coldqueue;
 	struct bufqueue warmqueue;
 };
-
-/* Device driver compatibility definitions. */
-#define	b_active b_bcount		/* Driver queue head: drive active. */
 
 /*
  * These flags are kept in b_flags.
@@ -289,6 +284,7 @@ int	buf_dealloc_mem(struct buf *);
 void	buf_fix_mapping(struct buf *, vsize_t);
 void	buf_alloc_pages(struct buf *, vsize_t);
 void	buf_free_pages(struct buf *);
+int	buf_realloc_pages(struct buf *, struct uvm_constraint_range *, int);
 
 void	minphys(struct buf *bp);
 int	physio(void (*strategy)(struct buf *), dev_t dev, int flags,

@@ -1,4 +1,4 @@
-/*	$OpenBSD: spl.c,v 1.7 2024/11/13 12:51:04 tb Exp $ */
+/*	$OpenBSD: spl.c,v 1.14 2025/08/19 11:30:20 job Exp $ */
 /*
  * Copyright (c) 2024 Job Snijders <job@fastly.com>
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
@@ -32,24 +32,14 @@
 #include <openssl/x509v3.h>
 
 #include "extern.h"
-
-extern ASN1_OBJECT	*spl_oid;
+#include "rpki-asn1.h"
 
 /*
- * Types and templates for the SPL eContent.
+ * SPL eContent definition in draft-ietf-sidrops-rpki-prefixlist-04, section 3.
  */
 
 ASN1_ITEM_EXP AddressFamilyPrefixes_it;
 ASN1_ITEM_EXP SignedPrefixList_it;
-
-DECLARE_STACK_OF(ASN1_BIT_STRING);
-
-typedef struct {
-	ASN1_OCTET_STRING		*addressFamily;
-	STACK_OF(ASN1_BIT_STRING)	*addressPrefixes;
-} AddressFamilyPrefixes;
-
-DECLARE_STACK_OF(AddressFamilyPrefixes);
 
 ASN1_SEQUENCE(AddressFamilyPrefixes) = {
 	ASN1_SIMPLE(AddressFamilyPrefixes, addressFamily, ASN1_OCTET_STRING),
@@ -57,30 +47,14 @@ ASN1_SEQUENCE(AddressFamilyPrefixes) = {
 	    ASN1_BIT_STRING),
 } ASN1_SEQUENCE_END(AddressFamilyPrefixes);
 
-#ifndef DEFINE_STACK_OF
-#define sk_ASN1_BIT_STRING_num(st)	SKM_sk_num(ASN1_BIT_STRING, (st))
-#define sk_ASN1_BIT_STRING_value(st, i)	SKM_sk_value(ASN1_BIT_STRING, (st), (i))
-
-#define sk_AddressFamilyPrefixes_num(st)	\
-    SKM_sk_num(AddressFamilyPrefixes, (st))
-#define sk_AddressFamilyPrefixes_value(st, i)	\
-    SKM_sk_value(AddressFamilyPrefixes, (st), (i))
-#endif
-
-typedef struct {
-	ASN1_INTEGER			*version;
-	ASN1_INTEGER			*asid;
-	STACK_OF(AddressFamilyPrefixes)	*prefixBlocks;
-} SignedPrefixList;
-
 ASN1_SEQUENCE(SignedPrefixList) = {
 	ASN1_EXP_OPT(SignedPrefixList, version, ASN1_INTEGER, 0),
 	ASN1_SIMPLE(SignedPrefixList, asid, ASN1_INTEGER),
 	ASN1_SEQUENCE_OF(SignedPrefixList, prefixBlocks, AddressFamilyPrefixes)
 } ASN1_SEQUENCE_END(SignedPrefixList);
 
-DECLARE_ASN1_FUNCTIONS(SignedPrefixList);
 IMPLEMENT_ASN1_FUNCTIONS(SignedPrefixList);
+
 
 /*
  * Comparator to help sorting elements in SPL prefixBlocks and VSPs.
@@ -242,17 +216,20 @@ spl_parse_econtent(const char *fn, struct spl *spl, const unsigned char *d,
  * Returns the SPL, or NULL if the object was malformed.
  */
 struct spl *
-spl_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
-    size_t len)
+spl_parse(struct cert **out_cert, const char *fn, int talid,
+    const unsigned char *der, size_t len)
 {
 	struct spl	*spl;
+	struct cert	*cert = NULL;
 	size_t		 cmsz;
 	unsigned char	*cms;
-	struct cert	*cert = NULL;
 	time_t		 signtime = 0;
 	int		 rc = 0;
 
-	cms = cms_parse_validate(x509, fn, der, len, spl_oid, &cmsz, &signtime);
+	assert(*out_cert == NULL);
+
+	cms = cms_parse_validate(&cert, fn, talid, der, len, spl_oid, &cmsz,
+	    &signtime);
 	if (cms == NULL)
 		return NULL;
 
@@ -260,36 +237,13 @@ spl_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 		err(1, NULL);
 	spl->signtime = signtime;
 
-	if (!x509_get_aia(*x509, fn, &spl->aia))
-		goto out;
-	if (!x509_get_aki(*x509, fn, &spl->aki))
-		goto out;
-	if (!x509_get_sia(*x509, fn, &spl->sia))
-		goto out;
-	if (!x509_get_ski(*x509, fn, &spl->ski))
-		goto out;
-	if (spl->aia == NULL || spl->aki == NULL || spl->sia == NULL ||
-	    spl->ski == NULL) {
-		warnx("%s: RFC 6487 section 4.8: "
-		    "missing AIA, AKI, SIA, or SKI X509 extension", fn);
-		goto out;
-	}
-
-	if (!x509_get_notbefore(*x509, fn, &spl->notbefore))
-		goto out;
-	if (!x509_get_notafter(*x509, fn, &spl->notafter))
-		goto out;
-
 	if (!spl_parse_econtent(fn, spl, cms, cmsz))
 		goto out;
 
-	if (x509_any_inherits(*x509)) {
+	if (x509_any_inherits(cert->x509)) {
 		warnx("%s: inherit elements not allowed in EE cert", fn);
 		goto out;
 	}
-
-	if ((cert = cert_parse_ee_cert(fn, talid, *x509)) == NULL)
-		goto out;
 
 	if (cert->num_ases == 0) {
 		warnx("%s: AS Resources extension missing", fn);
@@ -307,13 +261,14 @@ spl_parse(X509 **x509, const char *fn, int talid, const unsigned char *der,
 	 */
 	spl->valid = valid_spl(fn, cert, spl);
 
+	*out_cert = cert;
+	cert = NULL;
+
 	rc = 1;
  out:
 	if (rc == 0) {
 		spl_free(spl);
 		spl = NULL;
-		X509_free(*x509);
-		*x509 = NULL;
 	}
 	cert_free(cert);
 	free(cms);
@@ -326,10 +281,6 @@ spl_free(struct spl *s)
 	if (s == NULL)
 		return;
 
-	free(s->aia);
-	free(s->aki);
-	free(s->sia);
-	free(s->ski);
 	free(s->prefixes);
 	free(s);
 }
@@ -349,10 +300,6 @@ spl_buffer(struct ibuf *b, const struct spl *s)
 
 	io_simple_buffer(b, s->prefixes,
 	    s->num_prefixes * sizeof(s->prefixes[0]));
-
-	io_str_buffer(b, s->aia);
-	io_str_buffer(b, s->aki);
-	io_str_buffer(b, s->ski);
 }
 
 /*
@@ -381,11 +328,6 @@ spl_read(struct ibuf *b)
 		io_read_buf(b, s->prefixes,
 		    s->num_prefixes * sizeof(s->prefixes[0]));
 	}
-
-	io_read_str(b, &s->aia);
-	io_read_str(b, &s->aki);
-	io_read_str(b, &s->ski);
-	assert(s->aia && s->aki && s->ski);
 
 	return s;
 }
@@ -429,8 +371,7 @@ spl_insert_vsps(struct vsp_tree *tree, struct spl *spl, struct repo *rp)
 	vsp->asid = spl->asid;
 	vsp->talid = spl->talid;
 	vsp->expires = spl->expires;
-	if (rp != NULL)
-		vsp->repoid = repo_id(rp);
+	vsp->repoid = repo_id(rp);
 
 	if ((found = RB_INSERT(vsp_tree, tree, vsp)) != NULL) {
 		/* already exists */

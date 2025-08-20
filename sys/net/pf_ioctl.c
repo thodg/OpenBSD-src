@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf_ioctl.c,v 1.418 2024/07/18 14:46:28 bluhm Exp $ */
+/*	$OpenBSD: pf_ioctl.c,v 1.423 2025/08/06 14:00:33 mvs Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -45,8 +45,6 @@
 #include <sys/filio.h>
 #include <sys/fcntl.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
-#include <sys/kernel.h>
 #include <sys/time.h>
 #include <sys/timeout.h>
 #include <sys/pool.h>
@@ -67,14 +65,11 @@
 
 #include <netinet/in.h>
 #include <netinet/ip.h>
-#include <netinet/in_pcb.h>
-#include <netinet/ip_var.h>
 #include <netinet/ip_icmp.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
 
 #ifdef INET6
-#include <netinet/ip6.h>
 #include <netinet/icmp6.h>
 #endif /* INET6 */
 
@@ -195,9 +190,9 @@ pfattach(int num)
 	    IPL_SOFTNET, 0, "pfsrctr", NULL);
 	pool_init(&pf_sn_item_pl, sizeof(struct pf_sn_item), 0,
 	    IPL_SOFTNET, 0, "pfsnitem", NULL);
-	pool_init(&pf_state_pl, sizeof(struct pf_state), 0,
+	pool_init(&pf_state_pl, sizeof(struct pf_state), CACHELINESIZE,
 	    IPL_SOFTNET, 0, "pfstate", NULL);
-	pool_init(&pf_state_key_pl, sizeof(struct pf_state_key), 0,
+	pool_init(&pf_state_key_pl, sizeof(struct pf_state_key), CACHELINESIZE,
 	    IPL_SOFTNET, 0, "pfstkey", NULL);
 	pool_init(&pf_state_item_pl, sizeof(struct pf_state_item), 0,
 	    IPL_SOFTNET, 0, "pfstitem", NULL);
@@ -219,9 +214,9 @@ pfattach(int num)
 	pf_syncookies_init();
 
 	pool_sethardlimit(pf_pool_limits[PF_LIMIT_STATES].pp,
-	    pf_pool_limits[PF_LIMIT_STATES].limit, NULL, 0);
+	    pf_pool_limits[PF_LIMIT_STATES].limit);
 	pool_sethardlimit(pf_pool_limits[PF_LIMIT_ANCHORS].pp,
-	    pf_pool_limits[PF_LIMIT_ANCHORS].limit, NULL, 0);
+	    pf_pool_limits[PF_LIMIT_ANCHORS].limit);
 
 	if (physmem <= atop(100*1024*1024))
 		pf_pool_limits[PF_LIMIT_TABLE_ENTRIES].limit =
@@ -2134,14 +2129,19 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 			goto fail;
 		}
 		/* Fragments reference mbuf clusters. */
-		if (pl->index == PF_LIMIT_FRAGS && pl->limit > nmbclust) {
+		if (pl->index == PF_LIMIT_FRAGS &&
+		    pl->limit > atomic_load_long(&nmbclust)) {
 			error = EINVAL;
 			PF_UNLOCK();
 			goto fail;
 		}
 
-		pf_pool_limits[pl->index].limit_new = pl->limit;
-		pl->limit = pf_pool_limits[pl->index].limit;
+		error = pool_sethardlimit(pf_pool_limits[pl->index].pp,
+		    pl->limit);
+		if (error == 0) {
+			pf_pool_limits[pl->index].limit_new = pl->limit;
+			pf_pool_limits[pl->index].limit = pl->limit;
+		}
 		PF_UNLOCK();
 		break;
 	}
@@ -2702,21 +2702,6 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 		NET_LOCK();
 		PF_LOCK();
 
-		/*
-		 * Checked already in DIOCSETLIMIT, but check again as the
-		 * situation might have changed.
-		 */
-		for (i = 0; i < PF_LIMIT_MAX; i++) {
-			if (((struct pool *)pf_pool_limits[i].pp)->pr_nout >
-			    pf_pool_limits[i].limit_new) {
-				PF_UNLOCK();
-				NET_UNLOCK();
-				free(table, M_PF, sizeof(*table));
-				free(ioe, M_PF, sizeof(*ioe));
-				error = EBUSY;
-				goto fail;
-			}
-		}
 		/* now do the commit - no errors should happen here */
 		for (i = 0; i < io->size; i++) {
 			PF_UNLOCK();
@@ -2768,20 +2753,6 @@ pfioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 				error = EINVAL;
 				goto fail; /* really bad */
 			}
-		}
-		for (i = 0; i < PF_LIMIT_MAX; i++) {
-			if (pf_pool_limits[i].limit_new !=
-			    pf_pool_limits[i].limit &&
-			    pool_sethardlimit(pf_pool_limits[i].pp,
-			    pf_pool_limits[i].limit_new, NULL, 0) != 0) {
-				PF_UNLOCK();
-				NET_UNLOCK();
-				free(table, M_PF, sizeof(*table));
-				free(ioe, M_PF, sizeof(*ioe));
-				error = EBUSY;
-				goto fail; /* really bad */
-			}
-			pf_pool_limits[i].limit = pf_pool_limits[i].limit_new;
 		}
 		for (i = 0; i < PFTM_MAX; i++) {
 			int old = pf_default_rule.timeout[i];

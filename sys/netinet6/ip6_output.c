@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip6_output.c,v 1.297 2025/03/02 21:28:32 bluhm Exp $	*/
+/*	$OpenBSD: ip6_output.c,v 1.303 2025/07/25 20:04:47 mvs Exp $	*/
 /*	$KAME: ip6_output.c,v 1.172 2001/03/25 09:55:56 itojun Exp $	*/
 
 /*
@@ -69,7 +69,6 @@
 #include <sys/errno.h>
 #include <sys/protosw.h>
 #include <sys/socket.h>
-#include <sys/socketvar.h>
 #include <sys/proc.h>
 #include <sys/systm.h>
 
@@ -93,7 +92,6 @@
 #include <netinet/ip6.h>
 #include <netinet/icmp6.h>
 #include <netinet6/ip6_var.h>
-#include <netinet6/nd6.h>
 
 #include <crypto/idgen.h>
 
@@ -103,13 +101,11 @@
 
 #ifdef IPSEC
 #include <netinet/ip_ipsp.h>
-#include <netinet/ip_ah.h>
-#include <netinet/ip_esp.h>
 
 #ifdef ENCDEBUG
 #define DPRINTF(fmt, args...)						\
 	do {								\
-		if (encdebug)						\
+		if (atomic_load_int(&encdebug))				\
 			printf("%s: " fmt "\n", __func__, ## args);	\
 	} while (0)
 #else
@@ -424,7 +420,7 @@ reroute:
 		if (im6o != NULL)
 			ip6->ip6_hlim = im6o->im6o_hlim;
 		else
-			ip6->ip6_hlim = ip6_defmcasthlim;
+			ip6->ip6_hlim = atomic_load_int(&ip6_defmcasthlim);
 	}
 
 #ifdef IPSEC
@@ -533,7 +529,8 @@ reroute:
 			 * above, will be forwarded by the ip6_input() routine,
 			 * if necessary.
 			 */
-			if (ip6_mforwarding && ip6_mrouter[ifp->if_rdomain] &&
+			if (atomic_load_int(&ip6_mforwarding) &&
+			    ip6_mrouter[ifp->if_rdomain] &&
 			    (flags & IPV6_FORWARDING) == 0) {
 				if (ip6_mforward(ip6, ifp, m, flags) != 0) {
 					m_freem(m);
@@ -693,7 +690,7 @@ reroute:
 
 	if (dontfrag && tlen > ifp->if_mtu) {		/* case 2-b */
 #ifdef IPSEC
-		if (ip_mtudisc)
+		if (atomic_load_int(&ip_mtudisc))
 			ipsec_adjust_mtu(m, mtu);
 #endif
 		error = EMSGSIZE;
@@ -1883,6 +1880,7 @@ ip6_setmoptions(int optname, struct ip6_moptions **im6op, struct mbuf *m,
 	struct ip6_moptions *im6o = *im6op;
 	struct in6_multi_mship *imm;
 	struct proc *p = curproc;	/* XXX */
+	int ip6_defmcasthlim_local = atomic_load_int(&ip6_defmcasthlim);
 
 	if (im6o == NULL) {
 		/*
@@ -1894,7 +1892,7 @@ ip6_setmoptions(int optname, struct ip6_moptions **im6op, struct mbuf *m,
 			return (ENOBUFS);
 		*im6op = im6o;
 		im6o->im6o_ifidx = 0;
-		im6o->im6o_hlim = ip6_defmcasthlim;
+		im6o->im6o_hlim = ip6_defmcasthlim_local;
 		im6o->im6o_loop = IPV6_DEFAULT_MULTICAST_LOOP;
 		LIST_INIT(&im6o->im6o_memberships);
 	}
@@ -1941,7 +1939,7 @@ ip6_setmoptions(int optname, struct ip6_moptions **im6op, struct mbuf *m,
 		if (optval < -1 || optval >= 256)
 			error = EINVAL;
 		else if (optval == -1)
-			im6o->im6o_hlim = ip6_defmcasthlim;
+			im6o->im6o_hlim = ip6_defmcasthlim_local;
 		else
 			im6o->im6o_hlim = optval;
 		break;
@@ -2141,7 +2139,7 @@ ip6_setmoptions(int optname, struct ip6_moptions **im6op, struct mbuf *m,
 	 * structure.
 	 */
 	if (im6o->im6o_ifidx == 0 &&
-	    im6o->im6o_hlim == ip6_defmcasthlim &&
+	    im6o->im6o_hlim == ip6_defmcasthlim_local &&
 	    im6o->im6o_loop == IPV6_DEFAULT_MULTICAST_LOOP &&
 	    LIST_EMPTY(&im6o->im6o_memberships)) {
 		free(*im6op, M_IPMOPTS, sizeof(**im6op));
@@ -2173,7 +2171,7 @@ ip6_getmoptions(int optname, struct ip6_moptions *im6o, struct mbuf *m)
 		hlim = mtod(m, u_int *);
 		m->m_len = sizeof(u_int);
 		if (im6o == NULL)
-			*hlim = ip6_defmcasthlim;
+			*hlim = atomic_load_int(&ip6_defmcasthlim);
 		else
 			*hlim = im6o->im6o_hlim;
 		return (0);
@@ -2182,7 +2180,7 @@ ip6_getmoptions(int optname, struct ip6_moptions *im6o, struct mbuf *m)
 		loop = mtod(m, u_int *);
 		m->m_len = sizeof(u_int);
 		if (im6o == NULL)
-			*loop = ip6_defmcasthlim;
+			*loop = atomic_load_int(&ip6_defmcasthlim);
 		else
 			*loop = im6o->im6o_loop;
 		return (0);
@@ -2836,7 +2834,8 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
 	struct ip6_hdr *ip6;
 	struct in6_addr dst;
 	u_int len;
-	int error, ifidx, tso = 0;
+	int ifidx, tso = 0, ip_mtudisc_local =  atomic_load_int(&ip_mtudisc);
+	int error;
 
 #if NPF > 0
 	/*
@@ -2870,7 +2869,7 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
 	/* Check if we are allowed to fragment */
 	dst = ip6->ip6_dst;
 	ifidx = m->m_pkthdr.ph_ifidx;
-	if (ip_mtudisc && tdb->tdb_mtu &&
+	if (ip_mtudisc_local && tdb->tdb_mtu &&
 	    len > tdb->tdb_mtu && tdb->tdb_mtutimeout > gettime()) {
 		int transportmode;
 
@@ -2889,7 +2888,7 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
 		return EMSGSIZE;
 	}
 	/* propagate don't fragment for v6-over-v6 */
-	if (ip_mtudisc)
+	if (ip_mtudisc_local)
 		SET(m->m_pkthdr.csum_flags, M_IPV6_DF_OUT);
 
 	/*
@@ -2899,7 +2898,7 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
 	m->m_flags &= ~(M_BCAST | M_MCAST);
 
 	if (tso) {
-		error = tcp_chopper(m, &ml, encif, len);
+		error = tcp_softtso_chop(&ml, m, encif, len);
 		if (error)
 			goto done;
 	} else {
@@ -2926,7 +2925,7 @@ ip6_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
 	}
 	if (!error && tso)
 		tcpstat_inc(tcps_outswtso);
-	if (ip_mtudisc && error == EMSGSIZE)
+	if (ip_mtudisc_local && error == EMSGSIZE)
 		ip6_output_ipsec_pmtu_update(tdb, ro, &dst, ifidx, rtableid, 0);
 	return error;
 }

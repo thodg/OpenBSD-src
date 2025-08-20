@@ -1,4 +1,4 @@
-.\" $OpenBSD: tmux.1,v 1.990 2025/04/09 07:03:04 nicm Exp $
+.\" $OpenBSD: tmux.1,v 1.1008 2025/08/14 07:15:40 nicm Exp $
 .\"
 .\" Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 .\"
@@ -14,7 +14,7 @@
 .\" IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
 .\" OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: April 9 2025 $
+.Dd $Mdocdate: August 14 2025 $
 .Dt TMUX 1
 .Os
 .Sh NAME
@@ -568,7 +568,7 @@ For
 this typically means quoted (such as
 .Ql neww \[aq];\[aq] splitw )
 or escaped (such as
-.Ql neww \e\e\e\e; splitw ) .
+.Ql neww \e; splitw ) .
 .It
 Individual semicolons or trailing semicolons that should be interpreted as
 arguments should be escaped twice: once according to the shell conventions and
@@ -576,15 +576,15 @@ a second time for
 .Nm ;
 for example:
 .Bd -literal -offset indent
-$ tmux neww \[aq]foo\e\e;\[aq] bar
-$ tmux neww foo\e\e\e\e; bar
+$ tmux neww \[aq]foo\e;\[aq] bar
+$ tmux neww foo\e\e\e; bar
 .Ed
 .It
 Semicolons that are not individual tokens or trailing another token should only
 be escaped once according to shell conventions; for example:
 .Bd -literal -offset indent
 $ tmux neww \[aq]foo-;-bar\[aq]
-$ tmux neww foo-\e\e;-bar
+$ tmux neww foo-\e;-bar
 .Ed
 .El
 .Pp
@@ -3728,7 +3728,15 @@ options.
 .Fl N
 attaches a note to the key (shown with
 .Ic list-keys
-.Fl N ) .
+.Fl N ) ,
+which can be cleared by passing an empty string.
+The
+.Fl r
+and
+.Fl N
+flags can be used without
+.Ar command
+to alter an existing binding.
 .Pp
 To view the default bindings and possible commands, see the
 .Ic list-keys
@@ -4384,6 +4392,11 @@ For example:
 set -s user-keys[0] "\ee[5;30012\[ti]"
 bind User0 resize-pane -L 3
 .Ed
+.It Xo Ic variation-selector-always-wide
+.Op Ic on | off
+.Xc
+Always treat Unicode variation selector 16 as marking a wide character.
+This is a feature of some terminals as part of their Unicode 14 support.
 .El
 .Pp
 Available session options are:
@@ -5065,6 +5078,8 @@ heavy lines using UTF-8 characters
 simple ASCII characters
 .It number
 the pane number
+.It spaces
+space characters
 .El
 .Pp
 .Ql double
@@ -5172,6 +5187,38 @@ Other attributes are ignored.
 .Op Ic left | right
 .Xc
 Sets which side of the pane to display pane scrollbars on.
+.Pp
+.It Ic pane-status-current-style Ar style
+Set status line style for the currently active pane.
+For how to specify
+.Ar style ,
+see the
+.Sx STYLES
+section.
+.Pp
+.It Ic pane-status-style Ar style
+Set status line style for a single pane.
+For how to specify
+.Ar style ,
+see the
+.Sx STYLES
+section.
+.Pp
+.It Ic session-status-current-style Ar style
+Set status line style for the currently active session.
+For how to specify
+.Ar style ,
+see the
+.Sx STYLES
+section.
+.Pp
+.It Ic session-status-style Ar style
+Set status line style for a single session.
+For how to specify
+.Ar style ,
+see the
+.Sx STYLES
+section.
 .Pp
 .It Ic window-status-activity-style Ar style
 Set status line style for windows with an activity alert.
@@ -5456,6 +5503,10 @@ Run when focus exits a client
 Run when a client is resized.
 .It client-session-changed
 Run when a client's attached session is changed.
+.It client-light-theme
+Run when a client switches to a light theme.
+.It client-dark-theme
+Run when a client switches to a dark theme.
 .It command-error
 Run when a command fails.
 .It pane-died
@@ -5631,10 +5682,12 @@ by a
 .Ql } .
 .Pp
 Conditionals are available by prefixing with
-.Ql \&?
-and separating two alternatives with a comma;
-if the specified variable exists and is not zero, the first alternative
-is chosen, otherwise the second is used.
+.Ql \&? .
+For each pair of two arguments, if the variable in the first of the pair exists
+and is not zero, the second of the pair is chosen, otherwise it continues.
+If no condition from paired arguments matches, the default value is chosen.
+If there's an unpaired final argument, that is the default.
+If not, the default is the empty string.
 For example
 .Ql #{?session_attached,attached,not attached}
 will include the string
@@ -5650,6 +5703,12 @@ if
 is enabled, or
 .Ql no
 if not.
+.Ql #{?#{n:window_name},#{window_name} - }
+will include the window name with a dash separator if there is a window name, or
+the empty string if the window name is empty.
+.Ql #{?session_format,format1,window_format,format2,format3}
+will include format1 for a session format, format2 for a window format, or
+format3 for neither a session nor a window format.
 Conditionals can be nested arbitrarily.
 Inside a conditional,
 .Ql \&,
@@ -5664,7 +5723,7 @@ unless they are part of a
 replacement.
 For example:
 .Bd -literal -offset indent
-#{?pane_in_mode,#[fg=white#,bg=red],#[fg=red#,bg=white]}#W .
+#{?pane_in_mode,#[fg=white#,bg=red],#[fg=red#,bg=white]}#W
 .Ed
 .Pp
 String comparisons may be expressed by prefixing two comma-separated
@@ -5688,9 +5747,17 @@ otherwise by
 .Ql ||
 and
 .Ql &&
-evaluate to true if either or both of two comma-separated alternatives are
+evaluate to true if any or all of the comma-separated alternatives are
 true, for example
 .Ql #{||:#{pane_in_mode},#{alternate_on}} .
+.Ql \&!
+evaluates to true if the value is false and vice versa, for example
+.Ql #{!:#{pane_in_mode}} .
+.Ql !!
+converts a value to a canonical boolean form, 1 for true and 0 for false, for
+example
+.Ql #{!!:non-empty string}
+evaluates to 1.
 .Pp
 An
 .Ql m
@@ -5804,6 +5871,12 @@ expands to the length of the variable and
 .Ql w
 to its width when displayed, for example
 .Ql #{n:window_name} .
+.Ql R
+repeats the first argument by a number of times given by the second argument,
+so
+.Ql #{R:a,3}
+will result in
+.Ql aaa .
 .Pp
 Prefixing a time variable with
 .Ql t:\&
@@ -5870,8 +5943,26 @@ or
 .Ql L:\&
 will loop over each session, window, pane or client and insert the format once
 for each.
-For windows and panes, two comma-separated formats may be given:
-the second is used for the current window or active pane.
+.Ql L:\& ,
+.Ql S:\&
+and
+.Ql W:\&
+can take an optional sort argument
+.Ql /i\& ,
+.Ql /n\& ,
+.Ql /t\&
+to sort by index, name, or last activity time; additionally
+.Ql /r\&
+to sort in reverse order.
+.Ql /r\&
+can also be used with
+.Ql P:\&
+to reverse the sort order by pane index.
+For example,
+.Ql S/nr:\&
+to sort sessions by name in reverse order.
+For each, two comma-separated formats may be given:
+the second is used for the current window, active pane, or active session.
 For example, to get a list of windows formatted like the status line:
 .Bd -literal -offset indent
 #{W:#{E:window-status-format} ,#{E:window-status-current-format} }
@@ -6018,8 +6109,10 @@ The following variables are available, where appropriate:
 .It Li "insert_flag" Ta "" Ta "Pane insert flag"
 .It Li "keypad_cursor_flag" Ta "" Ta "Pane keypad cursor flag"
 .It Li "keypad_flag" Ta "" Ta "Pane keypad flag"
+.It Li "last_session_index" Ta "" Ta "Index of last session"
 .It Li "last_window_index" Ta "" Ta "Index of last window in session"
 .It Li "line" Ta "" Ta "Line number in the list"
+.It Li "loop_last_flag" Ta "" Ta "1 if last window, pane, session, client in the W:, P:, S:, or L: loop"
 .It Li "mouse_all_flag" Ta "" Ta "Pane mouse all flag"
 .It Li "mouse_any_flag" Ta "" Ta "Pane mouse any flag"
 .It Li "mouse_button_flag" Ta "" Ta "Pane mouse button flag"
@@ -6052,7 +6145,7 @@ The following variables are available, where appropriate:
 .It Li "pane_format" Ta "" Ta "1 if format is for a pane"
 .It Li "pane_height" Ta "" Ta "Height of pane"
 .It Li "pane_id" Ta "#D" Ta "Unique pane ID"
-.It Li "pane_in_mode" Ta "" Ta "1 if pane is in a mode"
+.It Li "pane_in_mode" Ta "" Ta "Number of modes pane is in"
 .It Li "pane_index" Ta "#P" Ta "Index of pane"
 .It Li "pane_input_off" Ta "" Ta "1 if input to pane is disabled"
 .It Li "pane_key_mode" Ta "" Ta "Extended key reporting mode in this pane"
@@ -6091,10 +6184,13 @@ The following variables are available, where appropriate:
 .It Li "selection_start_x" Ta "" Ta "X position of the start of the selection"
 .It Li "selection_start_y" Ta "" Ta "Y position of the start of the selection"
 .It Li "server_sessions" Ta "" Ta "Number of sessions"
+.It Li "session_active" Ta "" Ta "1 if session active"
 .It Li "session_activity" Ta "" Ta "Time of session last activity"
+.It Li "session_activity_flag" Ta "" Ta "1 if any window in session has activity"
 .It Li "session_alerts" Ta "" Ta "List of window indexes with alerts"
 .It Li "session_attached" Ta "" Ta "Number of clients session is attached to"
 .It Li "session_attached_list" Ta "" Ta "List of clients session is attached to"
+.It Li "session_bell_flag" Ta "" Ta "1 if any window in session has bell"
 .It Li "session_created" Ta "" Ta "Time session created"
 .It Li "session_format" Ta "" Ta "1 if format is for a session"
 .It Li "session_group" Ta "" Ta "Name of session group"
@@ -6105,11 +6201,13 @@ The following variables are available, where appropriate:
 .It Li "session_group_size" Ta "" Ta "Size of session group"
 .It Li "session_grouped" Ta "" Ta "1 if session in a group"
 .It Li "session_id" Ta "" Ta "Unique session ID"
+.It Li "session_index" Ta "" Ta "Index of session"
 .It Li "session_last_attached" Ta "" Ta "Time session last attached"
 .It Li "session_many_attached" Ta "" Ta "1 if multiple clients attached"
 .It Li "session_marked" Ta "" Ta "1 if this session contains the marked pane"
 .It Li "session_name" Ta "#S" Ta "Name of session"
 .It Li "session_path" Ta "" Ta "Working directory of session"
+.It Li "session_silence_flag" Ta "" Ta "1 if any window in session has silence alert"
 .It Li "session_stack" Ta "" Ta "Window indexes in most recent order"
 .It Li "session_windows" Ta "" Ta "Number of windows in session"
 .It Li "socket_path" Ta "" Ta "Server socket path"
@@ -6256,6 +6354,8 @@ and
 .Ic list=right-marker
 mark the text to be used to mark that text has been trimmed from the left or
 right of the list if there is not enough space.
+.It Ic noattr
+Do not copy attributes from the default style.
 .It Xo Ic push-default ,
 .Ic pop-default
 .Xc
@@ -6322,6 +6422,10 @@ will be available in the
 format variable.
 .Ql X
 must be at most 15 bytes in length.
+.It Ic set-default
+Set the current colours and attributes as the default, overwriting any previous
+default.
+The previous default cannot be restored.
 .El
 .Pp
 Examples are:
@@ -6869,8 +6973,8 @@ forwards any input read from stdin to the empty pane given by
 .Op Fl d Ar start-directory
 .Op Fl e Ar environment
 .Op Fl h Ar height
-.Op Fl s Ar border-style
-.Op Fl S Ar style
+.Op Fl s Ar style
+.Op Fl S Ar border-style
 .Op Fl t Ar target-pane
 .Op Fl T Ar title
 .Op Fl w Ar width
@@ -7252,7 +7356,7 @@ Lock each client individually by running the command specified by the
 option.
 .Tg run
 .It Xo Ic run-shell
-.Op Fl bC
+.Op Fl bCE
 .Op Fl c Ar start-directory
 .Op Fl d Ar delay
 .Op Fl t Ar target-pane
@@ -7280,6 +7384,8 @@ the command is run in the background.
 waits for
 .Ar delay
 seconds before starting the command.
+.Fl E
+redirects the command's stderr to stdout instead of ignoring it.
 If
 .Fl c
 is given, the current working directory is set to
