@@ -140,6 +140,7 @@ ext4fs_init(struct vfsconf *vfsp)
 int
 ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen, struct proc *p)
+{
 	(void)name;
 	(void)namelen;
 	(void)oldp;
