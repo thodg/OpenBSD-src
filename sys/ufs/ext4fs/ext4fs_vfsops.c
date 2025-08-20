@@ -56,6 +56,24 @@ const struct vfsops ext4fs_vfsops = {
 };
 
 int
+ext4fs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
+{
+	(void)mp;
+	(void)fhp;
+	(void)vpp;
+	printf("ext4fs_fhtovp: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_init(struct vfsconf *vfsp)
+{
+	(void)vfsp;
+	printf("ext4fs_init: OK\n");
+	return (0);
+}
+
+int
 ext4fs_mount(struct mount *mp, const char *path, void *data,
 	struct nameidata *ndp, struct proc *p)
 {
@@ -65,16 +83,6 @@ ext4fs_mount(struct mount *mp, const char *path, void *data,
 	(void)ndp;
 	(void)p;
 	printf("ext4fs_mount: not implemented\n");
-	return (EOPNOTSUPP);
-}
-
-int
-ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
-{
-	(void)mp;
-	(void)mntflags;
-	(void)p;
-	printf("ext4fs_unmount: not implemented\n");
 	return (EOPNOTSUPP);
 }
 
@@ -101,43 +109,6 @@ ext4fs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred, struct
 }
 
 int
-ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
-{
-	(void)mp;
-	(void)ino;
-	(void)vpp;
-	printf("ext4fs_vget: not implemented\n");
-	return (EOPNOTSUPP);
-}
-
-int
-ext4fs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
-{
-	(void)mp;
-	(void)fhp;
-	(void)vpp;
-	printf("ext4fs_fhtovp: not implemented\n");
-	return (EOPNOTSUPP);
-}
-
-int
-ext4fs_vptofh(struct vnode *vp, struct fid *fhp)
-{
-	(void)vp;
-	(void)fhp;
-	printf("ext4fs_vptofh: not implemented\n");
-	return (EOPNOTSUPP);
-}
-
-int
-ext4fs_init(struct vfsconf *vfsp)
-{
-	(void)vfsp;
-	printf("ext4fs_init: initializing ext4fs filesystem\n");
-	return (0);
-}
-
-int
 ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
     void *newp, size_t newlen, struct proc *p)
 {
@@ -149,5 +120,34 @@ ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 	(void)newlen;
 	(void)p;
 	printf("ext4fs_sysctl: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
+{
+	(void)mp;
+	(void)mntflags;
+	(void)p;
+	printf("ext4fs_unmount: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
+{
+	(void)mp;
+	(void)ino;
+	(void)vpp;
+	printf("ext4fs_vget: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_vptofh(struct vnode *vp, struct fid *fhp)
+{
+	(void)vp;
+	(void)fhp;
+	printf("ext4fs_vptofh: not implemented\n");
 	return (EOPNOTSUPP);
 }
