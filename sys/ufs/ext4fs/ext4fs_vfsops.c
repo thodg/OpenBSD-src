@@ -1,4 +1,4 @@
-/* kc3
+/* ext4fs
  * Copyright 2025 kmx.io <contact@kmx.io>
  *
  * Permission is hereby granted to use this software granted the above
@@ -12,29 +12,29 @@
  */
 #include <sys/param.h>
 #include <sys/systm.h>
-#include <sys/namei.h>
-#include <sys/proc.h>
-#include <sys/kernel.h>
-#include <sys/vnode.h>
-#include <sys/socket.h>
-#include <sys/mount.h>
-#include <sys/buf.h>
-#include <sys/disk.h>
-#include <sys/mbuf.h>
-#include <sys/fcntl.h>
-#include <sys/disklabel.h>
-#include <sys/ioctl.h>
+//#include <sys/namei.h>
+//#include <sys/proc.h>
+//#include <sys/kernel.h>
+//#include <sys/vnode.h>
+//#include <sys/socket.h>
+//#include <sys/mount.h>
+//#include <sys/buf.h>
+//#include <sys/disk.h>
+//#include <sys/mbuf.h>
+//#include <sys/fcntl.h>
+//#include <sys/disklabel.h>
+//#include <sys/ioctl.h>
 #include <sys/errno.h>
-#include <sys/malloc.h>
-#include <sys/pool.h>
-#include <sys/lock.h>
-#include <sys/dkio.h>
-#include <sys/specdev.h>
+//#include <sys/malloc.h>
+//#include <sys/pool.h>
+//#include <sys/lock.h>
+//#include <sys/dkio.h>
+//#include <sys/specdev.h>
 
 #include <ufs/ufs/quota.h>
-#include <ufs/ufs/ufsmount.h>
+//#include <ufs/ufs/ufsmount.h>
 #include <ufs/ufs/inode.h>
-#include <ufs/ufs/dir.h>
+//#include <ufs/ufs/dir.h>
 #include <ufs/ufs/ufs_extern.h>
 
 #include <ufs/ext4fs/ext4fs.h>
