@@ -22,7 +22,9 @@ struct nameidata;
 struct statfs;
 struct vfsconf;
 
+#define EXT4FS_EXTENT_DEPTH_MAX		5
 #define EXT4FS_FUNCTION_MAX		32
+#define EXT4FS_REV_EXT2			0
 #define EXT4FS_REV_DYNAMIC		1
 #define EXT4FS_REV_MINOR		0
 #define EXT4FS_LAST_MOUNTED_MAX		64
@@ -31,6 +33,14 @@ struct vfsconf;
 #define EXT4FS_SUPER_BLOCK_OFFSET	1024
 #define EXT4FS_SUPER_BLOCK_SIZE		1024
 #define EXT4FS_VOLUME_NAME_MAX		16
+
+#define	EXT4FS_DIRECT_ADDR_IN_INODE	12
+#define	EXT4FS_INDIRECT_ADDR_IN_INODE	3
+#define EXT4FS_SYMLINK_LEN_MAX \
+	((EXT4FS_DIRECT_ADDR_IN_INODE +				\
+	  EXT4FS_INDIRECT_ADDR_IN_INODE) * sizeof(u_int32_t))
+
+#define	EXT4FS_NINDIR(fs)	((fs)->m_block_size / sizeof(u_int32_t))
 
 #define EXT4FS_CHECKSUM_TYPE_NONE	0x0000
 #define EXT4FS_CHECKSUM_TYPE_CRC32C	0x0001
@@ -68,6 +78,12 @@ struct vfsconf;
 #define EXT4FS_FEATURE_INCOMPAT_INLINE_DATA	0x08000
 #define EXT4FS_FEATURE_INCOMPAT_ENCRYPT		0x10000
 
+#define EXT4FS_FEATURE_INCOMPAT_SUPPORTED	\
+	(EXT4FS_FEATURE_INCOMPAT_FILETYPE |	\
+	 EXT4FS_FEATURE_INCOMPAT_EXTENTS |	\
+	 EXT4FS_FEATURE_INCOMPAT_64BIT |	\
+	 EXT4FS_FEATURE_INCOMPAT_FLEX_BG)
+
 #define EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER   0x0001
 #define EXT4FS_FEATURE_RO_COMPAT_LARGE_FILE     0x0002
 #define EXT4FS_FEATURE_RO_COMPAT_BTREE_DIR      0x0004
@@ -82,6 +98,9 @@ struct vfsconf;
 #define EXT4FS_FEATURE_RO_COMPAT_REPLICA        0x0800
 #define EXT4FS_FEATURE_RO_COMPAT_READONLY       0x1000
 #define EXT4FS_FEATURE_RO_COMPAT_PROJECT        0x2000
+
+#define EXT4FS_FEATURE_RO_COMPAT_SUPPORTED	\
+	(EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM)
 
 #define EXT4FS_FLAG_SIGNED_HASH		0x0001
 #define EXT4FS_FLAG_UNSIGNED_HASH	0x0002
@@ -154,204 +173,278 @@ struct vfsconf;
 #define EXT4FS_BGD_FLAG_BLOCK_ZEROED	0x0010
 #define EXT4FS_BGD_FLAG_READ_ONLY	0x0020
 
-struct ext4fs_super_block {
-  uint32_t sb_inodes_count;
-  uint32_t sb_blocks_count_lo;
-  uint32_t sb_reserved_blocks_count_lo;
-  uint32_t sb_free_blocks_count_lo;
-  // 0x10
-  uint32_t sb_free_inodes_count;
-  uint32_t sb_first_data_block;
-  uint32_t sb_log_block_size;       // log2(block size) - 10
-  uint32_t sb_log_cluster_size;     // log2(cluster size) - 10
-  // 0x20
-  uint32_t sb_blocks_per_group;
-  uint32_t sb_clusters_per_group;
-  uint32_t sb_inodes_per_group;
-  uint32_t sb_mount_time_lo;
-  // 0x30
-  uint32_t sb_write_time_lo;
-  uint16_t sb_mount_count;
-  int16_t  sb_max_mount_count_before_fsck;
-  uint16_t sb_magic;
-  uint16_t sb_state;                // EXT4FS_STATE_*
-  uint16_t sb_errors;               // EXT4FS_ERRORS_*
-  uint16_t sb_revision_level_minor;
-  // 0x40
-  uint32_t sb_check_time_lo;
-  uint32_t sb_check_interval;
-  uint32_t sb_creator_os;           // EXT4FS_OS_*
-  uint32_t sb_revision_level;
-  // 0x50
-  uint16_t sb_default_reserved_uid;
-  uint16_t sb_default_reserved_gid;
-  uint32_t sb_first_non_reserved_inode;
-  uint16_t sb_inode_size;
-  uint16_t sb_block_group_id;
-  uint32_t sb_feature_compat;
-  // 0x60
-  uint32_t sb_feature_incompat;
-  uint32_t sb_feature_ro_compat;
-  uint8_t  sb_uuid[16];
-  char     sb_volume_name[EXT4FS_VOLUME_NAME_MAX];
-  char     sb_last_mounted[EXT4FS_LAST_MOUNTED_MAX];
-  uint32_t sb_algorithm_usage_bitmap;
-  uint8_t  sb_preallocate_blocks;
-  uint8_t  sb_preallocate_dir_blocks;
-  uint16_t sb_reserved_bgdt_blocks;
-  // 0xD0
-  uint8_t  sb_journal_uuid[16];     // UUID of journal superblock
-  // 0xE0
-  uint32_t sb_journal_inode_number;
-  uint32_t sb_journal_device_number;
-  uint32_t sb_last_orphan;
-  uint32_t sb_hash_seed[4];
-  uint8_t  sb_default_hash_version;
-  uint8_t  sb_journal_backup_type;
-  uint16_t sb_block_group_descriptor_size;
-  // 0x100
-  uint32_t sb_default_mount_opts;
-  uint32_t sb_first_meta_block_group;
-  uint32_t sb_newfs_time_lo;
-  uint32_t sb_jnl_blocks[17];       // Backup of journal inode
-  // 0x150
-  uint32_t sb_blocks_count_hi;
-  uint32_t sb_reserved_blocks_count_hi;
-  uint32_t sb_free_blocks_count_hi;
-  uint16_t sb_inode_size_extra_min;
-  uint16_t sb_inode_size_extra_want;
-  // 0x160
-  uint32_t sb_flags;
-  uint16_t sb_raid_stride_block_count;
-  uint16_t sb_mmp_interval;
-  uint64_t sb_mmp_block;
-  // 0x170
-  uint32_t sb_raid_stripe_width_block_count;
-  uint8_t  sb_log_groups_per_flex;
-  uint8_t  sb_checksum_type;
-  uint16_t sb_reserved_176;
-  uint64_t sb_kilobytes_written;
-  // 0x180
-  uint32_t sb_ext3_snapshot_inode;
-  uint32_t sb_ext3_snapshot_id;
-  uint64_t sb_ext3_snapshot_reserved_blocks_count;
-  // 0x190
-  uint32_t sb_ext3_snapshot_list;
-  uint32_t sb_error_count;
-  uint32_t sb_first_error_time_lo;
-  uint32_t sb_first_error_inode;
-  // 0x1A0
-  uint64_t sb_first_error_block;
-  char     sb_first_error_function[EXT4FS_FUNCTION_MAX];
-  uint32_t sb_first_error_line;
-  uint32_t sb_last_error_time_lo;
-  // 0x1D0
-  uint32_t sb_last_error_inode;
-  uint32_t sb_last_error_line;
-  uint64_t sb_last_error_block;
-  // 0x1E0
-  char     sb_last_error_function[EXT4FS_FUNCTION_MAX];
-  // 0x200
-  char     sb_mount_opts[EXT4FS_MOUNT_OPTS_MAX];
-  // 0x240
-  uint32_t sb_user_quota_inode;
-  uint32_t sb_group_quota_inode;
-  uint32_t sb_overhead_clusters;
-  uint32_t sb_backup_block_groups[2];
-  uint8_t  sb_encrypt_algos[4];
-  uint8_t  sb_encrypt_pw_salt[16];
-  uint32_t sb_lost_and_found_inode;
-  uint32_t sb_project_quota_inode;
-  // 0x270
-  uint32_t sb_checksum_seed;
-  uint8_t  sb_write_time_hi;
-  uint8_t  sb_mount_time_hi;
-  uint8_t  sb_newfs_time_hi;
-  uint8_t  sb_check_time_hi;
-  uint8_t  sb_first_error_time_hi;
-  uint8_t  sb_last_error_time_hi;
-  uint8_t  sb_first_error_code;
-  uint8_t  sb_last_error_code;
-  uint16_t sb_encoding;
-  uint16_t sb_encoding_flags;
-  // 0x280
-  uint16_t sb_orphan_file_inode;
-  uint16_t sb_reserved_284;
-  uint32_t sb_reserved_288[94];
-  uint32_t sb_checksum;
+struct ext4fs {
+	u_int32_t	sb_inodes_count;
+	u_int32_t	sb_blocks_count_lo;
+	u_int32_t	sb_reserved_blocks_count_lo;
+	u_int32_t	sb_free_blocks_count_lo;
+	// 0x10
+	u_int32_t	sb_free_inodes_count;
+	u_int32_t	sb_first_data_block;
+	u_int32_t	sb_log_block_size;	// log2(block size) - 10
+	u_int32_t	sb_log_cluster_size;	// log2(cluster size) - 10
+	// 0x20
+	u_int32_t	sb_blocks_per_group;
+	u_int32_t	sb_clusters_per_group;
+	u_int32_t	sb_inodes_per_group;
+	u_int32_t	sb_mount_time_lo;
+	// 0x30
+	u_int32_t	sb_write_time_lo;
+	u_int16_t	sb_mount_count;
+	int16_t		sb_max_mount_count_before_fsck;
+	u_int16_t	sb_magic;
+	u_int16_t	sb_state;		// EXT4FS_STATE_*
+	u_int16_t	sb_errors;		// EXT4FS_ERRORS_*
+	u_int16_t	sb_revision_level_minor;
+	// 0x40
+	u_int32_t	sb_check_time_lo;
+	u_int32_t	sb_check_interval;
+	u_int32_t	sb_creator_os;		// EXT4FS_OS_*
+	u_int32_t	sb_revision_level;
+	// 0x50
+	u_int16_t	sb_default_reserved_uid;
+	u_int16_t	sb_default_reserved_gid;
+	u_int32_t	sb_first_non_reserved_inode;
+	u_int16_t	sb_inode_size;
+	u_int16_t	sb_block_group_id;
+	u_int32_t	sb_feature_compat;
+	// 0x60
+	u_int32_t	sb_feature_incompat;
+	u_int32_t	sb_feature_ro_compat;
+	u_int8_t	sb_uuid[16];
+	char		sb_volume_name[EXT4FS_VOLUME_NAME_MAX];
+	char		sb_last_mounted[EXT4FS_LAST_MOUNTED_MAX];
+	u_int32_t	sb_algorithm_usage_bitmap;
+	u_int8_t	sb_preallocate_blocks;
+	u_int8_t	sb_preallocate_dir_blocks;
+	u_int16_t	sb_reserved_bgdt_blocks;
+	// 0xD0
+	u_int8_t	sb_journal_uuid[16];     // UUID of journal superblock
+	// 0xE0
+	u_int32_t	sb_journal_inode_number;
+	u_int32_t	sb_journal_device_number;
+	u_int32_t	sb_last_orphan;
+	u_int32_t	sb_hash_seed[4];
+	u_int8_t	sb_default_hash_version;
+	u_int8_t	sb_journal_backup_type;
+	u_int16_t	sb_block_group_descriptor_size;
+	// 0x100
+	u_int32_t	sb_default_mount_opts;
+	u_int32_t	sb_first_meta_block_group;
+	u_int32_t	sb_newfs_time_lo;
+	u_int32_t	sb_jnl_blocks[17];       // Backup of journal inode
+	// 0x150
+	u_int32_t	sb_blocks_count_hi;
+	u_int32_t	sb_reserved_blocks_count_hi;
+	u_int32_t	sb_free_blocks_count_hi;
+	u_int16_t	sb_inode_size_extra_min;
+	u_int16_t	sb_inode_size_extra_want;
+	// 0x160
+	u_int32_t	sb_flags;
+	u_int16_t	sb_raid_stride_block_count;
+	u_int16_t	sb_mmp_interval;
+	u_int64_t	sb_mmp_block;
+	// 0x170
+	u_int32_t	sb_raid_stripe_width_block_count;
+	u_int8_t	sb_log_groups_per_flex;
+	u_int8_t	sb_checksum_type;
+	u_int16_t	sb_reserved_176;
+	u_int64_t	sb_kilobytes_written;
+	// 0x180
+	u_int32_t	sb_ext3_snapshot_inode;
+	u_int32_t	sb_ext3_snapshot_id;
+	u_int64_t	sb_ext3_snapshot_reserved_blocks_count;
+	// 0x190
+	u_int32_t	sb_ext3_snapshot_list;
+	u_int32_t	sb_error_count;
+	u_int32_t	sb_first_error_time_lo;
+	u_int32_t	sb_first_error_inode;
+	// 0x1A0
+	u_int64_t	sb_first_error_block;
+	char		sb_first_error_function[EXT4FS_FUNCTION_MAX];
+	u_int32_t	sb_first_error_line;
+	u_int32_t	sb_last_error_time_lo;
+	// 0x1D0
+	u_int32_t	sb_last_error_inode;
+	u_int32_t	sb_last_error_line;
+	u_int64_t	sb_last_error_block;
+	// 0x1E0
+	char		sb_last_error_function[EXT4FS_FUNCTION_MAX];
+	// 0x200
+	char		sb_mount_opts[EXT4FS_MOUNT_OPTS_MAX];
+	// 0x240
+	u_int32_t	sb_user_quota_inode;
+	u_int32_t	sb_group_quota_inode;
+	u_int32_t	sb_overhead_clusters;
+	u_int32_t	sb_backup_block_groups[2];
+	u_int8_t	sb_encrypt_algos[4];
+	u_int8_t	sb_encrypt_pw_salt[16];
+	u_int32_t	sb_lost_and_found_inode;
+	u_int32_t	sb_project_quota_inode;
+	// 0x270
+	u_int32_t	sb_checksum_seed;
+	u_int8_t	sb_write_time_hi;
+	u_int8_t	sb_mount_time_hi;
+	u_int8_t	sb_newfs_time_hi;
+	u_int8_t	sb_check_time_hi;
+	u_int8_t	sb_first_error_time_hi;
+	u_int8_t	sb_last_error_time_hi;
+	u_int8_t	sb_first_error_code;
+	u_int8_t	sb_last_error_code;
+	u_int16_t	sb_encoding;
+	u_int16_t	sb_encoding_flags;
+	// 0x280
+	u_int16_t	sb_orphan_file_inode;
+	u_int16_t	sb_reserved_284;
+	u_int32_t	sb_reserved_288[94];
+	u_int32_t	sb_checksum;
 } __attribute__((packed));
 
+struct m_ext4fs {
+	struct ext4fs	m_sble;
+	u_int32_t	m_inodes_count;
+	u_int64_t	m_blocks_count;
+	u_int64_t	m_reserved_blocks_count;
+	u_int64_t	m_free_blocks_count;
+	u_int32_t	m_free_inodes_count;
+	u_int32_t	m_first_data_block;
+	u_int32_t	m_log_block_size;       // log2(block size) - 10
+	u_int32_t	m_log_cluster_size;     // log2(cluster size) - 10
+	u_int32_t	m_blocks_per_group;
+	u_int32_t	m_clusters_per_group;
+	u_int32_t	m_inodes_per_group;
+	u_int64_t	m_mount_time;
+	u_int32_t	m_write_time;
+	u_int16_t	m_mount_count;
+	int16_t		m_max_mount_count_before_fsck;
+	u_int16_t	m_state;                // EXT4FS_STATE_*
+	u_int16_t	m_errors;               // EXT4FS_ERRORS_*
+	u_int16_t	m_revision_level_minor;
+	u_int64_t	m_check_time;
+	u_int32_t	m_check_interval;
+	u_int32_t	m_creator_os;           // EXT4FS_OS_*
+	u_int32_t	m_revision_level;
+	u_int16_t	m_default_reserved_uid;
+	u_int16_t	m_default_reserved_gid;
+	u_int32_t	m_first_non_reserved_inode;
+	u_int16_t	m_inode_size;
+	u_int16_t	m_block_group_id;
+	u_int32_t	m_feature_compat;
+	u_int32_t	m_feature_incompat;
+	u_int32_t	m_feature_ro_compat;
+	u_int32_t	m_algorithm_usage_bitmap;
+	u_int16_t	m_reserved_bgdt_blocks;
+	u_int32_t	m_journal_inode_number;
+	u_int32_t	m_journal_device_number;
+	u_int32_t	m_last_orphan;
+	u_int16_t	m_block_group_descriptor_size;
+	u_int32_t	m_default_mount_opts;
+	u_int32_t	m_first_meta_block_group;
+	u_int64_t	m_newfs_time;
+	u_int16_t	m_inode_size_extra_min;
+	u_int16_t	m_inode_size_extra_want;
+	u_int32_t	m_flags;
+	u_int16_t	m_raid_stride_block_count;
+	u_int16_t	m_mmp_interval;
+	u_int64_t	m_mmp_block;
+	u_int32_t	m_raid_stripe_width_block_count;
+	u_int64_t	m_kilobytes_written;
+	u_int32_t	m_error_count;
+	u_int64_t	m_first_error_time;
+	u_int32_t	m_first_error_inode;
+	u_int64_t	m_first_error_block;
+	u_int32_t	m_first_error_line;
+	u_int64_t	m_last_error_time;
+	u_int32_t	m_last_error_inode;
+	u_int32_t	m_last_error_line;
+	u_int64_t	m_last_error_block;
+	u_int32_t	m_user_quota_inode;
+	u_int32_t	m_group_quota_inode;
+	u_int32_t	m_overhead_clusters;
+	u_int32_t	m_backup_block_groups[2];
+	u_int32_t	m_lost_and_found_inode;
+	u_int32_t	m_project_quota_inode;
+	u_int32_t	m_checksum_seed;
+	u_int16_t	m_encoding;
+	u_int16_t	m_encoding_flags;
+	u_int16_t	m_orphan_file_inode;
+	int		m_read_only;
+	int		m_fs_was_modified;
+	u_int64_t	m_block_size;
+	int		m_fsbtodb;
+};
+
 struct ext4fs_block_group_descriptor {
-  uint32_t bgd_block_bitmap_block_lo;
-  uint32_t bgd_inode_bitmap_block_lo;
-  uint32_t bgd_inode_table_block_lo;
-  uint16_t bgd_free_blocks_count_lo;
-  uint16_t bgd_free_inodes_count_lo;
+  u_int32_t bgd_block_bitmap_block_lo;
+  u_int32_t bgd_inode_bitmap_block_lo;
+  u_int32_t bgd_inode_table_block_lo;
+  u_int16_t bgd_free_blocks_count_lo;
+  u_int16_t bgd_free_inodes_count_lo;
   // 0x10
-  uint16_t bgd_used_dirs_count_lo;
-  uint16_t bgd_flags;
-  uint32_t bgd_exclude_bitmap_block_lo;
-  uint16_t bgd_block_bitmap_checksum_lo;
-  uint16_t bgd_inode_bitmap_checksum_lo;
-  uint16_t bgd_inode_table_unused_lo;
-  uint16_t bgd_checksum;
+  u_int16_t bgd_used_dirs_count_lo;
+  u_int16_t bgd_flags;
+  u_int32_t bgd_exclude_bitmap_block_lo;
+  u_int16_t bgd_block_bitmap_checksum_lo;
+  u_int16_t bgd_inode_bitmap_checksum_lo;
+  u_int16_t bgd_inode_table_unused_lo;
+  u_int16_t bgd_checksum;
   // 0x20
-  uint32_t bgd_block_bitmap_block_hi;
-  uint32_t bgd_inode_bitmap_block_hi;
-  uint32_t bgd_inode_table_block_hi;
-  uint16_t bgd_free_blocks_count_hi;
-  uint16_t bgd_free_inodes_count_hi;
+  u_int32_t bgd_block_bitmap_block_hi;
+  u_int32_t bgd_inode_bitmap_block_hi;
+  u_int32_t bgd_inode_table_block_hi;
+  u_int16_t bgd_free_blocks_count_hi;
+  u_int16_t bgd_free_inodes_count_hi;
   // 0x30
-  uint16_t bgd_used_dirs_count_hi;
-  uint16_t bgd_inode_table_unused_hi;
-  uint32_t bgd_exclude_bitmap_block_hi;
-  uint16_t bgd_block_bitmap_checksum_hi;
-  uint16_t bgd_inode_bitmap_checksum_hi;
-  uint32_t bgd_reserved_3c;
+  u_int16_t bgd_used_dirs_count_hi;
+  u_int16_t bgd_inode_table_unused_hi;
+  u_int32_t bgd_exclude_bitmap_block_hi;
+  u_int16_t bgd_block_bitmap_checksum_hi;
+  u_int16_t bgd_inode_bitmap_checksum_hi;
+  u_int32_t bgd_reserved_3c;
   // 0x40
 } __attribute__((packed));
 
 #define EXT4FS_EXTENT_HEADER_MAGIC  0xF30A
 
 struct ext4fs_extent_header {
-  uint16_t eh_magic;
-  uint16_t eh_entries;
-  uint16_t eh_max;
-  uint16_t eh_depth;
-  uint32_t eh_generation;
+  u_int16_t eh_magic;
+  u_int16_t eh_entries;
+  u_int16_t eh_max;
+  u_int16_t eh_depth;
+  u_int32_t eh_generation;
 } __attribute__((packed));
 
 struct ext4fs_extent {
-  uint32_t e_block;
-  uint16_t e_len;
-  uint16_t e_start_hi;
-  uint32_t e_start_lo;
+  u_int32_t e_block;
+  u_int16_t e_len;
+  u_int16_t e_start_hi;
+  u_int32_t e_start_lo;
 } __attribute__((packed));
 
 struct ext4fs_extent_idx {
-  uint32_t ei_block;
-  uint32_t ei_leaf_lo;
-  uint16_t ei_leaf_hi;
-  uint16_t ei_unused;
+  u_int32_t ei_block;
+  u_int32_t ei_leaf_lo;
+  u_int16_t ei_leaf_hi;
+  u_int16_t ei_unused;
 } __attribute__((packed));
 
 struct ext4fs_inode {
-  uint16_t i_mode;
-  uint16_t i_uid_lo;
-  uint32_t i_size_lo;
-  uint32_t i_atime;
-  uint32_t i_ctime;
+  u_int16_t i_mode;
+  u_int16_t i_uid_lo;
+  u_int32_t i_size_lo;
+  u_int32_t i_atime;
+  u_int32_t i_ctime;
   // 0x10
-  uint32_t i_mtime;
-  uint32_t i_dtime;
-  uint16_t i_gid_lo;
-  uint16_t i_links_count;
-  uint32_t i_blocks_lo;
+  u_int32_t i_mtime;
+  u_int32_t i_dtime;
+  u_int16_t i_gid_lo;
+  u_int16_t i_links_count;
+  u_int32_t i_blocks_lo;
   // 0x20
-  uint32_t i_flags;
-  uint32_t i_version;
+  u_int32_t i_flags;
+  u_int32_t i_version;
   union {
-    uint32_t i_block[15];
+    u_int32_t i_block[15];
     struct {
       struct ext4fs_extent_header i_extent_header;
       union {
@@ -360,37 +453,75 @@ struct ext4fs_inode {
       };
     };
   };
-  uint32_t i_nfs_generation;
-  uint32_t i_extended_attributes_lo;
-  uint32_t i_size_hi;
+  u_int32_t i_nfs_generation;
+  u_int32_t i_extended_attributes_lo;
+  u_int32_t i_size_hi;
   // 0x70
-  uint32_t i_fragment_address;
-  uint16_t i_blocks_hi;
-  uint16_t i_extended_attributes_hi;
-  uint16_t i_uid_hi;
-  uint16_t i_gid_hi;
-  uint16_t i_checksum_lo;
-  uint16_t i_reserved_7e;
+  u_int32_t i_fragment_address;
+  u_int16_t i_blocks_hi;
+  u_int16_t i_extended_attributes_hi;
+  u_int16_t i_uid_hi;
+  u_int16_t i_gid_hi;
+  u_int16_t i_checksum_lo;
+  u_int16_t i_reserved_7e;
   // 0x80
-  uint16_t i_extra_isize;
-  uint16_t i_checksum_hi;
-  uint32_t i_ctime_extra;
-  uint32_t i_mtime_extra;
-  uint32_t i_atime_extra;
+  u_int16_t i_extra_isize;
+  u_int16_t i_checksum_hi;
+  u_int32_t i_ctime_extra;
+  u_int32_t i_mtime_extra;
+  u_int32_t i_atime_extra;
   // 0x90
-  uint32_t i_crtime;
-  uint32_t i_crtime_extra;
-  uint32_t i_version_hi;
-  uint32_t i_project_id;
+  u_int32_t i_crtime;
+  u_int32_t i_crtime_extra;
+  u_int32_t i_version_hi;
+  u_int32_t i_project_id;
   // 0xA0
 } __attribute__((packed));
 
 struct ext4fs_inode_256 {
   struct ext4fs_inode inode;
-  uint8_t extended_attributes[256 - sizeof(struct ext4fs_inode)];
+  u_int8_t extended_attributes[256 - sizeof(struct ext4fs_inode)];
 };
 
-#define EXT4FS_EXTENT_DEPTH_MAX 5
+struct ext4fs_feature {
+	int mask;
+	const char *name;
+};
+
+static const struct ext4fs_feature ext4fs_feature_incompat[] = {
+  {EXT4FS_FEATURE_INCOMPAT_COMPRESSION, "compression"},
+  {EXT4FS_FEATURE_INCOMPAT_FILETYPE,    "filetype"},
+  {EXT4FS_FEATURE_INCOMPAT_RECOVER,     "recover"},
+  {EXT4FS_FEATURE_INCOMPAT_JOURNAL_DEV, "journal_dev"},
+  {EXT4FS_FEATURE_INCOMPAT_META_BG,     "meta_bg"},
+  {EXT4FS_FEATURE_INCOMPAT_EXTENTS,     "extents"},
+  {EXT4FS_FEATURE_INCOMPAT_64BIT,       "64bit"},
+  {EXT4FS_FEATURE_INCOMPAT_MMP,         "mmp"},
+  {EXT4FS_FEATURE_INCOMPAT_FLEX_BG,     "flex_bg"},
+  {EXT4FS_FEATURE_INCOMPAT_EA_INODE,    "ea_inode"},
+  {EXT4FS_FEATURE_INCOMPAT_DIRDATA,     "dirdata"},
+  {EXT4FS_FEATURE_INCOMPAT_CSUM_SEED,   "csum_seed"},
+  {EXT4FS_FEATURE_INCOMPAT_LARGEDIR,    "largedir"},
+  {EXT4FS_FEATURE_INCOMPAT_INLINE_DATA, "inline_data"},
+  {EXT4FS_FEATURE_INCOMPAT_ENCRYPT,     "encrypt"},
+};
+
+static const struct ext4fs_feature ext4fs_feature_ro_compat[] = {
+  {EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER,  "sparse-super"},
+  {EXT4FS_FEATURE_RO_COMPAT_LARGE_FILE,    "large-file"},
+  {EXT4FS_FEATURE_RO_COMPAT_BTREE_DIR,     "btree-dir"},
+  {EXT4FS_FEATURE_RO_COMPAT_HUGE_FILE,     "huge-file"},
+  {EXT4FS_FEATURE_RO_COMPAT_GDT_CSUM,      "gdt-csum"},
+  {EXT4FS_FEATURE_RO_COMPAT_DIR_NLINK,     "dir-nlink"},
+  {EXT4FS_FEATURE_RO_COMPAT_EXTRA_ISIZE,   "extra-isize"},
+  {EXT4FS_FEATURE_RO_COMPAT_HAS_SNAPSHOT,  "has-snapshot"},
+  {EXT4FS_FEATURE_RO_COMPAT_QUOTA,         "quota"},
+  {EXT4FS_FEATURE_RO_COMPAT_BIGALLOC,      "bigalloc"},
+  {EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM, "metadata-csum"},
+  {EXT4FS_FEATURE_RO_COMPAT_REPLICA,       "replica"},
+  {EXT4FS_FEATURE_RO_COMPAT_READONLY,      "readonly"},
+  {EXT4FS_FEATURE_RO_COMPAT_PROJECT,       "project"},
+};
 
 /* VFS operations */
 int ext4fs_fhtovp(struct mount *, struct fid *, struct vnode **);
