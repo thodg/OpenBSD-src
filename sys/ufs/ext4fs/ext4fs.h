@@ -484,8 +484,8 @@ struct ext4fs_inode_256 {
 };
 
 struct ext4fs_feature {
-	int mask;
-	const char *name;
+	int		f_mask;
+	const char *	f_name;
 };
 
 static const struct ext4fs_feature ext4fs_feature_incompat[] = {

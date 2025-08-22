@@ -69,8 +69,8 @@ const struct vfsops ext4fs_vfsops = {
 
 #define PRINTF_FEATURES(mask, features)				\
 	for (i = 0; i < nitems(features); i++)			\
-		if ((mask) & (features)[i].mask)		\
-			printf("%s ", (features)[i].name)
+		if ((mask) & (features)[i].f_mask)		\
+			printf("%s ", (features)[i].f_name)
 
 int
 ext4fs_sbcheck(struct ext4fs *sble, int ronly)
@@ -138,7 +138,7 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		~EXT4FS_FEATURE_RO_COMPAT_SUPPORTED;
 	if (!ronly && tmp) {
 		printf("ext4fs: unsupported R/O compat features: ");
-		PRINTF_FEATURES(mask, ext4fs_feature_ro_compat);
+		PRINTF_FEATURES(tmp, ext4fs_feature_ro_compat);
 		printf("\n");
 		return (EROFS);      /* XXX needs translation */
 	}
