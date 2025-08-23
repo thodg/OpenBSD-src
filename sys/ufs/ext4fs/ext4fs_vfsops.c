@@ -101,9 +101,16 @@ ext4fs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
 int
 ext4fs_init(struct vfsconf *vfsp)
 {
+	int result;
 	(void)vfsp;
 	pool_init(&ext4fs_inode_pool, sizeof(struct inode), 0,
 		  IPL_NONE, PR_WAITOK, "ext4inopl", NULL);
+	pool_init(&ext4fs_dinode_pool, sizeof(struct ext4fs_dinode), 0,
+		  IPL_NONE, PR_WAITOK, "ext4dinopl", NULL);
+	if ((result = ufs_init(vfsp))) {
+		printf("ext4fs_init: ufs_init: %d\n", result);
+		return result;
+	}
 	printf("ext4fs_init: OK\n");
 	return (0);
 }
@@ -152,6 +159,11 @@ ext4fs_mount(struct mount *mp, const char *path, void *data,
 		goto error_devvp;
 	ump = VFSTOUFS(mp);
 	mfs = ump->um_e4fs;
+
+	strlcpy(mp->mnt_stat.f_mntfromname, fname,
+		sizeof(mp->mnt_stat.f_mntfromname));
+	strlcpy(mp->mnt_stat.f_mntonname, path,
+		sizeof(mp->mnt_stat.f_mntonname));
 
 	goto success;
 
