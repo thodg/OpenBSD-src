@@ -76,11 +76,13 @@ struct inode {
 
 	union {			/* Associated filesystem. */
 		struct	fs *fs;			/* FFS */
-		struct  m_ext2fs *e2fs;		/* EXT2FS */
+		struct	m_ext2fs *e2fs;		/* EXT2FS */
+		struct	m_ext4fs *e4fs;		/* EXT4FS */
 	} inode_u;
 
 #define	i_fs	inode_u.fs
 #define	i_e2fs	inode_u.e2fs
+#define	i_e4fs	inode_u.e4fs
 
 	struct   cluster_info i_ci;
 	struct	 dquot *i_dquot[MAXQUOTAS]; /* Dquot structures. */
@@ -117,14 +119,16 @@ struct inode {
 	 * The on-disk dinode itself.
 	 */
 	union {
-		struct ufs1_dinode     *ffs1_din;
-		struct ufs2_dinode     *ffs2_din;
-		struct ext2fs_dinode   *e2fs_din;
+		struct ufs1_dinode	*ffs1_din;
+		struct ufs2_dinode	*ffs2_din;
+		struct ext2fs_dinode	*e2fs_din;
+		struct ext4fs_dinode	*e4fs_din;
 	} dinode_u;
 
 #define i_din1	dinode_u.ffs1_din
 #define i_din2	dinode_u.ffs2_din
 #define	i_e2din	dinode_u.e2fs_din
+#define	i_e4din	dinode_u.e4fs_din
 
 	struct inode_vtbl *i_vtbl;
 };
