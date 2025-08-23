@@ -33,14 +33,41 @@
 //#include <miscfs/specfs/specdev.h>
 //#include <miscfs/fifofs/fifo.h>
 
-//#include <ufs/ufs/quota.h>
-//#include <ufs/ufs/inode.h>
-//#include <ufs/ufs/dir.h>
-//#include <ufs/ufs/ufsmount.h>
+#include <ufs/ufs/quota.h>
+#include <ufs/ufs/inode.h>
+#include <ufs/ufs/dir.h>
+#include <ufs/ufs/ufsmount.h>
 #include <ufs/ufs/ufs_extern.h>
 
 #include <ufs/ext4fs/ext4fs.h>
-#include <ufs/ext4fs/ext4fs_extern.h>
+
+/* Stub implementations - all return EOPNOTSUPP for now */
+
+int ext4fs_lookup(void *);
+int ext4fs_create(void *);
+int ext4fs_mknod(void *);
+int ext4fs_open(void *);
+int ext4fs_access(void *);
+int ext4fs_getattr(void *);
+int ext4fs_setattr(void *);
+int ext4fs_read(void *);
+int ext4fs_write(void *);
+int ext4fs_fsync(void *);
+int ext4fs_remove(void *);
+int ext4fs_link(void *);
+int ext4fs_rename(void *);
+int ext4fs_mkdir(void *);
+int ext4fs_rmdir(void *);
+int ext4fs_symlink(void *);
+int ext4fs_readdir(void *);
+int ext4fs_readlink(void *);
+int ext4fs_inactive(void *);
+int ext4fs_reclaim(void *);
+int ext4fs_bmap(void *);
+int ext4fs_strategy(void *);
+int ext4fs_print(void *);
+int ext4fs_pathconf(void *);
+int ext4fs_advlock(void *);
 
 const struct vops ext4fs_vops = {
 	.vop_lookup	= ext4fs_lookup,
