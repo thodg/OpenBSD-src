@@ -28,6 +28,7 @@ struct vfsconf;
 #define EXT4FS_REV_DYNAMIC		1
 #define EXT4FS_REV_MINOR		0
 #define EXT4FS_LAST_MOUNTED_MAX		64
+#define EXT4FS_LOG_MIN_BLOCK_SIZE	10
 #define EXT4FS_MAGIC			0xEF53
 #define EXT4FS_MOUNT_OPTS_MAX		64
 #define EXT4FS_SUPER_BLOCK_OFFSET	1024
@@ -306,7 +307,9 @@ struct ext4fs {
 } __attribute__((packed));
 
 struct m_ext4fs {
+	/* little-endian super-block */
 	struct ext4fs	m_sble;
+	/* computed from little-endian super-block */
 	u_int32_t	m_inodes_count;
 	u_int64_t	m_blocks_count;
 	u_int64_t	m_reserved_blocks_count;
@@ -375,8 +378,14 @@ struct m_ext4fs {
 	u_int16_t	m_orphan_file_inode;
 	int		m_read_only;
 	int		m_fs_was_modified;
+	/* computed by ext4fs_sbfill */
+	u_int64_t       m_block_group_descriptor_blocks_count;
+	u_int64_t	m_block_group_count;
 	u_int64_t	m_block_size;
-	int		m_fsbtodb;
+	u_int64_t	m_block_size_shift;
+	u_int32_t	m_fs_block_to_disk_block;
+	u_int32_t	m_inodes_per_block;
+	u_int32_t	m_inode_table_blocks_per_group;
 };
 
 struct ext4fs_block_group_descriptor {
