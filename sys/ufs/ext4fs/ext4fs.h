@@ -442,7 +442,7 @@ struct ext4fs_extent_idx {
   u_int16_t ei_unused;
 } __attribute__((packed));
 
-struct ext4fs_inode {
+struct ext4fs_dinode {
   u_int16_t i_mode;
   u_int16_t i_uid_lo;
   u_int32_t i_size_lo;
@@ -492,9 +492,9 @@ struct ext4fs_inode {
   // 0xA0
 } __attribute__((packed));
 
-struct ext4fs_inode_256 {
-  struct ext4fs_inode inode;
-  u_int8_t extended_attributes[256 - sizeof(struct ext4fs_inode)];
+struct ext4fs_dinode_256 {
+  struct ext4fs_dinode dinode;
+  u_int8_t extended_attributes[256 - sizeof(struct ext4fs_dinode)];
 };
 
 struct ext4fs_feature {
@@ -550,3 +550,31 @@ int ext4fs_sysctl(int *, u_int, void *, size_t *, void *, size_t,
 int ext4fs_unmount(struct mount *, int, struct proc *);
 int ext4fs_vget(struct mount *, ino_t, struct vnode **);
 int ext4fs_vptofh(struct vnode *, struct fid *);
+
+/* VNode operations */
+
+int ext4fs_lookup(void *);
+int ext4fs_create(void *);
+int ext4fs_mknod(void *);
+int ext4fs_open(void *);
+int ext4fs_access(void *);
+int ext4fs_getattr(void *);
+int ext4fs_setattr(void *);
+int ext4fs_read(void *);
+int ext4fs_write(void *);
+int ext4fs_fsync(void *);
+int ext4fs_remove(void *);
+int ext4fs_link(void *);
+int ext4fs_rename(void *);
+int ext4fs_mkdir(void *);
+int ext4fs_rmdir(void *);
+int ext4fs_symlink(void *);
+int ext4fs_readdir(void *);
+int ext4fs_readlink(void *);
+int ext4fs_inactive(void *);
+int ext4fs_reclaim(void *);
+int ext4fs_bmap(void *);
+int ext4fs_strategy(void *);
+int ext4fs_print(void *);
+int ext4fs_pathconf(void *);
+int ext4fs_advlock(void *);
