@@ -39,17 +39,16 @@
 
 #include <ufs/ext4fs/ext4fs.h>
 
-int
-ext4fs_mountfs(struct vnode *, struct mount *, struct proc *);
+#define PRINTF_FEATURES(mask, features)				\
+	for (i = 0; i < nitems(features); i++)			\
+		if ((mask) & (features)[i].f_mask)		\
+			printf("%s ", (features)[i].f_name)
 
-int
-ext4fs_sbcheck(struct ext4fs *, int);
-
-void
-ext4fs_sbload(struct ext4fs *, struct m_ext4fs *);
-
-int
-ext4fs_sbfill(struct vnode *, struct m_ext4fs *);
+int	ext4fs_block_group_has_super_block(int);
+int	ext4fs_mountfs(struct vnode *, struct mount *, struct proc *);
+int	ext4fs_sbcheck(struct ext4fs *, int);
+void	ext4fs_sbload(struct ext4fs *, struct m_ext4fs *);
+int	ext4fs_sbfill(struct vnode *, struct m_ext4fs *);
 
 const struct vfsops ext4fs_vfsops = {
 	.vfs_mount	= ext4fs_mount,
@@ -67,83 +66,19 @@ const struct vfsops ext4fs_vfsops = {
 	.vfs_checkexp	= ufs_check_export,
 };
 
-#define PRINTF_FEATURES(mask, features)				\
-	for (i = 0; i < nitems(features); i++)			\
-		if ((mask) & (features)[i].f_mask)		\
-			printf("%s ", (features)[i].f_name)
-
 int
-ext4fs_sbcheck(struct ext4fs *sble, int ronly)
+ext4fs_block_group_has_super_block(int group)
 {
-	u_int32_t mask, tmp;
-	int i;
+	int a3, a5, a7;
 
-	tmp = letoh16(sble->sb_magic);
-	if (tmp != EXT4FS_MAGIC) {
-		printf("ext2fs: wrong magic number 0x%x\n", tmp);
-		return (EIO);		/* XXX needs translation */
-	}
-
-	tmp = letoh32(sble->sb_log_block_size);
-	if (tmp > 2) {
-		/* skewed log(block size): 1024 -> 0 | 2048 -> 1 | 4096 -> 2 */
-		tmp += 10;
-		printf("ext2fs: wrong log2(block size) %d\n", tmp);
-		return (EIO);	   /* XXX needs translation */
-	}
-
-	if (sble->sb_blocks_per_group == 0) {
-		printf("ext2fs: zero blocks per group\n");
-		return (EIO);
-	}
-
-	tmp = letoh32(sble->sb_revision_level);
-	if (tmp != EXT4FS_REV_DYNAMIC) {
-		printf("ext2fs: wrong revision number 0x%x\n", tmp);
-		return (EIO);		/* XXX needs translation */
-	}
-	/*
-	else if (tmp == E2FS_REV0)
-		return (0);
-	*/
-
-	tmp = letoh32(sble->sb_first_non_reserved_inode);
-	if (tmp != EXT4FS_INODE_FIRST) {
-		printf("ext4fs: first inode at 0x%x\n", tmp);
-		return (EINVAL);      /* XXX needs translation */
-	}
-
-	tmp = letoh32(sble->sb_feature_incompat);
-	mask = tmp & ~EXT4FS_FEATURE_INCOMPAT_SUPPORTED;
-	if (mask) {
-		printf("ext4fs: unsupported incompat features: ");
-		PRINTF_FEATURES(mask, ext4fs_feature_incompat);
-		printf("\n");
-		return (EINVAL);      /* XXX needs translation */
-	}
-
-	if (!ronly && (tmp & EXT4FS_FEATURE_RO_COMPAT_SUPPORTED)) {
-		printf("ext4fs: only read-only support right now\n");
-		return (EROFS);      /* XXX needs translation */
-	}
-
-	if (tmp & EXT4FS_FEATURE_INCOMPAT_RECOVER) {
-		printf("ext4fs: your file system says it needs"
-		       " recovery\n");
-		if (!ronly)
-			return (EROFS);	/* XXX needs translation */
-	}
-
-	tmp = letoh32(sble->sb_feature_ro_compat) &
-		~EXT4FS_FEATURE_RO_COMPAT_SUPPORTED;
-	if (!ronly && tmp) {
-		printf("ext4fs: unsupported R/O compat features: ");
-		PRINTF_FEATURES(tmp, ext4fs_feature_ro_compat);
-		printf("\n");
-		return (EROFS);      /* XXX needs translation */
-	}
-
-	return (0);
+	if (group == 0 || group == 1)
+		return 1;
+	for (a3 = 3, a5 = 5, a7 = 7;
+	    a3 <= group || a5 <= group || a7 <= group;
+	    a3 *= 3, a5 *= 5, a7 *= 7)
+		if (group == a3 || group == a5 || group == a7)
+			return 1;
+	return 0;
 }
 
 int
@@ -309,7 +244,7 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	ump->um_dev = dev;
 	ump->um_devvp = devvp;
 	ump->um_nindir = EXT4FS_NINDIR(mfs);
-	ump->um_bptrtodb = mfs->m_fsbtodb;
+	ump->um_bptrtodb = mfs->m_fs_block_to_disk_block;
 	ump->um_seqinc = 1; /* no frags */
 	ump->um_maxsymlinklen = EXT4FS_SYMLINK_LEN_MAX;
 	devvp->v_specmountpoint = mp;
@@ -331,76 +266,109 @@ out:
 }
 
 int
-ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
+ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 {
-	printf("ext4fs_sbfill: OK");
+	u_int32_t mask, tmp;
+	int i;
+
+	tmp = letoh16(sble->sb_magic);
+	if (tmp != EXT4FS_MAGIC) {
+		printf("ext2fs: wrong magic number 0x%x\n", tmp);
+		return (EIO);		/* XXX needs translation */
+	}
+
+	tmp = letoh32(sble->sb_log_block_size);
+	if (tmp > 2) {
+		/* skewed log(block size): 1024 -> 0 | 2048 -> 1 | 4096 -> 2 */
+		tmp += 10;
+		printf("ext2fs: wrong log2(block size) %d\n", tmp);
+		return (EIO);	   /* XXX needs translation */
+	}
+
+	if (sble->sb_blocks_per_group == 0) {
+		printf("ext2fs: zero blocks per group\n");
+		return (EIO);
+	}
+
+	tmp = letoh32(sble->sb_revision_level);
+	if (tmp != EXT4FS_REV_DYNAMIC) {
+		printf("ext2fs: wrong revision number 0x%x\n", tmp);
+		return (EIO);		/* XXX needs translation */
+	}
+	/*
+	else if (tmp == E2FS_REV0)
+		return (0);
+	*/
+
+	tmp = letoh32(sble->sb_first_non_reserved_inode);
+	if (tmp != EXT4FS_INODE_FIRST) {
+		printf("ext4fs: first inode at 0x%x\n", tmp);
+		return (EINVAL);      /* XXX needs translation */
+	}
+
+	tmp = letoh32(sble->sb_block_group_descriptor_size);
+	if (tmp != sizeof(struct ext4fs_block_group_descriptor)) {
+		printf("ext4fs: block group descriptor size is 0x%x\n",
+		       tmp);
+		return (EINVAL);
+	}
+
+	tmp = letoh32(sble->sb_feature_incompat);
+	mask = tmp & ~EXT4FS_FEATURE_INCOMPAT_SUPPORTED;
+	if (mask) {
+		printf("ext4fs: unsupported incompat features: ");
+		PRINTF_FEATURES(mask, ext4fs_feature_incompat);
+		printf("\n");
+		return (EINVAL);      /* XXX needs translation */
+	}
+
+	if (!ronly && (tmp & EXT4FS_FEATURE_RO_COMPAT_SUPPORTED)) {
+		printf("ext4fs: only read-only support right now\n");
+		return (EROFS);      /* XXX needs translation */
+	}
+
+	if (tmp & EXT4FS_FEATURE_INCOMPAT_RECOVER) {
+		printf("ext4fs: your file system says it needs"
+		       " recovery\n");
+		if (!ronly)
+			return (EROFS);	/* XXX needs translation */
+	}
+
+	tmp = letoh32(sble->sb_feature_ro_compat) &
+		~EXT4FS_FEATURE_RO_COMPAT_SUPPORTED;
+	if (!ronly && tmp) {
+		printf("ext4fs: unsupported R/O compat features: ");
+		PRINTF_FEATURES(tmp, ext4fs_feature_ro_compat);
+		printf("\n");
+		return (EROFS);      /* XXX needs translation */
+	}
+
 	return (0);
 }
 
 int
-ext4fs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
+ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 {
-	(void)mp;
-	(void)sbp;
-	(void)p;
-	printf("ext4fs_statfs: not implemented\n");
-	return (EOPNOTSUPP);
-}
+	(void)devvp;
 
-int
-ext4fs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred, struct proc *p)
-{
-	(void)mp;
-	(void)waitfor;
-	(void)stall;
-	(void)cred;
-	(void)p;
-	printf("ext4fs_sync: not implemented\n");
-	return (EOPNOTSUPP);
-}
+	mfs->m_block_group_count = howmany(mfs->m_blocks_count -
+					   mfs->m_first_data_block,
+					   mfs->m_blocks_per_group);
 
-int
-ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
-    void *newp, size_t newlen, struct proc *p)
-{
-	(void)name;
-	(void)namelen;
-	(void)oldp;
-	(void)oldlenp;
-	(void)newp;
-	(void)newlen;
-	(void)p;
-	printf("ext4fs_sysctl: not implemented\n");
-	return (EOPNOTSUPP);
-}
+	mfs->m_block_size_shift = EXT4FS_LOG_MIN_BLOCK_SIZE +
+		mfs->m_log_block_size;
+	mfs->m_block_size = 1 << mfs->m_block_size_shift;
+	mfs->m_block_group_descriptor_blocks_count =
+		howmany(mfs->m_block_group_count,
+			mfs->m_block_size /
+			sizeof(struct ext4fs_block_group_descriptor));
+	mfs->m_fs_block_to_disk_block = mfs->m_log_block_size + 1;
+	mfs->m_inodes_per_block = mfs->m_block_size / mfs->m_inode_size;
+	mfs->m_inode_table_blocks_per_group = mfs->m_inodes_per_group /
+		mfs->m_inodes_per_block;
 
-int
-ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
-{
-	(void)mp;
-	(void)mntflags;
-	(void)p;
-	printf("ext4fs_unmount: not implemented\n");
-	return (EOPNOTSUPP);
-}
-
-int
-ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
-{
-	(void)mp;
-	(void)ino;
-	(void)vpp;
-	printf("ext4fs_vget: not implemented\n");
-	return (EOPNOTSUPP);
-}
-
-int
-ext4fs_vptofh(struct vnode *vp, struct fid *fhp)
-{
-	(void)vp;
-	(void)fhp;
-	printf("ext4fs_vptofh: not implemented\n");
-	return (EOPNOTSUPP);
+	printf("ext4fs_sbfill: OK\n");
+	return (0);
 }
 
 void
@@ -498,4 +466,104 @@ ext4fs_sbload(struct ext4fs *sble, struct m_ext4fs *dest)
 		dest->m_last_error_time |= (u_int64_t)
 			letoh32(sble->sb_last_error_time_hi) << 32;
 	}
+}
+
+int
+ext4fs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
+{
+	struct ufsmount *ump;
+	struct m_ext4fs *mfs;
+	const u_int32_t overhead_per_group_block_bitmap = 1;
+	const u_int32_t overhead_per_group_inode_bitmap = 1;
+	u_int32_t overhead, overhead_per_group;
+	int ngroups;
+
+	(void)p;
+	ump = VFSTOUFS(mp);
+	mfs = ump->um_e4fs;
+
+	overhead_per_group = overhead_per_group_block_bitmap +
+		overhead_per_group_inode_bitmap +
+		mfs->m_inode_table_blocks_per_group;
+	overhead = mfs->m_first_data_block +
+		mfs->m_block_group_count * overhead_per_group;
+	if (mfs->m_feature_ro_compat &
+	    EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER) {
+		int i;
+		for (i = 0, ngroups = 0; i < mfs->m_block_group_count; i++) {
+			if (ext4fs_block_group_has_super_block(i))
+				ngroups++;
+		}
+	} else {
+		ngroups = mfs->m_block_group_count;
+	}
+	overhead += ngroups *
+		(1 + mfs->m_block_group_descriptor_blocks_count);
+
+	sbp->f_bsize = mfs->m_block_size;
+	sbp->f_iosize = mfs->m_block_size;
+	sbp->f_blocks = mfs->m_blocks_count - overhead;
+	sbp->f_bfree = mfs->m_free_blocks_count;
+	sbp->f_bavail = sbp->f_bfree - mfs->m_reserved_blocks_count;
+	sbp->f_files = mfs->m_inodes_count;
+	sbp->f_favail = sbp->f_ffree = mfs->m_free_inodes_count;
+	copy_statfs_info(sbp, mp);
+
+	return (0);
+}
+
+int
+ext4fs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred, struct proc *p)
+{
+	(void)mp;
+	(void)waitfor;
+	(void)stall;
+	(void)cred;
+	(void)p;
+	printf("ext4fs_sync: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+    void *newp, size_t newlen, struct proc *p)
+{
+	(void)name;
+	(void)namelen;
+	(void)oldp;
+	(void)oldlenp;
+	(void)newp;
+	(void)newlen;
+	(void)p;
+	printf("ext4fs_sysctl: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
+{
+	(void)mp;
+	(void)mntflags;
+	(void)p;
+	printf("ext4fs_unmount: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
+{
+	(void)mp;
+	(void)ino;
+	(void)vpp;
+	printf("ext4fs_vget: not implemented\n");
+	return (EOPNOTSUPP);
+}
+
+int
+ext4fs_vptofh(struct vnode *vp, struct fid *fhp)
+{
+	(void)vp;
+	(void)fhp;
+	printf("ext4fs_vptofh: not implemented\n");
+	return (EOPNOTSUPP);
 }
