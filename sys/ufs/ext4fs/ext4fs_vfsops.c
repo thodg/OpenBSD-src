@@ -563,11 +563,36 @@ ext4fs_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
 int
 ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 {
-	(void)mp;
-	(void)mntflags;
-	(void)p;
-	printf("ext4fs_unmount: not implemented\n");
-	return (EOPNOTSUPP);
+	struct ufsmount *ump;
+	struct m_ext4fs *mfs;
+	int error, flags;
+
+	flags = 0;
+	if (mntflags & MNT_FORCE)
+		flags |= FORCECLOSE;
+
+	if ((error = vflush(mp, NULL, flags)) != 0)
+		return (error);
+
+	ump = VFSTOUFS(mp);
+	mfs = ump->um_e4fs;
+
+	if (!mfs->m_read_only && mfs->m_fs_was_modified) {
+		mfs->m_state = EXT4FS_STATE_VALID;
+	}
+
+	if (ump->um_devvp->v_type != VBAD)
+		ump->um_devvp->v_specmountpoint = NULL;
+	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
+	(void)VOP_CLOSE(ump->um_devvp, mfs->m_read_only ? FREAD : FREAD|FWRITE,
+	    NOCRED, p);
+	vput(ump->um_devvp);
+
+	free(mfs, M_UFSMNT, sizeof *mfs);
+	free(ump, M_UFSMNT, sizeof *ump);
+	mp->mnt_data = NULL;
+	mp->mnt_flag &= ~MNT_LOCAL;
+	return (0);
 }
 
 int
