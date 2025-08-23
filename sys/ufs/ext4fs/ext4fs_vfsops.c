@@ -18,7 +18,7 @@
 #include <sys/vnode.h>
 //#include <sys/socket.h>
 #include <sys/mount.h>
-//#include <sys/buf.h>
+#include <sys/buf.h>
 #include <sys/disk.h>
 //#include <sys/mbuf.h>
 #include <sys/fcntl.h>
@@ -26,8 +26,9 @@
 //#include <sys/ioctl.h>
 #include <sys/errno.h>
 #include <sys/malloc.h>
-//#include <sys/pool.h>
-//#include <sys/lock.h>
+#include <sys/pool.h>
+#include <sys/rwlock.h>
+#include <sys/stat.h>
 #include <sys/dkio.h>
 #include <sys/specdev.h>
 
@@ -38,6 +39,10 @@
 #include <ufs/ufs/ufs_extern.h>
 
 #include <ufs/ext4fs/ext4fs.h>
+#include <ufs/ext4fs/ext4fs_extern.h>
+
+struct pool ext4fs_inode_pool;
+struct pool ext4fs_dinode_pool;
 
 #define PRINTF_FEATURES(mask, features)				\
 	for (i = 0; i < nitems(features); i++)			\
@@ -65,6 +70,8 @@ const struct vfsops ext4fs_vfsops = {
 	.vfs_sysctl	= ext4fs_sysctl,
 	.vfs_checkexp	= ufs_check_export,
 };
+
+struct pool ext4fs_inode_pool;
 
 int
 ext4fs_block_group_has_super_block(int group)
@@ -95,6 +102,8 @@ int
 ext4fs_init(struct vfsconf *vfsp)
 {
 	(void)vfsp;
+	pool_init(&ext4fs_inode_pool, sizeof(struct inode), 0,
+		  IPL_NONE, PR_WAITOK, "ext4inopl", NULL);
 	printf("ext4fs_init: OK\n");
 	return (0);
 }
@@ -552,11 +561,129 @@ ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 int
 ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 {
-	(void)mp;
-	(void)ino;
-	(void)vpp;
-	printf("ext4fs_vget: not implemented\n");
-	return (EOPNOTSUPP);
+	struct m_ext4fs *fs;
+	struct inode *ip;
+	struct ufsmount *ump;
+	struct buf *bp;
+	struct vnode *vp;
+	dev_t dev;
+	int error;
+
+	if (ino > (ufsino_t)-1)
+		panic("ext4fs_vget: alien ino_t %llu",
+		    (unsigned long long)ino);
+
+	ump = VFSTOUFS(mp);
+	dev = ump->um_dev;
+	fs = ump->um_e4fs;
+
+ retry:
+	if ((*vpp = ufs_ihashget(dev, ino)) != NULL)
+		return (0);
+
+	/* Allocate a new vnode/inode. */
+	if ((error = getnewvnode(VT_EXT4FS, mp, &ext4fs_vops, &vp)) != 0) {
+		*vpp = NULL;
+		return (error);
+	}
+
+	ip = pool_get(&ext4fs_inode_pool, PR_WAITOK|PR_ZERO);
+	rrw_init_flags(&ip->i_lock, "inode", RWL_DUPOK | RWL_IS_VNODE);
+	vp->v_data = ip;
+	ip->i_vnode = vp;
+	ip->i_ump = ump;
+	ip->i_e4fs = fs;
+	ip->i_dev = dev;
+	ip->i_number = ino;
+
+	/*
+	 * Put it onto its hash chain and lock it so that other requests for
+	 * this inode will block if they arrive while we are sleeping waiting
+	 * for old data structures to be purged or for the contents of the
+	 * disk portion of this inode to be read.
+	 */
+	error = ufs_ihashins(ip);
+
+	if (error) {
+		vrele(vp);
+
+		if (error == EEXIST)
+			goto retry;
+
+		return (error);
+	}
+
+	/* Calculate inode location on disk */
+	u_int32_t inode_group = (ino - 1) / fs->m_inodes_per_group;
+	u_int32_t inode_index = (ino - 1) % fs->m_inodes_per_group;
+	u_int32_t inode_table_block = inode_group * fs->m_inode_table_blocks_per_group;
+	u_int32_t block_in_table = inode_index / fs->m_inodes_per_block;
+	u_int32_t offset_in_block = (inode_index % fs->m_inodes_per_block) * fs->m_inode_size;
+	
+	/* Read the block containing this inode */
+	daddr_t disk_block = (inode_table_block + block_in_table) << fs->m_fs_block_to_disk_block;
+	error = bread(ump->um_devvp, disk_block, fs->m_block_size, &bp);
+	if (error) {
+		/*
+		 * The inode does not contain anything useful, so it would
+		 * be misleading to leave it on its hash chain. With mode
+		 * still zero, it will be unlinked and returned to the free
+		 * list by vput().
+		 */
+		vput(vp);
+		brelse(bp);
+		*vpp = NULL;
+		return (error);
+	}
+
+	/* Get pointer to the inode within the block */
+	struct ext4fs_dinode *dp = (struct ext4fs_dinode *)((char *)bp->b_data + offset_in_block);
+	
+	/* Allocate space for on-disk inode and copy it */
+	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK);
+	memcpy(ip->i_e4din, dp, sizeof(struct ext4fs_dinode));
+	brelse(bp);
+
+	/* Set vnode type based on inode mode */
+	u_int16_t mode = letoh16(ip->i_e4din->i_mode);
+	switch (mode & S_IFMT) {
+	case S_IFDIR:
+		vp->v_type = VDIR;
+		break;
+	case S_IFREG:
+		vp->v_type = VREG;
+		break;
+	case S_IFLNK:
+		vp->v_type = VLNK;
+		break;
+	case S_IFBLK:
+		vp->v_type = VBLK;
+		break;
+	case S_IFCHR:
+		vp->v_type = VCHR;
+		break;
+	case S_IFIFO:
+		vp->v_type = VFIFO;
+		break;
+	case S_IFSOCK:
+		vp->v_type = VSOCK;
+		break;
+	default:
+		vp->v_type = VNON;
+		break;
+	}
+
+	/* Set effective link count */
+	ip->i_effnlink = letoh16(ip->i_e4din->i_links_count);
+	
+	/* If the inode was deleted, reset all fields */
+	if (letoh32(ip->i_e4din->i_dtime) != 0) {
+		vp->v_type = VNON;
+		ip->i_effnlink = 0;
+	}
+	
+	*vpp = vp;
+	return (0);
 }
 
 int
