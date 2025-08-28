@@ -182,9 +182,14 @@ ext4fs_write(void *v)
 int
 ext4fs_fsync(void *v)
 {
-	(void)v;
-	printf("ext4fs_fsync: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_fsync_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+
+	if (vp->v_mount->mnt_flag & MNT_RDONLY)
+		return (0);
+
+	vflushbuf(vp, ap->a_waitfor == MNT_WAIT);
+	return (0);
 }
 
 int
