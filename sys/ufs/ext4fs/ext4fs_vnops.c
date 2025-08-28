@@ -259,9 +259,20 @@ ext4fs_readlink(void *v)
 int
 ext4fs_inactive(void *v)
 {
-	(void)v;
-	printf("ext4fs_inactive: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_inactive_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	int error = 0;
+
+	/*
+	 * If we are done with the inode, reclaim it
+	 * so that it can be reused immediately.
+	 */
+	if (ip->i_e4din != NULL && letoh32(ip->i_e4din->i_dtime) != 0)
+		vrecycle(vp, ap->a_p);
+
+	VOP_UNLOCK(vp);
+	return (error);
 }
 
 int
