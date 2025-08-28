@@ -102,7 +102,7 @@ ext4fs_fhtovp(struct mount *mp, struct fid *fhp, struct vnode **vpp)
  * Flush out all the files in a filesystem.
  */
 int
-ext2fs_flushfiles(struct mount *mp, int flags, struct proc *p)
+ext4fs_flushfiles(struct mount *mp, int flags, struct proc *p)
 {
 	struct ufsmount *ump;
 	int error;
@@ -116,9 +116,9 @@ ext2fs_flushfiles(struct mount *mp, int flags, struct proc *p)
 	/*
 	 * Flush filesystem metadata.
 	 */
-	//vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
+	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
 	error = VOP_FSYNC(ump->um_devvp, p->p_ucred, MNT_WAIT, p);
-	//VOP_UNLOCK(ump->um_devvp);
+	VOP_UNLOCK(ump->um_devvp);
 	return (error);
 }
 
@@ -228,9 +228,9 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 		return (error);
 	if (vcount(devvp) > 1 && devvp != rootvp)
 		return (EBUSY);
-	//vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+	vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
 	error = vinvalbuf(devvp, V_SAVE, cred, p, 0, INFSLP);
-	//VOP_UNLOCK(devvp);
+	VOP_UNLOCK(devvp);
 	if (error != 0)
 		return (error);
 
@@ -299,9 +299,9 @@ out:
 		devvp->v_specmountpoint = NULL;
 	if (bp)
 		brelse(bp);
-	//vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+	vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
 	(void)VOP_CLOSE(devvp, ronly ? FREAD : FREAD|FWRITE, cred, p);
-	//VOP_UNLOCK(devvp);
+	VOP_UNLOCK(devvp);
 	if (ump) {
 		free(mfs, M_UFSMNT, sizeof *mfs);
 		free(ump, M_UFSMNT, sizeof *ump);
@@ -605,7 +605,7 @@ ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 
 	if (ump->um_devvp->v_type != VBAD)
 		ump->um_devvp->v_specmountpoint = NULL;
-	//vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
+	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
 	(void)VOP_CLOSE(ump->um_devvp, mfs->m_read_only ? FREAD :
 			FREAD|FWRITE, NOCRED, p);
 	vput(ump->um_devvp);
