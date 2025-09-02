@@ -119,10 +119,10 @@ struct inode {
 	 * The on-disk dinode itself.
 	 */
 	union {
-		struct ufs1_dinode	*ffs1_din;
-		struct ufs2_dinode	*ffs2_din;
-		struct ext2fs_dinode	*e2fs_din;
-		struct ext4fs_dinode	*e4fs_din;
+		struct ufs1_dinode	 *ffs1_din;
+		struct ufs2_dinode	 *ffs2_din;
+		struct ext2fs_dinode	 *e2fs_din;
+		struct ext4fs_dinode_256 *e4fs_din;
 	} dinode_u;
 
 #define i_din1	dinode_u.ffs1_din
