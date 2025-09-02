@@ -129,7 +129,7 @@ ext4fs_init(struct vfsconf *vfsp)
 	(void)vfsp;
 	pool_init(&ext4fs_inode_pool, sizeof(struct inode), 0,
 		  IPL_NONE, PR_WAITOK, "ext4inopl", NULL);
-	pool_init(&ext4fs_dinode_pool, sizeof(struct ext4fs_dinode), 0,
+	pool_init(&ext4fs_dinode_pool, sizeof(struct ext4fs_dinode_256), 0,
 		  IPL_NONE, PR_WAITOK, "ext4dinopl", NULL);
 	if ((result = ufs_init(vfsp))) {
 		printf("ext4fs_init: ufs_init: %d\n", result);
@@ -340,10 +340,12 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		printf("ext2fs: wrong revision number 0x%x\n", tmp);
 		return (EIO);		/* XXX needs translation */
 	}
-	/*
-	else if (tmp == E2FS_REV0)
-		return (0);
-	*/
+
+	tmp = letoh16(sble->sb_inode_size);
+	if (tmp != 256) {
+		printf("ext4fs: unsupported inode size: %d\n", tmp);
+		return (EINVAL);
+	}
 
 	tmp = letoh32(sble->sb_first_non_reserved_inode);
 	if (tmp != EXT4FS_INODE_FIRST) {
@@ -591,11 +593,16 @@ ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	struct m_ext4fs *mfs;
 	int error, flags;
 
+	printf("ext4fs_unmount: starting unmount\n");
 	flags = 0;
 	if (mntflags & MNT_FORCE)
 		flags |= FORCECLOSE;
-	if ((error = ext4fs_flushfiles(mp, flags, p)) != 0)
+	printf("ext4fs_unmount: calling flushfiles\n");
+	if ((error = ext4fs_flushfiles(mp, flags, p)) != 0) {
+		printf("ext4fs_unmount: flushfiles failed with error %d\n", error);
 		return (error);
+	}
+	printf("ext4fs_unmount: flushfiles succeeded\n");
 	ump = VFSTOUFS(mp);
 	mfs = ump->um_e4fs;
 
@@ -606,9 +613,9 @@ ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	if (ump->um_devvp->v_type != VBAD)
 		ump->um_devvp->v_specmountpoint = NULL;
 	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
+	vinvalbuf(ump->um_devvp, V_SAVE, NOCRED, p, 0, INFSLP);
 	(void)VOP_CLOSE(ump->um_devvp, mfs->m_read_only ? FREAD :
 			FREAD|FWRITE, NOCRED, p);
-	vput(ump->um_devvp);
 	free(mfs, M_UFSMNT, sizeof *mfs);
 	free(ump, M_UFSMNT, sizeof *ump);
 	mp->mnt_data = NULL;
@@ -699,11 +706,11 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	
 	/* Allocate space for on-disk inode and copy it */
 	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK);
-	memcpy(ip->i_e4din, dp, sizeof(struct ext4fs_dinode));
+	memcpy(ip->i_e4din, dp, sizeof(struct ext4fs_dinode_256));
 	brelse(bp);
 
 	/* Set vnode type based on inode mode */
-	u_int16_t mode = letoh16(ip->i_e4din->i_mode);
+	u_int16_t mode = letoh16(ip->i_e4din->dinode.i_mode);
 	switch (mode & S_IFMT) {
 	case S_IFDIR:
 		vp->v_type = VDIR;
@@ -732,10 +739,14 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	}
 
 	/* Set effective link count */
-	ip->i_effnlink = letoh16(ip->i_e4din->i_links_count);
+	ip->i_effnlink = letoh16(ip->i_e4din->dinode.i_links_count);
+
+	/* Set VROOT flag for root inode */
+	if (ip->i_number == EXT4FS_INODE_ROOT_DIR)
+		vp->v_flag |= VROOT;
 	
 	/* If the inode was deleted, reset all fields */
-	if (letoh32(ip->i_e4din->i_dtime) != 0) {
+	if (letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
 		vp->v_type = VNON;
 		ip->i_effnlink = 0;
 	}

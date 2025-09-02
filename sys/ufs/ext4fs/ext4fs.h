@@ -537,6 +537,9 @@ static const struct ext4fs_feature ext4fs_feature_ro_compat[] = {
   {EXT4FS_FEATURE_RO_COMPAT_PROJECT,       "project"},
 };
 
+extern struct pool ext4fs_inode_pool;
+extern struct pool ext4fs_dinode_pool;
+
 /* VFS operations */
 int ext4fs_fhtovp(struct mount *, struct fid *, struct vnode **);
 int ext4fs_init(struct vfsconf *);

@@ -23,7 +23,7 @@
 #include <sys/mount.h>
 #include <sys/vnode.h>
 //#include <sys/malloc.h>
-//#include <sys/pool.h>
+#include <sys/pool.h>
 //#include <sys/dirent.h>
 //#include <sys/fcntl.h>
 //#include <sys/lockf.h>
@@ -150,9 +150,51 @@ ext4fs_access(void *v)
 int
 ext4fs_getattr(void *v)
 {
-	(void)v;
-	printf("ext4fs_getattr: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_getattr_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	struct ext4fs_dinode_256 *din = ip->i_e4din;
+	struct vattr *vap = ap->a_vap;
+
+	/* Copy from inode table */
+	vap->va_fsid = ip->i_dev;
+	vap->va_fileid = ip->i_number;
+	vap->va_mode = letoh16(din->dinode.i_mode) & ALLPERMS;
+	vap->va_nlink = letoh16(din->dinode.i_links_count);
+	vap->va_uid = letoh16(din->dinode.i_uid_lo);
+	vap->va_uid |= (uid_t)letoh16(din->dinode.i_uid_hi) << 16;
+	vap->va_gid = letoh16(din->dinode.i_gid_lo);
+	vap->va_gid |= (gid_t)letoh16(din->dinode.i_gid_hi) << 16;
+	vap->va_rdev = 0;
+	vap->va_size = letoh32(din->dinode.i_size_lo);
+	vap->va_size |= (off_t)letoh32(din->dinode.i_size_hi) << 32;
+
+	/* Convert timestamps with nanosecond precision */
+	vap->va_atime.tv_sec = letoh32(din->dinode.i_atime);
+	vap->va_atime.tv_nsec = letoh32(din->dinode.i_atime_extra) >> 2;
+	vap->va_mtime.tv_sec = letoh32(din->dinode.i_mtime);
+	vap->va_mtime.tv_nsec = letoh32(din->dinode.i_mtime_extra) >> 2;
+	vap->va_ctime.tv_sec = letoh32(din->dinode.i_ctime);
+	vap->va_ctime.tv_nsec = letoh32(din->dinode.i_ctime_extra) >> 2;
+
+	vap->va_flags = 0;
+	vap->va_gen = letoh32(din->dinode.i_nfs_generation);
+
+	/* Set appropriate block size */
+	if (vp->v_type == VBLK)
+		vap->va_blocksize = BLKDEV_IOSIZE;
+	else if (vp->v_type == VCHR)
+		vap->va_blocksize = MAXBSIZE;
+	else
+		vap->va_blocksize = vp->v_mount->mnt_stat.f_iosize;
+
+	vap->va_bytes = letoh32(din->dinode.i_blocks_lo);
+	vap->va_bytes |= (off_t)letoh16(din->dinode.i_blocks_hi) << 32;
+	vap->va_bytes *= VFSTOUFS(vp->v_mount)->um_e4fs->m_block_size;
+	vap->va_type = vp->v_type;
+	vap->va_filerev = 0;
+
+	return (0);
 }
 
 int
@@ -268,7 +310,7 @@ ext4fs_inactive(void *v)
 	 * If we are done with the inode, reclaim it
 	 * so that it can be reused immediately.
 	 */
-	if (ip->i_e4din != NULL && letoh32(ip->i_e4din->i_dtime) != 0)
+	if (ip->i_e4din != NULL && letoh32(ip->i_e4din->dinode.i_dtime) != 0)
 		vrecycle(vp, ap->a_p);
 
 	VOP_UNLOCK(vp);
@@ -278,9 +320,22 @@ ext4fs_inactive(void *v)
 int
 ext4fs_reclaim(void *v)
 {
-	(void)v;
-	printf("ext4fs_reclaim: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_reclaim_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	int error;
+
+	if ((error = ufs_reclaim(vp)) != 0)
+		return (error);
+
+	if (ip->i_e4din != NULL)
+		pool_put(&ext4fs_dinode_pool, ip->i_e4din);
+
+	pool_put(&ext4fs_inode_pool, ip);
+
+	vp->v_data = NULL;
+
+	return (0);
 }
 
 int
