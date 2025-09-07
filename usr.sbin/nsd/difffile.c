@@ -13,6 +13,7 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <inttypes.h>
 #include "difffile.h"
 #include "xfrd-disk.h"
 #include "util.h"
@@ -758,10 +759,10 @@ delete_RR(namedb_type* db, const dname_type* dname,
 					rrset->rr_count-1])
 					zone->nsec3_param = &rrset->rrs[rrnum];
 				else
-					zone->nsec3_param =
-						(void*)zone->nsec3_param
-						-(void*)rrs_orig +
-						(void*)rrset->rrs;
+					zone->nsec3_param = (void*)
+						((char*)zone->nsec3_param
+						-(char*)rrs_orig +
+						 (char*)rrset->rrs);
 			}
 #endif /* NSEC3 */
 			rrset->rr_count --;
@@ -868,8 +869,8 @@ add_RR(namedb_type* db, const dname_type* dname,
 			assert(zone->nsec3_param >= rrs_old &&
 				zone->nsec3_param < rrs_old+rrset->rr_count);
 			/* in this order to make sure no overflow/underflow*/
-			zone->nsec3_param = (void*)zone->nsec3_param - 
-				(void*)rrs_old + (void*)rrset->rrs;
+			zone->nsec3_param = (void*)((char*)zone->nsec3_param - 
+				(char*)rrs_old + (char*)rrset->rrs);
 		}
 #endif /* NSEC3 */
 	}
@@ -994,7 +995,7 @@ static int
 apply_ixfr(nsd_type* nsd, FILE *in, uint32_t serialno,
 	uint32_t seq_nr, uint32_t seq_total,
 	int* is_axfr, int* delete_mode, int* rr_count,
-	struct zone* zone, int* bytes,
+	struct zone* zone, uint64_t* bytes,
 	int* softfail, struct ixfr_store* ixfr_store)
 {
 	uint32_t msglen, checklen, pkttype;
@@ -1276,8 +1277,7 @@ check_for_bad_serial(namedb_type* db, const char* zone_str, uint32_t old_serial)
 
 int
 apply_ixfr_for_zone(nsd_type* nsd, zone_type* zone, FILE* in,
-	struct nsd_options* ATTR_UNUSED(opt), udb_base* taskudb, udb_ptr* last_task,
-	uint32_t xfrfilenr)
+	struct nsd_options* ATTR_UNUSED(opt), udb_base* taskudb, uint32_t xfrfilenr)
 {
 	char zone_buf[3072];
 	char log_buf[5120];
@@ -1288,8 +1288,7 @@ apply_ixfr_for_zone(nsd_type* nsd, zone_type* zone, FILE* in,
 	uint32_t time_end_1, time_start_1;
 	uint8_t committed;
 	uint32_t i;
-	int num_bytes = 0;
-	(void)last_task;
+	uint64_t num_bytes = 0;
 	assert(zone);
 
 	/* read zone name and serial */
@@ -1396,10 +1395,7 @@ apply_ixfr_for_zone(nsd_type* nsd, zone_type* zone, FILE* in,
 			region_recycle(nsd->db->region, zone->logstr,
 				strlen(zone->logstr)+1);
 		zone->logstr = region_strdup(nsd->db->region, log_buf);
-		if(zone->filename)
-			region_recycle(nsd->db->region, zone->filename,
-				strlen(zone->filename)+1);
-		zone->filename = NULL;
+		namedb_zone_free_filenames(nsd->db, zone);
 		if(softfail && taskudb && !is_axfr) {
 			log_msg(LOG_ERR, "Failed to apply IXFR cleanly "
 				"(deletes nonexistent RRs, adds existing RRs). "
@@ -1417,7 +1413,7 @@ apply_ixfr_for_zone(nsd_type* nsd, zone_type* zone, FILE* in,
 			double elapsed = (double)(time_end_0 - time_start_0)+
 				(double)((double)time_end_1
 				-(double)time_start_1) / 1000000.0;
-			VERBOSITY(1, (LOG_INFO, "zone %s %s of %d bytes in %g seconds",
+			VERBOSITY(1, (LOG_INFO, "zone %s %s of %"PRIu64" bytes in %g seconds",
 				zone_buf, log_buf, num_bytes, elapsed));
 		}
 	}
@@ -1714,44 +1710,25 @@ void task_new_del_key(udb_base* udb, udb_ptr* last, const char* name)
 	udb_ptr_unlink(&e, udb);
 }
 
-void task_new_add_cookie_secret(udb_base* udb, udb_ptr* last,
-                                 const char* secret) {
+void task_new_cookies(udb_base* udb, udb_ptr* last, int answer_cookie,
+		size_t cookie_count, void* cookie_secrets) {
 	udb_ptr e;
 	char* p;
-	size_t const secret_size = strlen(secret) + 1;
+	size_t const secrets_size = sizeof(cookie_secrets_type);
 
-	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "add task add_cookie_secret"));
+	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "add task cookies"));
 
 	if(!task_create_new_elem(udb, last, &e,
-	                         sizeof(struct task_list_d) + secret_size, NULL)) {
-		log_msg(LOG_ERR, "tasklist: out of space, cannot add add_cookie_secret");
+			sizeof(struct task_list_d) + secrets_size, NULL)) {
+		log_msg(LOG_ERR, "tasklist: out of space, cannot add cookies");
 		return;
 	}
-	TASKLIST(&e)->task_type = task_add_cookie_secret;
+	TASKLIST(&e)->task_type = task_cookies;
+	TASKLIST(&e)->newserial = (uint32_t) answer_cookie;
+	TASKLIST(&e)->yesno = (uint64_t) cookie_count;
 	p = (char*)TASKLIST(&e)->zname;
-	memmove(p, secret, secret_size);
-	udb_ptr_unlink(&e, udb);
-}
+	memmove(p, cookie_secrets, secrets_size);
 
-void task_new_drop_cookie_secret(udb_base* udb, udb_ptr* last) {
-	udb_ptr e;
-	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "add task drop_cookie_secret"));
-	if(!task_create_new_elem(udb, last, &e, sizeof(struct task_list_d), NULL)) {
-		log_msg(LOG_ERR, "tasklist: out of space, cannot add drop_cookie_secret");
-		return;
-	}
-	TASKLIST(&e)->task_type = task_drop_cookie_secret;
-	udb_ptr_unlink(&e, udb);
-}
-
-void task_new_activate_cookie_secret(udb_base* udb, udb_ptr* last) {
-	udb_ptr e;
-	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "add task activate_cookie_secret"));
-	if(!task_create_new_elem(udb, last, &e, sizeof(struct task_list_d), NULL)) {
-		log_msg(LOG_ERR, "tasklist: out of space, cannot add activate_cookie_secret");
-		return;
-	}
-	TASKLIST(&e)->task_type = task_activate_cookie_secret;
 	udb_ptr_unlink(&e, udb);
 }
 
@@ -1935,6 +1912,9 @@ task_process_add_zone(struct nsd* nsd, udb_base* udb, udb_ptr* last_task,
 		log_msg(LOG_ERR, "can not add zone %s %s", zname, pname);
 		return;
 	}
+	/* zdname is not used by the zone allocation. */
+	region_recycle(nsd->db->region, (void*)zdname,
+		dname_total_size(zdname));
 	z->zonestatid = (unsigned)task->yesno;
 	/* if zone is empty, attempt to read the zonefile from disk (if any) */
 	if(!z->soa_rrset && z->opts->pattern->zonefile) {
@@ -1988,53 +1968,14 @@ task_process_del_key(struct nsd* nsd, struct task_list_d* task)
 }
 
 static void
-task_process_add_cookie_secret(struct nsd* nsd, struct task_list_d* task) {
-	uint8_t secret_tmp[NSD_COOKIE_SECRET_SIZE];
-	ssize_t decoded_len;
-	char* secret = (char*)task->zname;
-
-	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "add_cookie_secret task %s", secret));
-
-	if( strlen(secret) != 32 ) {
-		log_msg(LOG_ERR, "invalid cookie secret: %s", secret);
-		explicit_bzero(secret, strlen(secret));
-		return;
-	}
-
-	decoded_len = hex_pton(secret, secret_tmp, NSD_COOKIE_SECRET_SIZE);
-	if( decoded_len != 16 ) {
-		explicit_bzero(secret_tmp, NSD_COOKIE_SECRET_SIZE);
-		log_msg(LOG_ERR, "unable to parse cookie secret: %s", secret);
-		explicit_bzero(secret, strlen(secret));
-		return;
-	}
-	explicit_bzero(secret, strlen(secret));
-	add_cookie_secret(nsd, secret_tmp);
-	explicit_bzero(secret_tmp, NSD_COOKIE_SECRET_SIZE);
-}
-
-static void
-task_process_drop_cookie_secret(struct nsd* nsd, struct task_list_d* task)
-{
-	(void)task;
-	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "drop_cookie_secret task"));
-	if( nsd->cookie_count <= 1 ) {
-		log_msg(LOG_ERR, "can not drop the only active cookie secret");
-		return;
-	}
-	drop_cookie_secret(nsd);
-}
-
-static void
-task_process_activate_cookie_secret(struct nsd* nsd, struct task_list_d* task)
-{
-	(void)task;
-	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "activate_cookie_secret task"));
-	if( nsd->cookie_count <= 1 ) {
-		log_msg(LOG_ERR, "can not activate the only active cookie secret");
-		return;
-	}
-	activate_cookie_secret(nsd);
+task_process_cookies(struct nsd* nsd, struct task_list_d* task) {
+	DEBUG(DEBUG_IPC, 1, (LOG_INFO, "cookies task answer: %s, count: %d",
+		task->newserial ? "yes" : "no", (int)task->yesno));
+	
+	nsd->do_answer_cookie = (int) task->newserial;
+	nsd->cookie_count = (size_t) task->yesno;
+	memmove(nsd->cookie_secrets, task->zname, sizeof(nsd->cookie_secrets));
+	explicit_bzero(task->zname, sizeof(nsd->cookie_secrets));
 }
 
 static void
@@ -2085,9 +2026,8 @@ task_process_zonestat_inc(struct nsd* nsd, udb_base* udb, udb_ptr *last_task,
 }
 #endif
 
-static void
-task_process_apply_xfr(struct nsd* nsd, udb_base* udb, udb_ptr *last_task,
-	udb_ptr* task)
+void
+task_process_apply_xfr(struct nsd* nsd, udb_base* udb, udb_ptr* task)
 {
 	/* we have to use an udb_ptr task here, because the apply_xfr procedure
 	 * appends soa_info which may remap and change the pointer. */
@@ -2099,6 +2039,7 @@ task_process_apply_xfr(struct nsd* nsd, udb_base* udb, udb_ptr *last_task,
 	if(!zone) {
 		/* assume the zone has been deleted and a zone transfer was
 		 * still waiting to be processed */
+		udb_ptr_free_space(task, udb, TASKLIST(task)->size);
 		return;
 	}
 
@@ -2110,10 +2051,11 @@ task_process_apply_xfr(struct nsd* nsd, udb_base* udb, udb_ptr *last_task,
 		/* soainfo_gone will be communicated from server_reload, unless
 		   preceding updates have been applied */
 		zone->is_skipped = 1;
+		udb_ptr_free_space(task, udb, TASKLIST(task)->size);
 		return;
 	}
 	/* read and apply zone transfer */
-	switch(apply_ixfr_for_zone(nsd, zone, df, nsd->options, udb, last_task,
+	switch(apply_ixfr_for_zone(nsd, zone, df, nsd->options, udb,
 				TASKLIST(task)->yesno)) {
 	case 1: /* Success */
 		break;
@@ -2131,6 +2073,7 @@ task_process_apply_xfr(struct nsd* nsd, udb_base* udb, udb_ptr *last_task,
 	default:break;
 	}
 	fclose(df);
+	udb_ptr_free_space(task, udb, TASKLIST(task)->size);
 }
 
 
@@ -2176,17 +2119,8 @@ void task_process_in_reload(struct nsd* nsd, udb_base* udb, udb_ptr *last_task,
 		task_process_zonestat_inc(nsd, udb, last_task, TASKLIST(task));
 		break;
 #endif
-	case task_apply_xfr:
-		task_process_apply_xfr(nsd, udb, last_task, task);
-		break;
-	case task_add_cookie_secret:
-		task_process_add_cookie_secret(nsd, TASKLIST(task));
-		break;
-	case task_drop_cookie_secret:
-		task_process_drop_cookie_secret(nsd, TASKLIST(task));
-		break;
-	case task_activate_cookie_secret:
-		task_process_activate_cookie_secret(nsd, TASKLIST(task));
+	case task_cookies:
+		task_process_cookies(nsd, TASKLIST(task));
 		break;
 	default:
 		log_msg(LOG_WARNING, "unhandled task in reload type %d",

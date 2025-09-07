@@ -1,7 +1,7 @@
-/* $OpenBSD: wycheproof.go,v 1.161 2024/11/24 10:13:16 tb Exp $ */
+/* $OpenBSD: wycheproof.go,v 1.183 2025/09/06 17:35:29 tb Exp $ */
 /*
  * Copyright (c) 2018,2023 Joel Sing <jsing@openbsd.org>
- * Copyright (c) 2018,2019,2022-2024 Theo Buehler <tb@openbsd.org>
+ * Copyright (c) 2018,2019,2022-2025 Theo Buehler <tb@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -81,6 +81,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"log"
+	"math/big"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -90,7 +91,7 @@ import (
 	"unsafe"
 )
 
-const testVectorPath = "/usr/local/share/wycheproof/testvectors"
+const testVectorPath = "/usr/local/share/wycheproof/testvectors_v1"
 
 type testVariant int
 
@@ -124,6 +125,59 @@ func wycheproofFormatTestCase(tcid int, comment string, flags []string, result s
 }
 
 var testc *testCoordinator
+
+type BigInt struct {
+	*big.Int
+}
+
+func mustConvertBigIntToBigNum(bi *BigInt) *C.BIGNUM {
+	value := bi.Bytes()
+	if len(value) == 0 {
+		value = append(value, 0)
+	}
+	bn := C.BN_new()
+	if bn == nil {
+		log.Fatal("BN_new failed")
+	}
+	if C.BN_bin2bn((*C.uchar)(unsafe.Pointer(&value[0])), C.int(len(value)), bn) == nil {
+		log.Fatal("BN_bin2bn failed")
+	}
+	if bi.Sign() == -1 {
+		C.BN_set_negative(bn, C.int(1))
+	}
+	return bn
+}
+
+func (bi *BigInt) UnmarshalJSON(data []byte) error {
+	if len(data) < 2 || data[0] != '"' || data[len(data)-1] != '"' {
+		log.Fatalf("Failed to decode %q: too short or unquoted", data)
+	}
+	data = data[1 : len(data)-1]
+	if len(data)%2 == 1 {
+		pad := make([]byte, 1, len(data)+1)
+		if data[0] >= '0' && data[0] <= '7' {
+			pad[0] = '0'
+		} else {
+			pad[0] = 'f'
+		}
+		data = append(pad, data...)
+	}
+
+	src := make([]byte, hex.DecodedLen(len(data)))
+	_, err := hex.Decode(src, data)
+	if err != nil {
+		log.Fatalf("Failed to decode %q: %v", data, err)
+	}
+
+	bi.Int = &big.Int{}
+	bi.Int.SetBytes(src)
+	if data[0] >= '8' {
+		y := &big.Int{}
+		y.SetBit(y, 4*len(data), 1)
+		bi.Int.Sub(bi.Int, y)
+	}
+	return nil
+}
 
 type wycheproofJWKPublic struct {
 	Crv string `json:"crv"`
@@ -236,9 +290,9 @@ func (wt *wycheproofTestDSA) String() string {
 }
 
 type wycheproofTestGroupDSA struct {
-	Key    *wycheproofDSAKey    `json:"key"`
-	KeyDER string               `json:"keyDer"`
-	KeyPEM string               `json:"keyPem"`
+	Key    *wycheproofDSAKey    `json:"publicKey"`
+	KeyDER string               `json:"publicKeyDer"`
+	KeyPEM string               `json:"publicKeyPem"`
 	SHA    string               `json:"sha"`
 	Type   string               `json:"type"`
 	Tests  []*wycheproofTestDSA `json:"tests"`
@@ -309,22 +363,48 @@ func (wt *wycheproofTestECDSA) String() string {
 }
 
 type wycheproofTestGroupECDSA struct {
-	Key    *wycheproofECDSAKey    `json:"key"`
-	KeyDER string                 `json:"keyDer"`
-	KeyPEM string                 `json:"keyPem"`
+	Key    *wycheproofECDSAKey    `json:"publicKey"`
+	KeyDER string                 `json:"publicKeyDer"`
+	KeyPEM string                 `json:"publicKeyPem"`
 	SHA    string                 `json:"sha"`
 	Type   string                 `json:"type"`
 	Tests  []*wycheproofTestECDSA `json:"tests"`
 }
 
 type wycheproofTestGroupECDSAWebCrypto struct {
-	JWK    *wycheproofJWKPublic   `json:"jwk"`
-	Key    *wycheproofECDSAKey    `json:"key"`
-	KeyDER string                 `json:"keyDer"`
-	KeyPEM string                 `json:"keyPem"`
+	JWK    *wycheproofJWKPublic   `json:"publicKeyJwk"`
+	Key    *wycheproofECDSAKey    `json:"publicKey"`
+	KeyDER string                 `json:"publicKeyDer"`
+	KeyPEM string                 `json:"publicKeyPem"`
 	SHA    string                 `json:"sha"`
 	Type   string                 `json:"type"`
 	Tests  []*wycheproofTestECDSA `json:"tests"`
+}
+
+type wycheproofTestEcCurve struct {
+	TCID    int      `json:"tcId"`
+	Comment string   `json:"comment"`
+	Flags   []string `json:"flags"`
+	Name    string   `json:"name"`
+	OID     string   `json:"oid"`
+	Ref     string   `json:"ref"`
+	P       *BigInt  `json:"p"`
+	N       *BigInt  `json:"n"`
+	A       *BigInt  `json:"a"`
+	B       *BigInt  `json:"b"`
+	Gx      *BigInt  `json:"gx"`
+	Gy      *BigInt  `json:"gy"`
+	H       int      `json:"h"`
+	Result  string   `json:"result"`
+}
+
+func (wt *wycheproofTestEcCurve) String() string {
+	return wycheproofFormatTestCase(wt.TCID, wt.Comment, wt.Flags, wt.Result)
+}
+
+type wycheproofTestGroupEcCurve struct {
+	Type  string                   `json:"type"`
+	Tests []*wycheproofTestEcCurve `json:"tests"`
 }
 
 type wycheproofJWKEdDSA struct {
@@ -357,10 +437,10 @@ func (wt *wycheproofTestEdDSA) String() string {
 }
 
 type wycheproofTestGroupEdDSA struct {
-	JWK    *wycheproofJWKEdDSA    `json:"jwk"`
-	Key    *wycheproofEdDSAKey    `json:"key"`
-	KeyDer string                 `json:"keyDer"`
-	KeyPem string                 `json:"keyPem"`
+	JWK    *wycheproofJWKEdDSA    `json:"publicKeyJwk"`
+	Key    *wycheproofEdDSAKey    `json:"publicKey"`
+	KeyDer string                 `json:"publicKeyDer"`
+	KeyPem string                 `json:"publicKeyPem"`
 	Type   string                 `json:"type"`
 	Tests  []*wycheproofTestEdDSA `json:"tests"`
 }
@@ -431,7 +511,7 @@ type wycheproofTestGroupKW struct {
 type wycheproofTestPrimality struct {
 	TCID    int      `json:"tcId"`
 	Comment string   `json:"comment"`
-	Value   string   `json:"value"`
+	Value   *BigInt  `json:"value"`
 	Result  string   `json:"result"`
 	Flags   []string `json:"flags"`
 }
@@ -460,15 +540,31 @@ func (wt *wycheproofTestRSA) String() string {
 }
 
 type wycheproofTestGroupRSA struct {
-	E       string               `json:"e"`
-	KeyASN  string               `json:"keyAsn"`
-	KeyDER  string               `json:"keyDer"`
-	KeyPEM  string               `json:"keyPem"`
-	KeySize int                  `json:"keysize"`
-	N       string               `json:"n"`
-	SHA     string               `json:"sha"`
-	Type    string               `json:"type"`
-	Tests   []*wycheproofTestRSA `json:"tests"`
+	PrivateKey *wycheproofRSAPrivateKey `json:"privateKey"`
+	PublicKey  *wycheproofRSAPublicKey  `json:"publicKey"`
+	KeyASN     string                   `json:"keyAsn"`
+	KeyDER     string                   `json:"keyDer"`
+	KeyPEM     string                   `json:"keyPem"`
+	KeySize    int                      `json:"keysize"`
+	SHA        string                   `json:"sha"`
+	Type       string                   `json:"type"`
+	Tests      []*wycheproofTestRSA     `json:"tests"`
+}
+
+type wycheproofRSAPublicKey struct {
+	Modulus        string `json:"modulus"`
+	PublicExponent string `json:"publicExponent"`
+}
+
+type wycheproofRSAPrivateKey struct {
+	Modulus         string `json:"modulus"`
+	PrivateExponent string `json:"privateExponent"`
+	PublicExponent  string `json:"publicExponent"`
+	Prime1          string `json:"prime1"`
+	Prime2          string `json:"prime2"`
+	Exponent1       string `json:"exponent1"`
+	Exponent2       string `json:"exponent2"`
+	Coefficient     string `json:"coefficient"`
 }
 
 type wycheproofPrivateKeyJwk struct {
@@ -500,29 +596,25 @@ func (wt *wycheproofTestRsaes) String() string {
 }
 
 type wycheproofTestGroupRsaesOaep struct {
-	D               string                   `json:"d"`
-	E               string                   `json:"e"`
+	Type            string                   `json:"type"`
 	KeySize         int                      `json:"keysize"`
+	SHA             string                   `json:"sha"`
 	MGF             string                   `json:"mgf"`
 	MGFSHA          string                   `json:"mgfSha"`
-	N               string                   `json:"n"`
+	PrivateKey      *wycheproofRSAPrivateKey `json:"privateKey"`
 	PrivateKeyJwk   *wycheproofPrivateKeyJwk `json:"privateKeyJwk"`
 	PrivateKeyPem   string                   `json:"privateKeyPem"`
 	PrivateKeyPkcs8 string                   `json:"privateKeyPkcs8"`
-	SHA             string                   `json:"sha"`
-	Type            string                   `json:"type"`
 	Tests           []*wycheproofTestRsaes   `json:"tests"`
 }
 
 type wycheproofTestGroupRsaesPkcs1 struct {
-	D               string                   `json:"d"`
-	E               string                   `json:"e"`
-	KeySize         int                      `json:"keysize"`
-	N               string                   `json:"n"`
+	Type            string                   `json:"type"`
+	PrivateKey      *wycheproofRSAPrivateKey `json:"privateKey"`
 	PrivateKeyJwk   *wycheproofPrivateKeyJwk `json:"privateKeyJwk"`
 	PrivateKeyPem   string                   `json:"privateKeyPem"`
 	PrivateKeyPkcs8 string                   `json:"privateKeyPkcs8"`
-	Type            string                   `json:"type"`
+	KeySize         int                      `json:"keysize"`
 	Tests           []*wycheproofTestRsaes   `json:"tests"`
 }
 
@@ -540,18 +632,18 @@ func (wt *wycheproofTestRsassa) String() string {
 }
 
 type wycheproofTestGroupRsassa struct {
-	E       string                  `json:"e"`
-	KeyASN  string                  `json:"keyAsn"`
-	KeyDER  string                  `json:"keyDer"`
-	KeyPEM  string                  `json:"keyPem"`
-	KeySize int                     `json:"keysize"`
-	MGF     string                  `json:"mgf"`
-	MGFSHA  string                  `json:"mgfSha"`
-	N       string                  `json:"n"`
-	SLen    int                     `json:"sLen"`
-	SHA     string                  `json:"sha"`
-	Type    string                  `json:"type"`
-	Tests   []*wycheproofTestRsassa `json:"tests"`
+	PrivateKey *wycheproofRSAPrivateKey `json:"privateKey"`
+	PublicKey  *wycheproofRSAPublicKey  `json:"publicKey"`
+	KeyASN     string                   `json:"keyAsn"`
+	KeyDER     string                   `json:"keyDer"`
+	KeyPEM     string                   `json:"keyPem"`
+	KeySize    int                      `json:"keysize"`
+	MGF        string                   `json:"mgf"`
+	MGFSHA     string                   `json:"mgfSha"`
+	SLen       int                      `json:"sLen"`
+	SHA        string                   `json:"sha"`
+	Type       string                   `json:"type"`
+	Tests      []*wycheproofTestRsassa  `json:"tests"`
 }
 
 type wycheproofTestX25519 struct {
@@ -578,13 +670,13 @@ type wycheproofTestGroupRunner interface {
 	run(string, testVariant) bool
 }
 
-type wycheproofTestVectors struct {
-	Algorithm        string            `json:"algorithm"`
-	GeneratorVersion string            `json:"generatorVersion"`
-	Notes            map[string]string `json:"notes"`
-	NumberOfTests    int               `json:"numberOfTests"`
-	// Header
-	TestGroups []json.RawMessage `json:"testGroups"`
+type wycheproofTestVectorsV1 struct {
+	Algorithm     string            `json:"algorithm"`
+	Schema        string            `json:"schema"`
+	NumberOfTests int               `json:"numberOfTests"`
+	Header        []string          `json:"header"`
+	Notes         json.RawMessage   `json:"notes"`
+	TestGroups    []json.RawMessage `json:"testGroups"`
 }
 
 var nids = map[string]int{
@@ -1266,7 +1358,7 @@ func runEvpChaCha20Poly1305Test(ctx *C.EVP_CIPHER_CTX, algorithm string, wt *wyc
 		log.Fatal("Failed EVP_EncryptUpdate aad")
 	}
 
-	sealed := make([]byte, ctLen + tagLen)
+	sealed := make([]byte, ctLen+tagLen)
 	copy(sealed, msg)
 	if C.EVP_EncryptUpdate(ctx, (*C.uchar)(unsafe.Pointer(&sealed[0])), (*C.int)(unsafe.Pointer(&len)), (*C.uchar)(unsafe.Pointer(&sealed[0])), (C.int)(msgLen)) != 1 {
 		log.Fatal("Failed EVP_EncryptUpdate msg")
@@ -1281,7 +1373,7 @@ func runEvpChaCha20Poly1305Test(ctx *C.EVP_CIPHER_CTX, algorithm string, wt *wyc
 	}
 	outLen += (C.int)(tagLen)
 
-	if (C.int)(ctLen + tagLen) != outLen {
+	if (C.int)(ctLen+tagLen) != outLen {
 		fmt.Printf("%s\n", wt)
 	}
 
@@ -1290,7 +1382,7 @@ func runEvpChaCha20Poly1305Test(ctx *C.EVP_CIPHER_CTX, algorithm string, wt *wyc
 	tagMatch := bytes.Equal(tag, sealed[ctLen:])
 	if (ctMatch && tagMatch) == (wt.Result != "invalid") {
 		sealSuccess = true
-	} else  {
+	} else {
 		fmt.Printf("%s - ct match: %t tag match: %t\n", wt, ctMatch, tagMatch)
 	}
 
@@ -1316,9 +1408,9 @@ func runEvpChaCha20Poly1305Test(ctx *C.EVP_CIPHER_CTX, algorithm string, wt *wyc
 		ct = append(ct, 0)
 	}
 
-	opened := make([]byte, msgLen + tagLen)
+	opened := make([]byte, msgLen+tagLen)
 	copy(opened, ct)
-	if msgLen + aadLen == 0 {
+	if msgLen+aadLen == 0 {
 		opened = append(opened, 0)
 	}
 
@@ -1767,6 +1859,15 @@ func runECDSATest(ecKey *C.EC_KEY, md *C.EVP_MD, nid int, variant testVariant, w
 
 	var ret C.int
 	if variant == Webcrypto || variant == P1363 {
+		order_bytes := int((C.EC_GROUP_order_bits(C.EC_KEY_get0_group(ecKey)) + 7) / 8)
+		if len(wt.Sig)/2 != 2*order_bytes {
+			if wt.Result == "valid" {
+				fmt.Printf("FAIL: %s - incorrect signature length, %d, %d\n", wt, len(wt.Sig)/2, 2*order_bytes)
+				return false
+			}
+			return true
+		}
+
 		cDer, derLen := encodeECDSAWebCryptoSig(wt.Sig)
 		if cDer == nil {
 			fmt.Print("FAIL: unable to decode signature")
@@ -1941,6 +2042,79 @@ func (wtg *wycheproofTestGroupECDSAWebCrypto) run(algorithm string, variant test
 	success := true
 	for _, wt := range wtg.Tests {
 		if !runECDSATest(ecKey, md, nid, Webcrypto, wt) {
+			success = false
+		}
+	}
+	return success
+}
+
+func runEcCurveTest(wt *wycheproofTestEcCurve) bool {
+	oid := C.CString(wt.OID)
+	defer C.free(unsafe.Pointer(oid))
+
+	nid := C.OBJ_txt2nid(oid)
+	if nid == C.NID_undef {
+		fmt.Printf("INFO: %s: %s: unknown OID %s\n", wt, wt.Name, wt.OID)
+		return false
+	}
+
+	builtinGroup := C.EC_GROUP_new_by_curve_name(nid)
+	defer C.EC_GROUP_free(builtinGroup)
+
+	if builtinGroup == nil {
+		fmt.Printf("INFO: %s: %s: no builtin curve for OID %s\n", wt, wt.Name, wt.OID)
+		return true
+	}
+
+	p := mustConvertBigIntToBigNum(wt.P)
+	defer C.BN_free(p)
+	a := mustConvertBigIntToBigNum(wt.A)
+	defer C.BN_free(a)
+	b := mustConvertBigIntToBigNum(wt.B)
+	defer C.BN_free(b)
+	n := mustConvertBigIntToBigNum(wt.N)
+	defer C.BN_free(n)
+	x := mustConvertBigIntToBigNum(wt.Gx)
+	defer C.BN_free(x)
+	y := mustConvertBigIntToBigNum(wt.Gy)
+	defer C.BN_free(y)
+
+	group := C.EC_GROUP_new_curve_GFp(p, a, b, (*C.BN_CTX)(nil))
+	defer C.EC_GROUP_free(group)
+
+	if group == nil {
+		log.Fatalf("EC_GROUP_new_curve_GFp failed")
+	}
+
+	point := C.EC_POINT_new(group)
+	defer C.EC_POINT_free(point)
+
+	if point == nil {
+		log.Fatalf("EC_POINT_new failed")
+	}
+
+	if C.EC_POINT_set_affine_coordinates(group, point, x, y, (*C.BN_CTX)(nil)) == 0 {
+		log.Fatalf("EC_POINT_set_affine_coordinates failed")
+	}
+
+	if C.EC_GROUP_set_generator(group, point, n, (*C.BIGNUM)(nil)) == 0 {
+		log.Fatalf("EC_POINT_set_generator failed")
+	}
+
+	success := true
+	if C.EC_GROUP_cmp(group, builtinGroup, (*C.BN_CTX)(nil)) != 0 {
+		fmt.Printf("FAIL: %s %s builtin curve has wrong parameters\n", wt, wt.Name)
+		success = false
+	}
+	return success
+}
+
+func (wtg *wycheproofTestGroupEcCurve) run(algorithm string, variant testVariant) bool {
+	fmt.Printf("Running %v test group %v...\n", algorithm, wtg.Type)
+
+	success := true
+	for _, wt := range wtg.Tests {
+		if !runEcCurveTest(wt) {
 			success = false
 		}
 	}
@@ -2205,12 +2379,7 @@ func (wtg *wycheproofTestGroupKW) run(algorithm string, variant testVariant) boo
 }
 
 func runPrimalityTest(wt *wycheproofTestPrimality) bool {
-	var bnValue *C.BIGNUM
-	value := C.CString(wt.Value)
-	if C.BN_hex2bn(&bnValue, value) == 0 {
-		log.Fatal("Failed to set bnValue")
-	}
-	C.free(unsafe.Pointer(value))
+	bnValue := mustConvertBigIntToBigNum(wt.Value)
 	defer C.BN_free(bnValue)
 
 	ret := C.BN_is_prime_ex(bnValue, C.BN_prime_checks, (*C.BN_CTX)(unsafe.Pointer(nil)), (*C.BN_GENCB)(unsafe.Pointer(nil)))
@@ -2286,7 +2455,7 @@ func (wtg *wycheproofTestGroupRsaesOaep) run(algorithm string, variant testVaria
 	}
 	defer C.RSA_free(rsa)
 
-	d := C.CString(wtg.D)
+	d := C.CString(wtg.PrivateKey.PrivateExponent)
 	var rsaD *C.BIGNUM
 	defer C.BN_free(rsaD)
 	if C.BN_hex2bn(&rsaD, d) == 0 {
@@ -2294,7 +2463,7 @@ func (wtg *wycheproofTestGroupRsaesOaep) run(algorithm string, variant testVaria
 	}
 	C.free(unsafe.Pointer(d))
 
-	e := C.CString(wtg.E)
+	e := C.CString(wtg.PrivateKey.PublicExponent)
 	var rsaE *C.BIGNUM
 	defer C.BN_free(rsaE)
 	if C.BN_hex2bn(&rsaE, e) == 0 {
@@ -2302,7 +2471,7 @@ func (wtg *wycheproofTestGroupRsaesOaep) run(algorithm string, variant testVaria
 	}
 	C.free(unsafe.Pointer(e))
 
-	n := C.CString(wtg.N)
+	n := C.CString(wtg.PrivateKey.Modulus)
 	var rsaN *C.BIGNUM
 	defer C.BN_free(rsaN)
 	if C.BN_hex2bn(&rsaN, n) == 0 {
@@ -2376,7 +2545,7 @@ func (wtg *wycheproofTestGroupRsaesPkcs1) run(algorithm string, variant testVari
 	}
 	defer C.RSA_free(rsa)
 
-	d := C.CString(wtg.D)
+	d := C.CString(wtg.PrivateKey.PrivateExponent)
 	var rsaD *C.BIGNUM
 	defer C.BN_free(rsaD)
 	if C.BN_hex2bn(&rsaD, d) == 0 {
@@ -2384,7 +2553,7 @@ func (wtg *wycheproofTestGroupRsaesPkcs1) run(algorithm string, variant testVari
 	}
 	C.free(unsafe.Pointer(d))
 
-	e := C.CString(wtg.E)
+	e := C.CString(wtg.PrivateKey.PublicExponent)
 	var rsaE *C.BIGNUM
 	defer C.BN_free(rsaE)
 	if C.BN_hex2bn(&rsaE, e) == 0 {
@@ -2392,7 +2561,7 @@ func (wtg *wycheproofTestGroupRsaesPkcs1) run(algorithm string, variant testVari
 	}
 	C.free(unsafe.Pointer(e))
 
-	n := C.CString(wtg.N)
+	n := C.CString(wtg.PrivateKey.Modulus)
 	var rsaN *C.BIGNUM
 	defer C.BN_free(rsaN)
 	if C.BN_hex2bn(&rsaN, n) == 0 {
@@ -2457,7 +2626,19 @@ func (wtg *wycheproofTestGroupRsassa) run(algorithm string, variant testVariant)
 	}
 	defer C.RSA_free(rsa)
 
-	e := C.CString(wtg.E)
+	var publicExponent, modulus string
+	if wtg.PublicKey != nil {
+		publicExponent = wtg.PublicKey.PublicExponent
+		modulus = wtg.PublicKey.Modulus
+	} else if wtg.PrivateKey != nil {
+		publicExponent = wtg.PrivateKey.PublicExponent
+		modulus = wtg.PrivateKey.Modulus
+	}
+	if publicExponent == "" || modulus == "" {
+		return true
+	}
+
+	e := C.CString(publicExponent)
 	var rsaE *C.BIGNUM
 	defer C.BN_free(rsaE)
 	if C.BN_hex2bn(&rsaE, e) == 0 {
@@ -2465,7 +2646,7 @@ func (wtg *wycheproofTestGroupRsassa) run(algorithm string, variant testVariant)
 	}
 	C.free(unsafe.Pointer(e))
 
-	n := C.CString(wtg.N)
+	n := C.CString(modulus)
 	var rsaN *C.BIGNUM
 	defer C.BN_free(rsaN)
 	if C.BN_hex2bn(&rsaN, n) == 0 {
@@ -2522,7 +2703,19 @@ func (wtg *wycheproofTestGroupRSA) run(algorithm string, variant testVariant) bo
 	}
 	defer C.RSA_free(rsa)
 
-	e := C.CString(wtg.E)
+	var publicExponent, modulus string
+	if wtg.PublicKey != nil {
+		publicExponent = wtg.PublicKey.PublicExponent
+		modulus = wtg.PublicKey.Modulus
+	} else if wtg.PrivateKey != nil {
+		publicExponent = wtg.PrivateKey.PublicExponent
+		modulus = wtg.PrivateKey.Modulus
+	}
+	if publicExponent == "" || modulus == "" {
+		return true
+	}
+
+	e := C.CString(publicExponent)
 	var rsaE *C.BIGNUM
 	defer C.BN_free(rsaE)
 	if C.BN_hex2bn(&rsaE, e) == 0 {
@@ -2530,7 +2723,7 @@ func (wtg *wycheproofTestGroupRSA) run(algorithm string, variant testVariant) bo
 	}
 	C.free(unsafe.Pointer(e))
 
-	n := C.CString(wtg.N)
+	n := C.CString(modulus)
 	var rsaN *C.BIGNUM
 	defer C.BN_free(rsaN)
 	if C.BN_hex2bn(&rsaN, n) == 0 {
@@ -2611,10 +2804,14 @@ func testGroupFromAlgorithm(algorithm string, variant testVariant) wycheproofTes
 		return &wycheproofTestGroupAesAead{}
 	case "AES-CMAC":
 		return &wycheproofTestGroupAesCmac{}
+	case "AES-WRAP":
+		return &wycheproofTestGroupKW{}
 	case "CHACHA20-POLY1305", "XCHACHA20-POLY1305":
 		return &wycheproofTestGroupChaCha{}
 	case "DSA":
 		return &wycheproofTestGroupDSA{}
+	case "EcCurveTest":
+		return &wycheproofTestGroupEcCurve{}
 	case "ECDH":
 		return &wycheproofTestGroupECDH{}
 	case "ECDSA":
@@ -2623,10 +2820,8 @@ func testGroupFromAlgorithm(algorithm string, variant testVariant) wycheproofTes
 		return &wycheproofTestGroupEdDSA{}
 	case "HKDF-SHA-1", "HKDF-SHA-256", "HKDF-SHA-384", "HKDF-SHA-512":
 		return &wycheproofTestGroupHkdf{}
-	case "HMACSHA1", "HMACSHA224", "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMACSHA3-224", "HMACSHA3-256", "HMACSHA3-384", "HMACSHA3-512":
+	case "HMACSHA1", "HMACSHA224", "HMACSHA256", "HMACSHA384", "HMACSHA512", "HMACSHA512/224", "HMACSHA512/256", "HMACSHA3-224", "HMACSHA3-256", "HMACSHA3-384", "HMACSHA3-512":
 		return &wycheproofTestGroupHmac{}
-	case "KW":
-		return &wycheproofTestGroupKW{}
 	case "PrimalityTest":
 		return &wycheproofTestGroupPrimality{}
 	case "RSAES-OAEP":
@@ -2645,31 +2840,35 @@ func testGroupFromAlgorithm(algorithm string, variant testVariant) wycheproofTes
 }
 
 func runTestVectors(path string, variant testVariant) bool {
+	var algorithm string
+	var testGroups []json.RawMessage
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
 		log.Fatalf("Failed to read test vectors: %v", err)
 	}
-	wtv := &wycheproofTestVectors{}
+	wtv := &wycheproofTestVectorsV1{}
 	if err := json.Unmarshal(b, wtv); err != nil {
 		log.Fatalf("Failed to unmarshal JSON: %v", err)
 	}
+	algorithm = wtv.Algorithm
+	testGroups = wtv.TestGroups
 	fmt.Printf("Loaded Wycheproof test vectors for %v with %d tests from %q\n", wtv.Algorithm, wtv.NumberOfTests, filepath.Base(path))
 
 	success := true
-	for _, tg := range wtv.TestGroups {
-		wtg := testGroupFromAlgorithm(wtv.Algorithm, variant)
+	for _, tg := range testGroups {
+		wtg := testGroupFromAlgorithm(algorithm, variant)
 		if wtg == nil {
-			log.Printf("INFO: Unknown test vector algorithm %q", wtv.Algorithm)
+			log.Printf("INFO: Unknown test vector algorithm %q", algorithm)
 			return false
 		}
 		if err := json.Unmarshal(tg, wtg); err != nil {
 			log.Fatalf("Failed to unmarshal test groups JSON: %v", err)
 		}
 		testc.runTest(func() bool {
-			return wtg.run(wtv.Algorithm, variant)
+			return wtg.run(algorithm, variant)
 		})
 	}
-	for _ = range wtv.TestGroups {
+	for _ = range testGroups {
 		result := <-testc.resultCh
 		if !result {
 			success = false
@@ -2714,7 +2913,8 @@ func (tc *testCoordinator) shutdown() {
 }
 
 func main() {
-	if _, err := os.Stat(testVectorPath); os.IsNotExist(err) {
+	path := testVectorPath
+	if _, err := os.Stat(path); os.IsNotExist(err) {
 		fmt.Printf("package wycheproof-testvectors is required for this regress\n")
 		fmt.Printf("SKIPPED\n")
 		os.Exit(0)
@@ -2726,23 +2926,22 @@ func main() {
 		variant testVariant
 	}{
 		{"AES", "aes_[cg]*[^xv]_test.json", Normal}, // Skip AES-EAX, AES-GCM-SIV and AES-SIV-CMAC.
+		{"AES-WRAP", "aes_wrap_test.json", Normal},
 		{"ChaCha20-Poly1305", "chacha20_poly1305_test.json", Normal},
 		{"DSA", "dsa_*test.json", Normal},
 		{"DSA", "dsa_*_p1363_test.json", P1363},
-		{"ECDH", "ecdh_test.json", Normal},
+		{"EcCurveTest", "ec_prime_order_curves_test.json", Normal},
 		{"ECDH", "ecdh_[^w_]*_test.json", Normal},
 		{"ECDH EcPoint", "ecdh_*_ecpoint_test.json", EcPoint},
-		{"ECDH webcrypto", "ecdh_webcrypto_test.json", Webcrypto},
-		{"ECDSA", "ecdsa_test.json", Normal},
+		{"ECDH webcrypto", "ecdh_*_webcrypto_test.json", Webcrypto},
 		{"ECDSA", "ecdsa_[^w]*test.json", Normal},
-		{"ECDSA P1363", "ecdsa_*_p1363_test.json", P1363},
-		{"ECDSA webcrypto", "ecdsa_webcrypto_test.json", Webcrypto},
-		{"EDDSA", "eddsa_test.json", Normal},
+		{"ECDSA P1363", "ecdsa_*_sha[1-9][1-9][1-9]_p1363_test.json", P1363},
+		{"ECDSA webcrypto", "ecdsa_*_webcrypto_test.json", Webcrypto},
+		{"ECDSA shake", "ecdsa_*_shake*_test.json", Skip},
+		{"EDDSA", "ed25519_test.json", Normal},
 		{"ED448", "ed448_test.json", Skip},
 		{"HKDF", "hkdf_sha*_test.json", Normal},
 		{"HMAC", "hmac_sha*_test.json", Normal},
-		{"JSON webcrypto", "json_web_*_test.json", Skip},
-		{"KW", "kw_test.json", Normal},
 		{"Primality test", "primality_test.json", Normal},
 		{"RSA", "rsa_*test.json", Normal},
 		{"X25519", "x25519_test.json", Normal},
@@ -2764,19 +2963,19 @@ func main() {
 
 	testc = newTestCoordinator()
 
-	skipNormal := regexp.MustCompile(`_(ecpoint|p1363|sect\d{3}[rk]1|secp(160|192))_`)
+	skipNormal := regexp.MustCompile(`_(ecpoint|webcrypto|pem|bitcoin|shake\d{3}|gmac|p1363|sect\d{3}[rk]1|secp(160|192))_`)
 
 	for _, test := range tests {
-		tvs, err := filepath.Glob(filepath.Join(testVectorPath, test.pattern))
+		tvs, err := filepath.Glob(filepath.Join(path, test.pattern))
 		if err != nil {
 			log.Fatalf("Failed to glob %v test vectors: %v", test.name, err)
 		}
 		if len(tvs) == 0 {
-			log.Fatalf("Failed to find %v test vectors at %q\n", test.name, testVectorPath)
+			log.Fatalf("Failed to find %v test vectors at %q\n", test.name, path)
 		}
 		for _, tv := range tvs {
 			if test.variant == Skip || (test.variant == Normal && skipNormal.Match([]byte(tv))) {
-				fmt.Printf("INFO: Skipping tests from \"%s\"\n", strings.TrimPrefix(tv, testVectorPath+"/"))
+				fmt.Printf("INFO: Skipping tests from \"%s\"\n", strings.TrimPrefix(tv, path+"/"))
 				continue
 			}
 			wg.Add(1)

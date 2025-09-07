@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.242 2025/08/14 15:48:48 beck Exp $
+# $OpenBSD: Makefile,v 1.244 2025/09/05 23:30:12 beck Exp $
 
 LIB=	crypto
 LIBREBUILD=y
@@ -375,8 +375,7 @@ SRCS+= md5.c
 
 # mlkem/
 SRCS+= mlkem.c
-SRCS+= mlkem768.c
-SRCS+= mlkem1024.c
+SRCS+= mlkem_internal.c
 SRCS+= mlkem_key.c
 
 # modes/
@@ -674,6 +673,7 @@ HDRS=\
 	${LCRYPTO_SRC}/modes/modes.h \
 	${LCRYPTO_SRC}/objects/objects.h \
 	${LCRYPTO_SRC}/ocsp/ocsp.h \
+	${LCRYPTO_SRC}/opensslconf.h \
 	${LCRYPTO_SRC}/opensslfeatures.h \
 	${LCRYPTO_SRC}/opensslv.h \
 	${LCRYPTO_SRC}/ossl_typ.h \
@@ -699,7 +699,6 @@ HDRS=\
 	${LCRYPTO_SRC}/x509/x509v3.h
 
 HDRS_GEN=\
-	${.CURDIR}/arch/${MACHINE_CPU}/opensslconf.h \
 	${.OBJDIR}/obj_mac.h
 
 prereq: obj_mac.h

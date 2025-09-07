@@ -1,4 +1,4 @@
-/*	$OpenBSD: mft.c,v 1.128 2025/08/19 11:30:20 job Exp $ */
+/*	$OpenBSD: mft.c,v 1.130 2025/08/24 12:17:12 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -39,13 +39,8 @@
  * Manifest eContent definition in RFC 9286, section 4.2.
  */
 
-ASN1_ITEM_EXP FileAndHash_it;
 ASN1_ITEM_EXP Manifest_it;
-
-ASN1_SEQUENCE(FileAndHash) = {
-	ASN1_SIMPLE(FileAndHash, file, ASN1_IA5STRING),
-	ASN1_SIMPLE(FileAndHash, hash, ASN1_BIT_STRING),
-} ASN1_SEQUENCE_END(FileAndHash);
+ASN1_ITEM_EXP FileAndHash_it;
 
 ASN1_SEQUENCE(Manifest) = {
 	ASN1_EXP_OPT(Manifest, version, ASN1_INTEGER, 0),
@@ -58,6 +53,10 @@ ASN1_SEQUENCE(Manifest) = {
 
 IMPLEMENT_ASN1_FUNCTIONS(Manifest);
 
+ASN1_SEQUENCE(FileAndHash) = {
+	ASN1_SIMPLE(FileAndHash, file, ASN1_IA5STRING),
+	ASN1_SIMPLE(FileAndHash, hash, ASN1_BIT_STRING),
+} ASN1_SEQUENCE_END(FileAndHash);
 
 #define GENTIME_LENGTH 15
 
@@ -146,7 +145,7 @@ rtype_from_mftfile(const char *fn)
 }
 
 /*
- * Parse an individual "FileAndHash", RFC 6486, sec. 4.2.
+ * Parse an individual "FileAndHash", RFC 9286, sec. 4.2.
  * Return zero on failure, non-zero on success.
  */
 static int
@@ -160,7 +159,7 @@ mft_parse_filehash(const char *fn, struct mft *mft, const FileAndHash *fh,
 	size_t			 new_idx = 0;
 
 	if (!valid_mft_filename(fh->file->data, fh->file->length)) {
-		warnx("%s: RFC 6486 section 4.2.2: bad filename", fn);
+		warnx("%s: RFC 9286 section 4.2.2: bad filename", fn);
 		goto out;
 	}
 	file = strndup(fh->file->data, fh->file->length);
@@ -168,7 +167,7 @@ mft_parse_filehash(const char *fn, struct mft *mft, const FileAndHash *fh,
 		err(1, NULL);
 
 	if (fh->hash->length != SHA256_DIGEST_LENGTH) {
-		warnx("%s: RFC 6486 section 4.2.1: hash: "
+		warnx("%s: RFC 9286 section 4.2.1: hash: "
 		    "invalid SHA256 length, have %d", fn, fh->hash->length);
 		goto out;
 	}
@@ -280,7 +279,7 @@ mft_has_unique_names_and_hashes(const char *fn, const Manifest *mft)
 }
 
 /*
- * Handle the eContent of the manifest object, RFC 6486 sec. 4.2.
+ * Handle the eContent of the manifest object, RFC 9286 sec. 4.2.
  * Returns 0 on failure and 1 on success.
  */
 static int
@@ -294,7 +293,7 @@ mft_parse_econtent(const char *fn, struct mft *mft, const unsigned char *d,
 
 	oder = d;
 	if ((mft_asn1 = d2i_Manifest(NULL, &d, dsz)) == NULL) {
-		warnx("%s: RFC 6486 section 4: failed to parse Manifest", fn);
+		warnx("%s: RFC 9286 section 4: failed to parse Manifest", fn);
 		goto out;
 	}
 	if (d != oder + dsz) {
@@ -339,7 +338,7 @@ mft_parse_econtent(const char *fn, struct mft *mft, const unsigned char *d,
 	}
 
 	if (OBJ_obj2nid(mft_asn1->fileHashAlg) != NID_sha256) {
-		warnx("%s: RFC 6486 section 4.2.1: fileHashAlg: "
+		warnx("%s: RFC 9286 section 4.2.1: fileHashAlg: "
 		    "want SHA256 object, have %s", fn,
 		    nid2str(OBJ_obj2nid(mft_asn1->fileHashAlg)));
 		goto out;
@@ -384,7 +383,7 @@ mft_parse_econtent(const char *fn, struct mft *mft, const unsigned char *d,
 
 /*
  * Parse the objects that have been published in the manifest.
- * Return mft if it conforms to RFC 6486, otherwise NULL.
+ * Return mft if it conforms to RFC 9286, otherwise NULL.
  */
 struct mft *
 mft_parse(struct cert **out_cert, const char *fn, int talid,
@@ -408,6 +407,7 @@ mft_parse(struct cert **out_cert, const char *fn, int talid,
 	if ((mft = calloc(1, sizeof(*mft))) == NULL)
 		err(1, NULL);
 	mft->signtime = signtime;
+	mft->mftsize = len;
 
 	if ((mft->aki = strdup(cert->aki)) == NULL)
 		err(1, NULL);
@@ -498,6 +498,11 @@ mft_buffer(struct ibuf *b, const struct mft *p)
 	io_opt_str_buffer(b, p->path);
 
 	io_str_buffer(b, p->aki);
+	io_str_buffer(b, p->seqnum);
+	io_str_buffer(b, p->sia);
+	io_simple_buffer(b, &p->thisupdate, sizeof(p->thisupdate));
+	io_simple_buffer(b, p->mfthash, sizeof(p->mfthash));
+	io_simple_buffer(b, &p->mftsize, sizeof(p->mftsize));
 
 	io_simple_buffer(b, &p->filesz, sizeof(size_t));
 	for (i = 0; i < p->filesz; i++) {
@@ -530,6 +535,11 @@ mft_read(struct ibuf *b)
 	io_read_opt_str(b, &p->path);
 
 	io_read_str(b, &p->aki);
+	io_read_str(b, &p->seqnum);
+	io_read_str(b, &p->sia);
+	io_read_buf(b, &p->thisupdate, sizeof(p->thisupdate));
+	io_read_buf(b, &p->mfthash, sizeof(p->mfthash));
+	io_read_buf(b, &p->mftsize, sizeof(p->mftsize));
 
 	io_read_buf(b, &p->filesz, sizeof(size_t));
 	if (p->filesz == 0)

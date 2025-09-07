@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.257 2025/08/14 15:12:00 claudio Exp $ */
+/*	$OpenBSD: extern.h,v 1.261 2025/09/06 11:55:44 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -221,7 +221,7 @@ struct mftfile {
 };
 
 /*
- * A manifest, RFC 6486.
+ * A manifest, RFC 9286.
  * This consists of a bunch of files found in the same directory as the
  * manifest file.
  */
@@ -233,6 +233,7 @@ struct mft {
 	char		*sia; /* SIA signedObject */
 	char		*crl; /* CRL file name */
 	unsigned char	 mfthash[SHA256_DIGEST_LENGTH];
+	size_t		 mftsize;
 	unsigned char	 crlhash[SHA256_DIGEST_LENGTH];
 	time_t		 signtime; /* CMS signing-time attribute */
 	time_t		 thisupdate; /* from the eContent */
@@ -259,7 +260,7 @@ struct roa_ip {
 };
 
 /*
- * An ROA, RFC 6482.
+ * An ROA, RFC 9582.
  * This consists of the concerned ASID and its IP prefixes.
  */
 struct roa {
@@ -459,12 +460,49 @@ struct brk {
 RB_HEAD(brk_tree, brk);
 RB_PROTOTYPE(brk_tree, brk, entry, brkcmp);
 
+struct ccr_mft {
+	RB_ENTRY(ccr_mft) entry;
+	char hash[SHA256_DIGEST_LENGTH];
+	char aki[SHA_DIGEST_LENGTH];
+	size_t size;
+	time_t thisupdate;
+	char *seqnum;
+	char *sia;
+};
+
+RB_HEAD(ccr_mft_tree, ccr_mft);
+RB_PROTOTYPE(ccr_mft_tree, ccr_mft, entry, ccr_mft_cmp);
+
+RB_HEAD(ccr_vrp_tree, vrp);
+RB_PROTOTYPE(ccr_vrp_tree, vrp, entry, ccr_vrp_cmp);
+
+struct ccr_tas_ski {
+	RB_ENTRY(ccr_tas_ski) entry;
+	unsigned char keyid[SHA_DIGEST_LENGTH];
+};
+
+RB_HEAD(ccr_tas_tree, ccr_tas_ski);
+RB_PROTOTYPE(ccr_tas_tree, ccr_tas_ski, entry, ccr_tas_ski_cmp);
+
+struct ccr {
+	struct ccr_mft_tree mfts;
+	struct ccr_vrp_tree vrps;
+	struct ccr_tas_tree tas;
+	char *mfts_hash;
+	char *vrps_hash;
+	char *vaps_hash;
+	char *tas_hash;
+	unsigned char *der;
+	size_t der_len;
+};
+
 struct validation_data {
 	struct vrp_tree	vrps;
 	struct brk_tree	brks;
 	struct vap_tree	vaps;
 	struct vsp_tree	vsps;
 	struct nca_tree ncas;
+	struct ccr ccr;
 };
 
 /*
@@ -973,15 +1011,25 @@ extern int	 outformats;
 #define FORMAT_CSV	0x04
 #define FORMAT_JSON	0x08
 #define FORMAT_OMETRIC	0x10
+#define FORMAT_CCR	0x20
 
 int		 outputfiles(struct validation_data *, struct stats *);
-int		 outputheader(FILE *, struct stats *);
+int		 outputheader(FILE *, struct validation_data *, struct stats *);
 int		 output_bgpd(FILE *, struct validation_data *, struct stats *);
 int		 output_bird(FILE *, struct validation_data *, struct stats *);
 int		 output_csv(FILE *, struct validation_data *, struct stats *);
 int		 output_json(FILE *, struct validation_data *, struct stats *);
 int		 output_ometric(FILE *, struct validation_data *,
 		    struct stats *);
+int		 output_ccr_der(FILE *, struct validation_data *, struct stats *);
+
+/*
+ * Canonical Cache Representation
+ */
+void ccr_insert_mft(struct ccr_mft_tree *, const struct mft *);
+void ccr_insert_roa(struct ccr_vrp_tree *, const struct roa *);
+void ccr_insert_tas(struct ccr_tas_tree *, const struct cert *);
+void serialize_ccr_content(struct validation_data *);
 
 void		 logx(const char *fmt, ...)
 		    __attribute__((format(printf, 1, 2)));

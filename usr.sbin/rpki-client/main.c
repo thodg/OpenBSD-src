@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.293 2025/08/14 15:12:00 claudio Exp $ */
+/*	$OpenBSD: main.c,v 1.297 2025/09/06 11:55:44 job Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -408,7 +408,7 @@ rrdp_http_done(unsigned int id, enum http_result res, const char *last_mod)
 }
 
 /*
- * Add a file (CER, ROA, CRL) from an MFT file, RFC 6486.
+ * Add a file (CER, ROA, CRL, ...) from a manifest fileList, RFC 9286.
  * These are always relative to the directory in which "mft" sits.
  */
 static void
@@ -634,6 +634,8 @@ entity_process(struct ibuf *b, struct validation_data *vd, struct stats *st)
 		cert = cert_read(b);
 		switch (cert->purpose) {
 		case CERT_PURPOSE_TA:
+			ccr_insert_tas(&vd->ccr.tas, cert);
+			/* FALLTHROUGH */
 		case CERT_PURPOSE_CA:
 			queue_add_from_cert(cert, &vd->ncas);
 			break;
@@ -658,6 +660,7 @@ entity_process(struct ibuf *b, struct validation_data *vd, struct stats *st)
 			repo_stat_inc(rp, talid, type, STYPE_SEQNUM_GAP);
 		queue_add_from_mft(mft);
 		cert_remove_nca(&vd->ncas, mft->certid, rp);
+		ccr_insert_mft(&vd->ccr.mfts, mft);
 		mft_free(mft);
 		break;
 	case RTYPE_CRL:
@@ -671,9 +674,10 @@ entity_process(struct ibuf *b, struct validation_data *vd, struct stats *st)
 			break;
 		}
 		roa = roa_read(b);
-		if (roa->valid)
+		if (roa->valid) {
 			roa_insert_vrps(&vd->vrps, roa, rp);
-		else
+			ccr_insert_roa(&vd->ccr.vrps, roa);
+		} else
 			repo_stat_inc(rp, talid, type, STYPE_INVALID);
 		roa_free(roa);
 		break;
@@ -1021,6 +1025,9 @@ main(int argc, char *argv[])
 	RB_INIT(&vd.vaps);
 	RB_INIT(&vd.vsps);
 	RB_INIT(&vd.ncas);
+	RB_INIT(&vd.ccr.mfts);
+	RB_INIT(&vd.ccr.vrps);
+	RB_INIT(&vd.ccr.tas);
 
 	/* If started as root, priv-drop to _rpki-client */
 	if (getuid() == 0) {
@@ -1164,6 +1171,7 @@ main(int argc, char *argv[])
 			err(1, "output directory %s", outputdir);
 		if (outformats == 0)
 			outformats = FORMAT_OPENBGPD;
+		outformats |= FORMAT_CCR;
 	}
 
 	check_fs_size(cachefd, cachedir);
@@ -1540,6 +1548,8 @@ main(int argc, char *argv[])
 	}
 	repo_stats_collect(sum_repostats, &stats.repo_stats);
 
+	serialize_ccr_content(&vd);
+
 	if (outputfiles(&vd, &stats))
 		rc = 1;
 
@@ -1549,6 +1559,9 @@ main(int argc, char *argv[])
 	    (long long)stats.user_time.tv_sec,
 	    (long long)stats.system_time.tv_sec);
 	printf("Skiplist entries: %u\n", stats.skiplistentries);
+	printf("CCR manifest state hash: %s\n", vd.ccr.mfts_hash);
+	printf("CCR ROA payloads hash: %s\n", vd.ccr.vrps_hash);
+	printf("CCR ASPA payloads hash: %s\n", vd.ccr.vaps_hash);
 	printf("Route Origin Authorizations: %u (%u failed parse, %u "
 	    "invalid)\n", stats.repo_tal_stats.roas,
 	    stats.repo_tal_stats.roas_fail,

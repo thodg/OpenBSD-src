@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rpki-client.8,v 1.127 2025/08/02 13:24:16 job Exp $
+.\"	$OpenBSD: rpki-client.8,v 1.129 2025/08/24 18:25:47 job Exp $
 .\"
 .\" Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: August 2 2025 $
+.Dd $Mdocdate: August 24 2025 $
 .Dt RPKI-CLIENT 8
 .Os
 .Sh NAME
@@ -320,6 +320,9 @@ is specified.
 cached repository data.
 .It Pa /var/db/rpki-client/openbgpd
 default roa-set output file.
+.It Pa /var/db/rpki-client/rpki.ccr
+DER-encoded canonical cache representation file.
+This facility is experimental and is still subject to change.
 .El
 .Sh EXIT STATUS
 .Ex -std

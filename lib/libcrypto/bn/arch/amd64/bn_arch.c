@@ -1,4 +1,4 @@
-/*	$OpenBSD: bn_arch.c,v 1.12 2025/08/14 15:29:17 jsing Exp $ */
+/*	$OpenBSD: bn_arch.c,v 1.17 2025/09/01 15:33:23 jsing Exp $ */
 /*
  * Copyright (c) 2023 Joel Sing <jsing@openbsd.org>
  *
@@ -81,22 +81,6 @@ bn_mod_sub_words(BN_ULONG *r, const BN_ULONG *a, const BN_ULONG *b,
 }
 #endif
 
-#ifdef HAVE_BN_MUL_ADD_WORDS
-BN_ULONG
-bn_mul_add_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
-{
-	return bignum_cmadd(num, (uint64_t *)rd, w, num, (const uint64_t *)ad);
-}
-#endif
-
-#ifdef HAVE_BN_MUL_WORDS
-BN_ULONG
-bn_mul_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
-{
-	return bignum_cmul(num, (uint64_t *)rd, w, num, (const uint64_t *)ad);
-}
-#endif
-
 #ifdef HAVE_BN_MUL_COMBA4
 void
 bn_mul_comba4(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd)
@@ -142,13 +126,29 @@ bn_mul_comba8(BN_ULONG *rd, const BN_ULONG *ad, const BN_ULONG *bd)
 }
 #endif
 
-#ifdef HAVE_BN_SQR
-int
-bn_sqr(BIGNUM *r, const BIGNUM *a, int r_len, BN_CTX *ctx)
+#ifdef HAVE_BN_MUL_WORDS
+void
+bn_mul_words(BN_ULONG *r, const BN_ULONG *a, int a_len, const BN_ULONG *b,
+    int b_len)
 {
-	bignum_sqr(r_len, (uint64_t *)r->d, a->top, (const uint64_t *)a->d);
+	bignum_mul(a_len + b_len, (uint64_t *)r, a_len, (const uint64_t *)a,
+	    b_len, (const uint64_t *)b);
+}
+#endif
 
-	return 1;
+#ifdef HAVE_BN_MULW_ADD_WORDS
+BN_ULONG
+bn_mulw_add_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
+{
+	return bignum_cmadd(num, (uint64_t *)rd, w, num, (const uint64_t *)ad);
+}
+#endif
+
+#ifdef HAVE_BN_MULW_WORDS
+BN_ULONG
+bn_mulw_words(BN_ULONG *rd, const BN_ULONG *ad, int num, BN_ULONG w)
+{
+	return bignum_cmul(num, (uint64_t *)rd, w, num, (const uint64_t *)ad);
 }
 #endif
 
@@ -188,6 +188,14 @@ bn_sqr_comba8(BN_ULONG *rd, const BN_ULONG *ad)
 	}
 
 	bignum_sqr_8_16_alt((uint64_t *)rd, (const uint64_t *)ad);
+}
+#endif
+
+#ifdef HAVE_BN_SQR_WORDS
+void
+bn_sqr_words(BN_ULONG *rd, const BN_ULONG *ad, int a_len)
+{
+	bignum_sqr(a_len * 2, (uint64_t *)rd, a_len, (const uint64_t *)ad);
 }
 #endif
 
