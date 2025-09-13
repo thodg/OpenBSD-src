@@ -1,4 +1,4 @@
-/*	$OpenBSD: x509.c,v 1.117 2025/08/01 17:29:30 tb Exp $ */
+/*	$OpenBSD: x509.c,v 1.119 2025/09/11 08:21:00 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
@@ -28,6 +28,8 @@
 
 #include "extern.h"
 
+#define GENTIME_LENGTH 15
+
 ASN1_OBJECT	*certpol_oid;	/* id-cp-ipAddr-asNumber cert policy */
 ASN1_OBJECT	*caissuers_oid;	/* 1.3.6.1.5.5.7.48.2 (caIssuers) */
 ASN1_OBJECT	*carepo_oid;	/* 1.3.6.1.5.5.7.48.5 (caRepository) */
@@ -46,6 +48,7 @@ ASN1_OBJECT	*aspa_oid;	/* id-ct-ASPA */
 ASN1_OBJECT	*tak_oid;	/* id-ct-SignedTAL */
 ASN1_OBJECT	*geofeed_oid;	/* id-ct-geofeedCSVwithCRLF */
 ASN1_OBJECT	*spl_oid;	/* id-ct-signedPrefixList */
+ASN1_OBJECT	*ccr_oid;	/* CanonicalCacheRepresentation PEN OID */
 
 static const struct {
 	const char	 *oid;
@@ -122,6 +125,10 @@ static const struct {
 	{
 		.oid = "1.2.840.113549.1.9.16.1.51",
 		.ptr = &spl_oid,
+	},
+	{
+		.oid = "1.3.6.1.4.1.41948.825",
+		.ptr = &ccr_oid,
 	},
 };
 
@@ -303,6 +310,21 @@ x509_get_time(const ASN1_TIME *at, time_t *t)
 		return 0;
 	if ((*t = timegm(&tm)) == -1)
 		errx(1, "timegm failed");
+	return 1;
+}
+
+int
+x509_get_generalized_time(const char *fn, const char *descr,
+    const ASN1_TIME *at, time_t *t)
+{
+	if (at->length != GENTIME_LENGTH) {
+		warnx("%s: %s time format invalid", fn, descr);
+		return 0;
+	}
+	if (!x509_get_time(at, t)) {
+		warnx("%s: parsing %s failed", fn, descr);
+		return 0;
+	}
 	return 1;
 }
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: mft.c,v 1.130 2025/08/24 12:17:12 tb Exp $ */
+/*	$OpenBSD: mft.c,v 1.132 2025/09/11 08:21:00 tb Exp $ */
 /*
  * Copyright (c) 2022 Theo Buehler <tb@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -58,8 +58,6 @@ ASN1_SEQUENCE(FileAndHash) = {
 	ASN1_SIMPLE(FileAndHash, hash, ASN1_BIT_STRING),
 } ASN1_SEQUENCE_END(FileAndHash);
 
-#define GENTIME_LENGTH 15
-
 /*
  * Determine rtype corresponding to file extension. Returns RTYPE_INVALID
  * on error or unknown extension.
@@ -95,6 +93,8 @@ rtype_from_file_extension(const char *fn)
 		return RTYPE_GEOFEED;
 	if (strcasecmp(fn + sz - 4, ".spl") == 0)
 		return RTYPE_SPL;
+	if (strcasecmp(fn + sz - 4, ".ccr") == 0)
+		return RTYPE_CCR;
 
 	return RTYPE_INVALID;
 }
@@ -310,27 +310,13 @@ mft_parse_econtent(const char *fn, struct mft *mft, const unsigned char *d,
 	if (mft->seqnum == NULL)
 		goto out;
 
-	/*
-	 * OpenSSL's DER decoder implementation will accept a GeneralizedTime
-	 * which doesn't conform to RFC 5280. So, double check.
-	 */
-	if (ASN1_STRING_length(mft_asn1->thisUpdate) != GENTIME_LENGTH) {
-		warnx("%s: embedded from time format invalid", fn);
+	if (!x509_get_generalized_time(fn, "manifest thisUpdate",
+	    mft_asn1->thisUpdate, &mft->thisupdate))
 		goto out;
-	}
-	if (ASN1_STRING_length(mft_asn1->nextUpdate) != GENTIME_LENGTH) {
-		warnx("%s: embedded until time format invalid", fn);
-		goto out;
-	}
 
-	if (!x509_get_time(mft_asn1->thisUpdate, &mft->thisupdate)) {
-		warnx("%s: parsing manifest thisUpdate failed", fn);
+	if (!x509_get_generalized_time(fn, "manifest nextUpdate",
+	    mft_asn1->nextUpdate, &mft->nextupdate))
 		goto out;
-	}
-	if (!x509_get_time(mft_asn1->nextUpdate, &mft->nextupdate)) {
-		warnx("%s: parsing manifest nextUpdate failed", fn);
-		goto out;
-	}
 
 	if (mft->thisupdate > mft->nextupdate) {
 		warnx("%s: bad update interval", fn);
