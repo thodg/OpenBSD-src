@@ -613,9 +613,9 @@ ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	if (ump->um_devvp->v_type != VBAD)
 		ump->um_devvp->v_specmountpoint = NULL;
 	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
-	vinvalbuf(ump->um_devvp, V_SAVE, NOCRED, p, 0, INFSLP);
 	(void)VOP_CLOSE(ump->um_devvp, mfs->m_read_only ? FREAD :
-			FREAD|FWRITE, NOCRED, p);
+	    FREAD|FWRITE, NOCRED, p);
+	vput(ump->um_devvp);
 	free(mfs, M_UFSMNT, sizeof *mfs);
 	free(ump, M_UFSMNT, sizeof *ump);
 	mp->mnt_data = NULL;
