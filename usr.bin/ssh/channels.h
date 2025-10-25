@@ -1,4 +1,4 @@
-/* $OpenBSD: channels.h,v 1.160 2025/08/18 03:43:01 djm Exp $ */
+/* $OpenBSD: channels.h,v 1.162 2025/10/07 08:02:32 djm Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -145,6 +145,7 @@ struct Channel {
 	int     ctl_chan;	/* control channel (multiplexed connections) */
 	uint32_t ctl_child_id;	/* child session for mux controllers */
 	int	have_ctl_child_id;/* non-zero if ctl_child_id is valid */
+	int     remote_has_tty;	/* remote side has a tty */
 	int     isatty;		/* rfd is a tty */
 	int	client_tty;	/* (client) TTY has been requested */
 	int     force_drain;	/* force close on iEOF */
@@ -279,8 +280,9 @@ struct Channel {
 	c->efd != -1 && (!(c->flags & (CHAN_EOF_RCVD|CHAN_CLOSE_RCVD)) || \
 	sshbuf_len(c->extended) > 0))
 
-/* Add channel management structures to SSH transport instance */
+/* Add/remove channel management structures to/from SSH transport instance */
 void channel_init_channels(struct ssh *ssh);
+void channel_free_channels(struct ssh *ssh);
 
 /* channel management */
 

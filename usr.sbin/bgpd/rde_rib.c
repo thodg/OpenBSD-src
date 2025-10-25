@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_rib.c,v 1.269 2025/04/24 20:17:49 claudio Exp $ */
+/*	$OpenBSD: rde_rib.c,v 1.272 2025/09/24 13:27:18 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org>
@@ -42,8 +42,8 @@ struct rib flowrib = { .id = 1, .tree = RB_INITIALIZER(&flowrib.tree) };
 struct rib_entry *rib_add(struct rib *, struct pt_entry *);
 static inline int rib_compare(const struct rib_entry *,
 			const struct rib_entry *);
-void rib_remove(struct rib_entry *);
-int rib_empty(struct rib_entry *);
+static void rib_remove(struct rib_entry *);
+static inline int rib_empty(struct rib_entry *);
 static void rib_dump_abort(uint16_t);
 
 RB_PROTOTYPE(rib_tree, rib_entry, rib_e, rib_compare);
@@ -368,13 +368,12 @@ rib_add(struct rib *rib, struct pt_entry *pte)
 		return (NULL);
 	}
 
-
 	rdemem.rib_cnt++;
 
 	return (re);
 }
 
-void
+static void
 rib_remove(struct rib_entry *re)
 {
 	if (!rib_empty(re))
@@ -393,7 +392,7 @@ rib_remove(struct rib_entry *re)
 	rdemem.rib_cnt--;
 }
 
-int
+static inline int
 rib_empty(struct rib_entry *re)
 {
 	return TAILQ_EMPTY(&re->prefix_h);
@@ -436,6 +435,8 @@ rib_dump_r(struct rib_context *ctx)
 
 	for (i = 0; re != NULL; re = next) {
 		next = RB_NEXT(rib_tree, unused, re);
+		if (rib_empty(re))
+			continue;
 		if (re->rib_id != ctx->ctx_id)
 			fatalx("%s: Unexpected RIB %u != %u.", __func__,
 			    re->rib_id, ctx->ctx_id);
@@ -495,6 +496,19 @@ rib_dump_runner(void)
 }
 
 static void
+rib_dump_free(struct rib_context *ctx)
+{
+	if (ctx->ctx_done)
+		ctx->ctx_done(ctx->ctx_arg, ctx->ctx_aid);
+	if (ctx->ctx_re && rib_empty(re_unlock(ctx->ctx_re)))
+		rib_remove(ctx->ctx_re);
+	if (ctx->ctx_p && prefix_is_dead(prefix_unlock(ctx->ctx_p)))
+		prefix_adjout_destroy(ctx->ctx_p);
+	LIST_REMOVE(ctx, entry);
+	free(ctx);
+}
+
+static void
 rib_dump_abort(uint16_t id)
 {
 	struct rib_context *ctx, *next;
@@ -502,14 +516,7 @@ rib_dump_abort(uint16_t id)
 	LIST_FOREACH_SAFE(ctx, &rib_dumps, entry, next) {
 		if (id != ctx->ctx_id)
 			continue;
-		if (ctx->ctx_done)
-			ctx->ctx_done(ctx->ctx_arg, ctx->ctx_aid);
-		if (ctx->ctx_re && rib_empty(re_unlock(ctx->ctx_re)))
-			rib_remove(ctx->ctx_re);
-		if (ctx->ctx_p && prefix_is_dead(prefix_unlock(ctx->ctx_p)))
-			prefix_adjout_destroy(ctx->ctx_p);
-		LIST_REMOVE(ctx, entry);
-		free(ctx);
+		rib_dump_free(ctx);
 	}
 }
 
@@ -521,14 +528,7 @@ rib_dump_terminate(void *arg)
 	LIST_FOREACH_SAFE(ctx, &rib_dumps, entry, next) {
 		if (ctx->ctx_arg != arg)
 			continue;
-		if (ctx->ctx_done)
-			ctx->ctx_done(ctx->ctx_arg, ctx->ctx_aid);
-		if (ctx->ctx_re && rib_empty(re_unlock(ctx->ctx_re)))
-			rib_remove(ctx->ctx_re);
-		if (ctx->ctx_p && prefix_is_dead(prefix_unlock(ctx->ctx_p)))
-			prefix_adjout_destroy(ctx->ctx_p);
-		LIST_REMOVE(ctx, entry);
-		free(ctx);
+		rib_dump_free(ctx);
 	}
 }
 

@@ -1,4 +1,4 @@
-/* $OpenBSD: monitor_wrap.c,v 1.140 2025/07/04 07:47:35 djm Exp $ */
+/* $OpenBSD: monitor_wrap.c,v 1.142 2025/09/25 06:31:42 djm Exp $ */
 /*
  * Copyright 2002 Niels Provos <provos@citi.umich.edu>
  * Copyright 2002 Markus Friedl <markus@openbsd.org>
@@ -33,9 +33,9 @@
 #include <errno.h>
 #include <pwd.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 #include <unistd.h>
 
 #ifdef WITH_OPENSSL
@@ -315,6 +315,17 @@ mm_decode_activate_server_options(struct ssh *ssh, struct sshbuf *m)
 	log_verbose_reset();
 	for (i = 0; i < options.num_log_verbose; i++)
 		log_verbose_add(options.log_verbose[i]);
+
+	/* use the macro hell to clean up too */
+#define M_CP_STROPT(x) free(newopts->x)
+#define M_CP_STRARRAYOPT(x, nx) do { \
+		for (i = 0; i < newopts->nx; i++) \
+			free(newopts->x[i]); \
+		free(newopts->x); \
+	} while (0)
+	COPY_MATCH_STRING_OPTS();
+#undef M_CP_STROPT
+#undef M_CP_STRARRAYOPT
 	free(newopts);
 }
 

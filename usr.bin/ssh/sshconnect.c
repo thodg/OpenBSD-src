@@ -1,4 +1,4 @@
-/* $OpenBSD: sshconnect.c,v 1.373 2025/08/12 11:09:48 sthen Exp $ */
+/* $OpenBSD: sshconnect.c,v 1.376 2025/09/25 06:23:19 jsg Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -759,7 +759,7 @@ hostkeys_find_by_key(const char *host, const char *ip, const struct sshkey *key,
     char **system_hostfiles, u_int num_system_hostfiles,
     char ***names, u_int *nnames)
 {
-	struct find_by_key_ctx ctx = {0, 0, 0, 0, 0};
+	struct find_by_key_ctx ctx = {NULL, NULL, NULL, NULL, 0};
 	u_int i;
 
 	*names = NULL;
@@ -1396,6 +1396,7 @@ check_host_key(char *hostname, const struct ssh_conn_info *cinfo,
 		options.update_hostkeys = 0;
 	}
 
+	sshkey_free(raw_key);
 	free(ip);
 	free(host);
 	if (host_hostkeys != NULL)
@@ -1602,7 +1603,6 @@ show_other_keys(struct hostkeys *hostkeys, struct sshkey *key)
 		KEY_RSA,
 		KEY_ECDSA,
 		KEY_ED25519,
-		KEY_XMSS,
 		-1
 	};
 	int i, ret = 0;
@@ -1725,7 +1725,7 @@ maybe_add_key_to_agent(const char *authfile, struct sshkey *private,
 	if ((r = ssh_add_identity_constrained(auth_sock, private,
 	    comment == NULL ? authfile : comment,
 	    options.add_keys_to_agent_lifespan,
-	    (options.add_keys_to_agent == 3), 0, skprovider, NULL, 0)) == 0)
+	    (options.add_keys_to_agent == 3), skprovider, NULL, 0)) == 0)
 		debug("identity added to agent: %s", authfile);
 	else
 		debug("could not add identity to agent: %s (%d)", authfile, r);

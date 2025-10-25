@@ -1,4 +1,4 @@
-/* $OpenBSD: channels.c,v 1.448 2025/08/18 03:43:01 djm Exp $ */
+/* $OpenBSD: channels.c,v 1.452 2025/10/07 08:02:32 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -360,7 +360,7 @@ channel_classify(struct ssh *ssh, Channel *c)
 {
 	struct ssh_channels *sc = ssh->chanctxt;
 	const char *type = c->xctype == NULL ? c->ctype : c->xctype;
-	const char *classifier = c->isatty ?
+	const char *classifier = (c->isatty || c->remote_has_tty) ?
 	    sc->bulk_classifier_tty : sc->bulk_classifier_notty;
 
 	c->bulk = type != NULL && match_pattern_list(type, classifier, 0) == 1;
@@ -560,7 +560,7 @@ channel_new(struct ssh *ssh, char *ctype, int type, int rfd, int wfd, int efd,
 void
 channel_set_tty(struct ssh *ssh, Channel *c)
 {
-	c->isatty = 1;
+	c->remote_has_tty = 1;
 	channel_classify(ssh, c);
 }
 
@@ -849,6 +849,27 @@ channel_free_all(struct ssh *ssh)
 	sc->x11_fake_data_len = 0;
 }
 
+void
+channel_free_channels(struct ssh *ssh)
+{
+	struct ssh_channels *sc;
+
+	if (ssh == NULL || ssh->chanctxt == NULL)
+		return;
+	channel_free_all(ssh);
+	channel_clear_permission(ssh, FORWARD_USER, FORWARD_LOCAL);
+	channel_clear_permission(ssh, FORWARD_USER, FORWARD_REMOTE);
+	channel_clear_permission(ssh, FORWARD_ADM, FORWARD_LOCAL);
+	channel_clear_permission(ssh, FORWARD_ADM, FORWARD_REMOTE);
+	sc = ssh->chanctxt;
+	free(sc->bulk_classifier_tty);
+	free(sc->bulk_classifier_notty);
+	free(sc->channel_pre);
+	free(sc->channel_post);
+	freezero(sc, sizeof(*sc));
+	ssh->chanctxt = NULL;
+}
+
 /*
  * Closes the sockets/fds of all channels.  This is used to close extra file
  * descriptors after a fork.
@@ -1051,7 +1072,8 @@ channel_format_status(const Channel *c)
 	    c->rfd, c->wfd, c->efd, c->sock, c->ctl_chan,
 	    c->have_ctl_child_id ? "c" : "nc", c->ctl_child_id,
 	    c->io_want, c->io_ready,
-	    c->isatty ? "T" : "", c->bulk ? "B" : "I");
+	    c->isatty ? "T" : (c->remote_has_tty ? "RT" : ""),
+	    c->bulk ? "B" : "I");
 	return ret;
 }
 
@@ -4522,7 +4544,7 @@ channel_add_permission(struct ssh *ssh, int who, int where,
 	 * host/port_to_connect.
 	 */
 	permission_set_add(ssh, who, where,
-	    local ? host : 0, local ? port : 0,
+	    local ? host : NULL, local ? port : 0,
 	    local ? NULL : host, NULL, local ? 0 : port, NULL);
 	pset->all_permitted = 0;
 }
@@ -4545,10 +4567,13 @@ void
 channel_clear_permission(struct ssh *ssh, int who, int where)
 {
 	struct permission **permp;
-	u_int *npermp;
+	u_int i, *npermp;
 
 	permission_set_get_array(ssh, who, where, &permp, &npermp);
-	*permp = xrecallocarray(*permp, *npermp, 0, sizeof(**permp));
+	for (i = 0; i < *npermp; i++)
+		fwd_perm_clear((*permp) + i);
+	free(*permp);
+	*permp = NULL;
 	*npermp = 0;
 }
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: filemode.c,v 1.67 2025/08/01 16:33:58 tb Exp $ */
+/*	$OpenBSD: filemode.c,v 1.69 2025/09/12 10:01:07 tb Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -347,6 +347,13 @@ rtype_from_der(const char *fn, const unsigned char *der, size_t len)
 	if ((cms = d2i_CMS_ContentInfo(NULL, &p, len)) != NULL) {
 		const ASN1_OBJECT *obj;
 
+		if ((obj = CMS_get0_type(cms)) != NULL) {
+			if (OBJ_cmp(obj, ccr_oid) == 0) {
+				rtype = RTYPE_CCR;
+				goto out;
+			}
+		}
+
 		if (CMS_get0_SignerInfos(cms) == NULL) {
 			warnx("%s: CMS object not signedData", fn);
 			goto out;
@@ -413,6 +420,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	static int num;
 	struct aspa *aspa = NULL;
 	struct cert *cert = NULL;
+	struct ccr *ccr = NULL;
 	struct crl *crl = NULL;
 	struct gbr *gbr = NULL;
 	struct geofeed *geofeed = NULL;
@@ -481,6 +489,12 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		expires = &aspa->expires;
 		notbefore = &cert->notbefore;
 		notafter = &cert->notafter;
+		break;
+	case RTYPE_CCR:
+		ccr = ccr_parse(file, buf, len);
+		if (ccr == NULL)
+			break;
+		ccr_print(ccr);
 		break;
 	case RTYPE_CER:
 		cert = cert_parse(file, buf, len);
@@ -717,6 +731,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
  out:
 	aspa_free(aspa);
 	cert_free(cert);
+	ccr_free(ccr);
 	crl_free(crl);
 	gbr_free(gbr);
 	geofeed_free(geofeed);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_input.c,v 1.461 2025/08/18 13:54:01 jan Exp $	*/
+/*	$OpenBSD: tcp_input.c,v 1.464 2025/09/16 17:29:35 bluhm Exp $	*/
 /*	$NetBSD: tcp_input.c,v 1.23 1996/02/13 23:43:44 christos Exp $	*/
 
 /*
@@ -124,22 +124,6 @@ struct timeval tcp_ackdrop_ppslim_last;
 /* for TCP SACK comparisons */
 #define	SEQ_MIN(a,b)	(SEQ_LT(a,b) ? (a) : (b))
 #define	SEQ_MAX(a,b)	(SEQ_GT(a,b) ? (a) : (b))
-
-/*
- * Neighbor Discovery, Neighbor Unreachability Detection Upper layer hint.
- */
-#ifdef INET6
-#define ND6_HINT(tp, hint) \
-do { \
-	if (tp && tp->t_inpcb &&					\
-	    ISSET(tp->t_inpcb->inp_flags, INP_IPV6) &&			\
-	    rtisvalid(tp->t_inpcb->inp_route.ro_rt)) {			\
-		nd6_nud_hint(tp->t_inpcb->inp_route.ro_rt, hint);	\
-	} \
-} while (0)
-#else
-#define ND6_HINT(tp, hint)
-#endif
 
 #ifdef TCP_ECN
 /*
@@ -311,9 +295,6 @@ tcp_flush_queue(struct tcpcb *tp)
 {
 	struct socket *so = tp->t_inpcb->inp_socket;
 	struct tcpqent *q, *nq;
-#ifdef INET6
-	int nd6_maxnudhint_local = atomic_load_int(&nd6_maxnudhint);
-#endif
 	int flags;
 
 	/*
@@ -333,7 +314,6 @@ tcp_flush_queue(struct tcpcb *tp)
 
 		nq = TAILQ_NEXT(q, tcpqe_q);
 		TAILQ_REMOVE(&tp->t_segq, q, tcpqe_q);
-		ND6_HINT(tp, nd6_maxnudhint_local);
 		if (so->so_rcv.sb_state & SS_CANTRCVMORE)
 			m_freem(q->tcpqe_m);
 		else {
@@ -344,9 +324,7 @@ tcp_flush_queue(struct tcpcb *tp)
 		pool_put(&tcpqe_pool, q);
 		q = nq;
 	} while (q != NULL && q->tcpqe_tcp->th_seq == tp->rcv_nxt);
-	tp->t_flags |= TF_BLOCKOUTPUT;
 	sorwakeup(so);
-	tp->t_flags &= ~TF_BLOCKOUTPUT;
 	return (flags);
 }
 
@@ -427,9 +405,6 @@ tcp_input_solocked(struct mbuf **mp, int *offp, int proto, int af,
 	struct ip6_hdr *ip6 = NULL;
 #endif /* INET6 */
 	int do_ecn = 0;
-#ifdef INET6
-	int nd6_maxnudhint_local = atomic_load_int(&nd6_maxnudhint);
-#endif
 #ifdef TCP_ECN
 	u_char iptos;
 #endif
@@ -817,60 +792,6 @@ findpcb:
 				/*
 				 * Received a SYN.
 				 */
-#ifdef INET6
-				/*
-				 * If deprecated address is forbidden, we do
-				 * not accept SYN to deprecated interface
-				 * address to prevent any new inbound
-				 * connection from getting established.
-				 * When we do not accept SYN, we send a TCP
-				 * RST, with deprecated source address (instead
-				 * of dropping it).  We compromise it as it is
-				 * much better for peer to send a RST, and
-				 * RST will be the final packet for the
-				 * exchange.
-				 *
-				 * If we do not forbid deprecated addresses, we
-				 * accept the SYN packet.  RFC2462 does not
-				 * suggest dropping SYN in this case.
-				 * If we decipher RFC2462 5.5.4, it says like
-				 * this:
-				 * 1. use of deprecated addr with existing
-				 *    communication is okay - "SHOULD continue
-				 *    to be used"
-				 * 2. use of it with new communication:
-				 *   (2a) "SHOULD NOT be used if alternate
-				 *        address with sufficient scope is
-				 *        available"
-				 *   (2b) nothing mentioned otherwise.
-				 * Here we fall into (2b) case as we have no
-				 * choice in our source address selection - we
-				 * must obey the peer.
-				 *
-				 * The wording in RFC2462 is confusing, and
-				 * there are multiple description text for
-				 * deprecated address handling - worse, they
-				 * are not exactly the same.  I believe 5.5.4
-				 * is the best one, so we follow 5.5.4.
-				 */
-				if (ip6 &&
-				    !atomic_load_int(&ip6_use_deprecated)) {
-					struct in6_ifaddr *ia6;
-					struct ifnet *ifp =
-					    if_get(m->m_pkthdr.ph_ifidx);
-
-					if (ifp &&
-					    (ia6 = in6ifa_ifpwithaddr(ifp,
-					    &ip6->ip6_dst)) &&
-					    (ia6->ia6_flags &
-					    IN6_IFF_DEPRECATED)) {
-						tp = NULL;
-						if_put(ifp);
-						goto dropwithreset;
-					}
-					if_put(ifp);
-				}
-#endif
 
 				/*
 				 * LISTEN socket received a SYN
@@ -1027,7 +948,6 @@ findpcb:
 				tcpstat_pkt(tcps_rcvackpack, tcps_rcvackbyte,
 				    acked);
 				tp->t_rcvacktime = now;
-				ND6_HINT(tp, nd6_maxnudhint_local);
 
 				mtx_enter(&so->so_snd.sb_mtx);
 				sbdrop(&so->so_snd, acked);
@@ -1079,11 +999,8 @@ findpcb:
 					TCP_TIMER_ARM(tp, TCPT_REXMT, tp->t_rxtcur);
 
 				tcp_update_sndspace(tp);
-				if (sb_notify(&so->so_snd)) {
-					tp->t_flags |= TF_BLOCKOUTPUT;
+				if (sb_notify(&so->so_snd))
 					sowwakeup(so);
-					tp->t_flags &= ~TF_BLOCKOUTPUT;
-				}
 				if (so->so_snd.sb_cc ||
 				    tp->t_flags & TF_NEEDOUTPUT)
 					(void) tcp_output(tp);
@@ -1112,7 +1029,6 @@ findpcb:
 			/* Packet has most recent segment, no urgent exists. */
 			tp->rcv_up = tp->rcv_nxt;
 			tcpstat_pkt(tcps_rcvpack, tcps_rcvbyte, tlen);
-			ND6_HINT(tp, nd6_maxnudhint_local);
 
 			TCP_SETUP_ACK(tp, tiflags, m);
 			/*
@@ -1136,9 +1052,7 @@ findpcb:
 				sbappendstream(&so->so_rcv, m);
 				mtx_leave(&so->so_rcv.sb_mtx);
 			}
-			tp->t_flags |= TF_BLOCKOUTPUT;
 			sorwakeup(so);
-			tp->t_flags &= ~TF_BLOCKOUTPUT;
 			if (tp->t_flags & (TF_ACKNOW|TF_NEEDOUTPUT))
 				(void) tcp_output(tp);
 			if (solocked != NULL)
@@ -1258,9 +1172,7 @@ findpcb:
 
 		if (tiflags & TH_ACK && SEQ_GT(tp->snd_una, tp->iss)) {
 			tcpstat_inc(tcps_connects);
-			tp->t_flags |= TF_BLOCKOUTPUT;
 			soisconnected(so);
-			tp->t_flags &= ~TF_BLOCKOUTPUT;
 			tp->t_state = TCPS_ESTABLISHED;
 			TCP_TIMER_ARM(tp, TCPT_KEEP,
 			    atomic_load_int(&tcp_keepidle));
@@ -1547,9 +1459,7 @@ trimthenstep6:
 	 */
 	case TCPS_SYN_RECEIVED:
 		tcpstat_inc(tcps_connects);
-		tp->t_flags |= TF_BLOCKOUTPUT;
 		soisconnected(so);
-		tp->t_flags &= ~TF_BLOCKOUTPUT;
 		tp->t_state = TCPS_ESTABLISHED;
 		TCP_TIMER_ARM(tp, TCPT_KEEP, atomic_load_int(&tcp_keepidle));
 		/* Do window scaling? */
@@ -1817,7 +1727,6 @@ trimthenstep6:
 			tp->snd_cwnd = ulmin(cw + incr,
 			    TCP_MAXWIN << tp->snd_scale);
 		}
-		ND6_HINT(tp, nd6_maxnudhint_local);
 		if (acked > so->so_snd.sb_cc) {
 			if (tp->snd_wnd > so->so_snd.sb_cc)
 				tp->snd_wnd -= so->so_snd.sb_cc;
@@ -1839,11 +1748,8 @@ trimthenstep6:
 		}
 
 		tcp_update_sndspace(tp);
-		if (sb_notify(&so->so_snd)) {
-			tp->t_flags |= TF_BLOCKOUTPUT;
+		if (sb_notify(&so->so_snd))
 			sowwakeup(so);
-			tp->t_flags &= ~TF_BLOCKOUTPUT;
-		}
 
 		/*
 		 * If we had a pending ICMP message that referred to data
@@ -1889,9 +1795,7 @@ trimthenstep6:
 				if (so->so_rcv.sb_state & SS_CANTRCVMORE) {
 					int maxidle;
 
-					tp->t_flags |= TF_BLOCKOUTPUT;
 					soisdisconnected(so);
-					tp->t_flags &= ~TF_BLOCKOUTPUT;
 					maxidle = TCPTV_KEEPCNT *
 					    atomic_load_int(&tcp_keepidle);
 					TCP_TIMER_ARM(tp, TCPT_2MSL, maxidle);
@@ -1911,9 +1815,7 @@ trimthenstep6:
 				tp->t_state = TCPS_TIME_WAIT;
 				tcp_canceltimers(tp);
 				TCP_TIMER_ARM(tp, TCPT_2MSL, 2 * TCPTV_MSL);
-				tp->t_flags |= TF_BLOCKOUTPUT;
 				soisdisconnected(so);
-				tp->t_flags &= ~TF_BLOCKOUTPUT;
 			}
 			break;
 
@@ -2047,7 +1949,6 @@ dodata:							/* XXX */
 			tp->rcv_nxt += tlen;
 			tiflags = th->th_flags & TH_FIN;
 			tcpstat_pkt(tcps_rcvpack, tcps_rcvbyte, tlen);
-			ND6_HINT(tp, nd6_maxnudhint_local);
 			if (so->so_rcv.sb_state & SS_CANTRCVMORE)
 				m_freem(m);
 			else {
@@ -2056,9 +1957,7 @@ dodata:							/* XXX */
 				sbappendstream(&so->so_rcv, m);
 				mtx_leave(&so->so_rcv.sb_mtx);
 			}
-			tp->t_flags |= TF_BLOCKOUTPUT;
 			sorwakeup(so);
-			tp->t_flags &= ~TF_BLOCKOUTPUT;
 		} else {
 			m_adj(m, hdroptlen);
 			tiflags = tcp_reass(tp, th, m, &tlen);
@@ -2091,9 +1990,7 @@ dodata:							/* XXX */
 	 */
 	if ((tiflags & TH_FIN) && TCPS_HAVEESTABLISHED(tp->t_state)) {
 		if (TCPS_HAVERCVDFIN(tp->t_state) == 0) {
-			tp->t_flags |= TF_BLOCKOUTPUT;
 			socantrcvmore(so);
-			tp->t_flags &= ~TF_BLOCKOUTPUT;
 			tp->t_flags |= TF_ACKNOW;
 			tp->rcv_nxt++;
 		}
@@ -2123,9 +2020,7 @@ dodata:							/* XXX */
 			tp->t_state = TCPS_TIME_WAIT;
 			tcp_canceltimers(tp);
 			TCP_TIMER_ARM(tp, TCPT_2MSL, 2 * TCPTV_MSL);
-			tp->t_flags |= TF_BLOCKOUTPUT;
 			soisdisconnected(so);
-			tp->t_flags &= ~TF_BLOCKOUTPUT;
 			break;
 
 		/*

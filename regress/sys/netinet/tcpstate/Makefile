@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.4 2025/08/01 21:58:48 bluhm Exp $
+#	$OpenBSD: Makefile,v 1.6 2025/09/17 22:50:08 bluhm Exp $
 
 # Copyright (c) 2025 Alexander Bluhm <bluhm@openbsd.org>
 #
@@ -83,6 +83,7 @@ addr.py: Makefile
 .for var in FAKE_NET REMOTE_SSH
 	echo '${var} = "${${var}}"' >>$@.tmp
 .endfor
+	echo 'CURDIR = "${.CURDIR}"' >>$@.tmp
 	mv $@.tmp $@
 
 # load the pf rules into the kernel of the REMOTE and LOCAL machine
@@ -105,6 +106,14 @@ PYTHON =	PYTHONPATH=${.OBJDIR} python3 -u ${.CURDIR}/
 REGRESS_TARGETS =
 TCP_SCRIPTS !!=	cd ${.CURDIR} && ls -1 tcp*.py
 
+# keepalive is special, it needs sysctl to see effect within a few seconds
+run-tcp_keepalive: tcp_keepalive.py addr.py
+	ssh ${REMOTE_SSH} ${SUDO} sysctl \
+	    net.inet.tcp.keepidle=3 net.inet.tcp.keepintvl=1
+	${SUDO} ${PYTHON}tcp_keepalive.py
+	ssh ${REMOTE_SSH} ${SUDO} sysctl \
+	    net.inet.tcp.keepidle=7200 net.inet.tcp.keepintvl=75
+
 .for t in ${TCP_SCRIPTS:R}
 REGRESS_TARGETS +=	run-$t
 run-$t: $t.py addr.py
@@ -120,12 +129,17 @@ run-netstat-${t:L:S/_//g}: netstat-${t:L:S/_//g}.log
 .endfor
 
 .if ! empty(PF_ANCHOR:Mregress)
-REGRESS_CLEANUP +=	cleanup
-cleanup:
+REGRESS_CLEANUP +=	cleanup-pf
+cleanup-pf:
 	${SUDO} pfctl -a regress -Fr
 	ssh ${REMOTE_SSH} ${SUDO} pfctl -a regress -Fa
 	rm -f stamp-pfctl
 .endif
+
+REGRESS_CLEANUP +=	cleanup-sysctl
+cleanup-sysctl:
+	ssh ${REMOTE_SSH} ${SUDO} sysctl net.inet.tcp.keepinittime=75 \
+	    net.inet.tcp.keepidle=7200 net.inet.tcp.keepintvl=75
 
 CLEANFILES +=		addr.py *.pyc *.log stamp-*
 

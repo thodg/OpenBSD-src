@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvideo.h,v 1.68 2025/08/16 08:13:11 kirill Exp $ */
+/*	$OpenBSD: uvideo.h,v 1.71 2025/09/06 13:45:41 kirill Exp $ */
 
 /*
  * Copyright (c) 2007 Robert Nagy <robert@openbsd.org>
@@ -431,21 +431,6 @@ struct usb_video_colorformat_desc {
 	uByte	bMatrixCoefficients;
 } __packed;
 
-/* Table 3-1: Motion-JPEG Video Format Descriptor */
-struct usb_video_format_mjpeg_desc {
-	uByte	bLength;
-	uByte	bDescriptorType;
-	uByte	bDescriptorSubtype;
-	uByte	bFormatIndex;
-	uByte	bNumFrameDescriptors;
-	uByte	bmFlags;
-	uByte	bDefaultFrameIndex;
-	uByte	bAspectRatioX;
-	uByte	bAspectRatioY;
-	uByte	bmInterlaceFlags;
-	uByte	bCopyProtect;
-} __packed;
-
 struct usb_video_frame_desc {
 	uByte	bLength;
 	uByte	bDescriptorType;
@@ -533,83 +518,14 @@ struct usb_video_frame_desc {
 	/* uDWord ivals[]; frame intervals, length varies */
 } __packed;
 
-/*
- * USB Video Payload Uncompressed
- */
-/* Table 3-1: Uncompressed Video Format Descriptor */
-struct usb_video_format_uncompressed_desc {
-	uByte	bLength;
-	uByte	bDescriptorType;
-	uByte	bDescriptorSubtype;
-	uByte	bFormatIndex;
-	uByte	bNumFrameDescriptors;
-	uByte	guidFormat[16];
-	uByte	bBitsPerPixel;
-	uByte	bDefaultFrameIndex;
-	uByte	bAspectRatioX;
-	uByte	bAspectRatioY;
-	uByte	bmInterlaceFlags;
-	uByte	bCopyProtect;
-} __packed;
-
-/* Table 3-1: H.264 Payload Video Format Descriptor */
-struct usb_video_format_h264_desc {
-	uByte	bLength;
-	uByte	bDescriptorType;
-	uByte	bDescriptorSubtype;
-	uByte	bFormatIndex;
-	uByte	bNumFrameDescriptors;
-	uByte	bDefaultFrameIndex;
-	uByte	bMaxCodecConfigDelay;
-	uByte	bmSupportedSliceModes;
-	uByte	bmSupportedSyncFrameTypes;
-	uByte	bResolutionScaling;
-	uByte	_reserved1;
-	uByte	bmSupportedRateControlModes;
-	uWord	wMaxMBperSecOneResolutionNoScalability;
-	uWord	wMaxMBperSecTwoResolutionsNoScalability;
-	uWord	wMaxMBperSecOneResolutionTemporalQualityScalability;
-	uWord	wMaxMBperSecTwoResolutionsTemporalQualityScalability;
-	uWord	wMaxMBperSecThreeResolutionsTemporalQualityScalablity;
-	uWord	wMaxMBperSecFourResolutionsTemporalQualityScalability;
-	uWord	wMaxMBperSecOneResolutionsTemporalSpatialScalability;
-	uWord	wMaxMBperSecTwoResolutionsTemporalSpatialScalability;
-	uWord	wMaxMBperSecThreeResolutionsTemporalSpatialScalability;
-	uWord	wMaxMBperSecFourResolutionsTemporalSpatialScalability;
-	uWord	wMaxMBperSecOneResolutionFullScalability;
-	uWord	wMaxMBperSecTwoResolutionsFullScalability;
-	uWord	wMaxMBperSecThreeResolutionsFullScalability;
-	uWord	wMaxMBperSecFourResolutionsFullScalability;
-} __packed;
-
-/* Table 3-1: Frame Based Payload Video Format Descriptor */
-struct usb_video_format_frame_based_desc {
-	uByte	bLength;
-	uByte	bDescriptorType;
-	uByte	bDescriptorSubtype;
-	uByte	bFormatIndex;
-	uByte	bNumFrameDescriptors;
-	uByte	guidFormat[16];
-	uByte	bBitsPerPixel;
-	uByte	bDefaultFrameIndex;
-	uByte	bAspectRatioX;
-	uByte	bAspectRatioY;
-	uByte	bmInterlaceFlags;
-	uByte	bCopyProtect;
-	uByte	bVariableSize;
-} __packed;
-
-/*
- * Driver specific private definitions.
- */
-struct uvideo_format_desc {
+struct usb_video_format_desc {
 	uByte	bLength;
 	uByte	bDescriptorType;
 	uByte	bDescriptorSubtype;
 	uByte	bFormatIndex;
 	uByte	bNumFrameDescriptors;
 	union {
-		/* mjpeg */
+		/* Table 3-1: Motion-JPEG Video Format Descriptor */
 		struct {
 			uByte	bmFlags;
 			uByte	bDefaultFrameIndex;
@@ -619,7 +535,7 @@ struct uvideo_format_desc {
 			uByte	bCopyProtect;
 		} mjpeg;
 
-		/* uncompressed */
+		/* Table 3-1: Uncompressed Video Format Descriptor */
 		struct {
 			uByte	guidFormat[16];
 			uByte	bBitsPerPixel;
@@ -630,7 +546,7 @@ struct uvideo_format_desc {
 			uByte	bCopyProtect;
 		} uc;
 
-		/* frame based */
+		/* Table 3-1: Frame Based Payload Video Format Descriptor */
 		struct {
 			uByte	guidFormat[16];
 			uByte	bBitsPerPixel;
@@ -642,7 +558,7 @@ struct uvideo_format_desc {
 			uByte	bVariableSize;
 		} fb;
 
-		/* h264 */
+		/* Table 3-1: H.264 Payload Video Format Descriptor */
 		struct {
 			uByte	bDefaultFrameIndex;
 			uByte	bMaxCodecConfigDelay;
@@ -651,24 +567,52 @@ struct uvideo_format_desc {
 			uByte	bResolutionScaling;
 			uByte	_reserved1;
 			uByte	bmSupportedRateControlModes;
-			uDWord	wMaxMBperSecOneResolutionNoScalability;
-			uDWord	wMaxMBperSecTwoResolutionsNoScalability;
-			uDWord	wMaxMBperSecOneResolutionTemporalQualityScalability;
-			uDWord	wMaxMBperSecTwoResolutionsTemporalQualityScalability;
-			uDWord	wMaxMBperSecThreeResolutionsTemporalQualityScalablity;
-			uDWord	wMaxMBperSecFourResolutionsTemporalQualityScalability;
-			uDWord	wMaxMBperSecOneResolutionsTemporalSpatialScalability;
-			uDWord	wMaxMBperSecTwoResolutionsTemporalSpatialScalability;
-			uDWord	wMaxMBperSecThreeResolutionsTemporalSpatialScalability;
-			uDWord	wMaxMBperSecFourResolutionsTemporalSpatialScalability;
-			uDWord	wMaxMBperSecOneResolutionFullScalability;
-			uDWord	wMaxMBperSecTwoResolutionsFullScalability;
-			uDWord	wMaxMBperSecThreeResolutionsFullScalability;
-			uDWord	wMaxMBperSecFourResolutionsFullScalability;
+			uWord	wMaxMBperSecOneResolutionNoScalability;
+			uWord	wMaxMBperSecTwoResolutionsNoScalability;
+			uWord	wMaxMBperSecThreeResolutionsNoScalability;
+			uWord	wMaxMBperSecFourResolutionsNoScalability;
+			uWord	wMaxMBperSecOneResolutionTemporalScalability;
+			uWord	wMaxMBperSecTwoResolutionsTemporalScalablility;
+			uWord	wMaxMBperSecThreeResolutionsTemporalScalability;
+			uWord	wMaxMBperSecFourResolutionsTemporalScalability;
+			uWord	wMaxMBperSecOneResolutionTemporalQualityScalability;
+			uWord	wMaxMBperSecTwoResolutionsTemporalQualityScalability;
+			uWord	wMaxMBperSecThreeResolutionsTemporalQualityScalablity;
+			uWord	wMaxMBperSecFourResolutionsTemporalQualityScalability;
+			uWord	wMaxMBperSecOneResolutionTemporalSpatialScalability;
+			uWord	wMaxMBperSecTwoResolutionsTemporalSpatialScalability;
+			uWord	wMaxMBperSecThreeResolutionsTemporalSpatialScalablity;
+			uWord	wMaxMBperSecFourResolutionsTemporalSpatialScalability;
+			uWord	wMaxMBperSecOneResolutionFullScalability;
+			uWord	wMaxMBperSecTwoResolutionsFullScalability;
+			uWord	wMaxMBperSecThreeResolutionsFullScalability;
+			uWord	wMaxMBperSecFourResolutionsFullScalability;
 		} h264;
 	} u;
+
+#define UVIDEO_FORMAT_LEN(fmt)							\
+	(									\
+	(((fmt)->bDescriptorSubtype == UDESCSUB_VS_FORMAT_H264) ||		\
+	 ((fmt)->bDescriptorSubtype == UDESCSUB_VS_FORMAT_H264_SIMULCAST)) ?	\
+		(offsetof(struct usb_video_format_desc, u) +			\
+		 sizeof(((struct usb_video_format_desc *)0)->u.h264)) :		\
+	((fmt)->bDescriptorSubtype == UDESCSUB_VS_FORMAT_FRAME_BASED) ?		\
+		(offsetof(struct usb_video_format_desc, u) +			\
+		 sizeof(((struct usb_video_format_desc *)0)->u.fb)) :		\
+	((fmt)->bDescriptorSubtype == UDESCSUB_VS_FORMAT_UNCOMPRESSED) ?	\
+		(offsetof(struct usb_video_format_desc, u) +			\
+		 sizeof(((struct usb_video_format_desc *)0)->u.uc)) :		\
+	((fmt)->bDescriptorSubtype == UDESCSUB_VS_FORMAT_MJPEG) ?		\
+		(offsetof(struct usb_video_format_desc, u) +			\
+		 sizeof(((struct usb_video_format_desc *)0)->u.mjpeg)) :	\
+	sizeof(struct usb_video_colorformat_desc)				\
+	)
+
 } __packed;
 
+/*
+ * Driver specific private definitions.
+ */
 #define UVIDEO_NFRAMES_MAX	40
 struct uvideo_isoc_xfer {
 	struct uvideo_softc	*sc;
@@ -730,7 +674,7 @@ struct uvideo_format_group {
 	uint32_t				 xfer_func;
 	uint32_t				 ycbcr_enc;
 	uint8_t					 format_dfidx;
-	struct uvideo_format_desc		*format;
+	struct usb_video_format_desc		*format;
 	/* frame descriptors for mjpeg and uncompressed are identical */
 #define UVIDEO_MAX_FRAME			 32
 	struct usb_video_frame_desc		*frame_cur;

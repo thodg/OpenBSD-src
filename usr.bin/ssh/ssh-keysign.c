@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-keysign.c,v 1.76 2025/05/06 05:40:56 djm Exp $ */
+/* $OpenBSD: ssh-keysign.c,v 1.78 2025/09/25 06:25:38 djm Exp $ */
 /*
  * Copyright (c) 2002 Markus Friedl.  All rights reserved.
  *
@@ -126,8 +126,10 @@ valid_request(struct passwd *pw, char *host, struct sshkey **ret, char **pkalgp,
 	/* client host name, handle trailing dot */
 	if ((r = sshbuf_get_cstring(b, &p, &len)) != 0)
 		fatal_fr(r, "parse hostname");
-	debug2_f("check expect chost %s got %s", host, p);
-	if (strlen(host) != len - 1)
+	debug2_f("check expect chost \"%s\" got \"%s\"", host, p);
+	if (len == 0)
+		fail++;
+	else if (strlen(host) != len - 1)
 		fail++;
 	else if (p[len - 1] != '.')
 		fail++;
@@ -197,7 +199,6 @@ main(int argc, char **argv)
 	/* XXX This really needs to read sshd_config for the paths */
 	key_fd[i++] = open(_PATH_HOST_ECDSA_KEY_FILE, O_RDONLY);
 	key_fd[i++] = open(_PATH_HOST_ED25519_KEY_FILE, O_RDONLY);
-	key_fd[i++] = open(_PATH_HOST_XMSS_KEY_FILE, O_RDONLY);
 	key_fd[i++] = open(_PATH_HOST_RSA_KEY_FILE, O_RDONLY);
 
 	if ((pw = getpwuid(getuid())) == NULL)

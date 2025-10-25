@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.h,v 1.94 2024/11/15 02:59:23 jsg Exp $	*/
+/*	$OpenBSD: uvm_map.h,v 1.96 2025/09/14 13:06:02 mpi Exp $	*/
 /*	$NetBSD: uvm_map.h,v 1.24 2001/02/18 21:19:08 chs Exp $	*/
 
 /*
@@ -376,25 +376,7 @@ int		uvm_map_fill_vmmap(struct vm_map *, struct kinfo_vmentry *,
 		    size_t *);
 
 /*
- * VM map locking operations:
- *
- *	These operations perform locking on the data portion of the
- *	map.
- *
- *	vm_map_lock_try: try to lock a map, failing if it is already locked.
- *
- *	vm_map_lock: acquire an exclusive (write) lock on a map.
- *
- *	vm_map_lock_read: acquire a shared (read) lock on a map.
- *
- *	vm_map_unlock: release an exclusive lock on a map.
- *
- *	vm_map_unlock_read: release a shared lock on a map.
- *
- *	vm_map_busy: mark a map as busy.
- *
- *	vm_map_unbusy: clear busy status on a map.
- *
+ * VM map locking operations.
  */
 
 boolean_t	vm_map_lock_try_ln(struct vm_map*, char*, int);
@@ -402,6 +384,8 @@ void		vm_map_lock_ln(struct vm_map*, char*, int);
 void		vm_map_lock_read_ln(struct vm_map*, char*, int);
 void		vm_map_unlock_ln(struct vm_map*, char*, int);
 void		vm_map_unlock_read_ln(struct vm_map*, char*, int);
+boolean_t	vm_map_upgrade_ln(struct vm_map*, char*, int);
+void		vm_map_downgrade_ln(struct vm_map*, char*, int);
 void		vm_map_busy_ln(struct vm_map*, char*, int);
 void		vm_map_unbusy_ln(struct vm_map*, char*, int);
 void		vm_map_assert_anylock_ln(struct vm_map*, char*, int);
@@ -413,6 +397,8 @@ void		vm_map_assert_wrlock_ln(struct vm_map*, char*, int);
 #define vm_map_lock_read(map)	vm_map_lock_read_ln(map, __FILE__, __LINE__)
 #define vm_map_unlock(map)	vm_map_unlock_ln(map, __FILE__, __LINE__)
 #define vm_map_unlock_read(map)	vm_map_unlock_read_ln(map, __FILE__, __LINE__)
+#define vm_map_upgrade(map)	vm_map_upgrade_ln(map, __FILE__, __LINE__)
+#define vm_map_downgrade(map)	vm_map_downgrade_ln(map, __FILE__, __LINE__)
 #define vm_map_busy(map)	vm_map_busy_ln(map, __FILE__, __LINE__)
 #define vm_map_unbusy(map)	vm_map_unbusy_ln(map, __FILE__, __LINE__)
 #define vm_map_assert_anylock(map)	\
@@ -425,6 +411,8 @@ void		vm_map_assert_wrlock_ln(struct vm_map*, char*, int);
 #define vm_map_lock_read(map)	vm_map_lock_read_ln(map, NULL, 0)
 #define vm_map_unlock(map)	vm_map_unlock_ln(map, NULL, 0)
 #define vm_map_unlock_read(map)	vm_map_unlock_read_ln(map, NULL, 0)
+#define vm_map_upgrade(map)	vm_map_upgrade_ln(map, NULL, 0)
+#define vm_map_downgrade(map)	vm_map_downgrade_ln(map, NULL, 0)
 #define vm_map_busy(map)	vm_map_busy_ln(map, NULL, 0)
 #define vm_map_unbusy(map)	vm_map_unbusy_ln(map, NULL, 0)
 #define vm_map_assert_anylock(map)	vm_map_assert_anylock_ln(map, NULL, 0)

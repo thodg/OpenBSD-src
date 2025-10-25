@@ -324,7 +324,7 @@ label_plus_dname(const char* label, const dname_type* dname)
 	memmove(name.bytes + dname->label_count
 			+ 1 /* label_count increases by one */
 			+ 1 /* label type/length byte for label */ + ll,
-		((void*)dname) + sizeof(dname_type) + dname->label_count,
+		((char*)dname) + sizeof(dname_type) + dname->label_count,
 		dname->name_size);
 	memcpy(name.bytes + dname->label_count
 			+ 1 /* label_count increases by one */
@@ -1111,8 +1111,8 @@ xfr_writer_init(struct xfrd_xfr_writer* xw,
 		struct xfrd_catalog_producer_zone* producer_zone)
 {
 	xw->producer_zone = producer_zone;
-	buffer_create_from( &xw->packet, &xw->packet_space
-	                               , sizeof(xw->packet_space));
+	memset(&xw->packet, 0, sizeof(xw->packet));
+	buffer_create_from(&xw->packet, xw->packet_space, sizeof(xw->packet_space));
 	buffer_write(&xw->packet, "\000\000\000\000\000\000"
 	                          "\000\000\000\000\000\000", 12); /* header */
 	xw->seq_nr = 0;

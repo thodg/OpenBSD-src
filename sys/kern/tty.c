@@ -1,4 +1,4 @@
-/*	$OpenBSD: tty.c,v 1.180 2025/06/12 20:37:58 deraadt Exp $	*/
+/*	$OpenBSD: tty.c,v 1.182 2025/09/25 08:46:50 mvs Exp $	*/
 /*	$NetBSD: tty.c,v 1.68.4.2 1996/06/06 16:04:52 thorpej Exp $	*/
 
 /*-
@@ -79,7 +79,6 @@ void 	filt_ttywdetach(struct knote *kn);
 int	filt_ttyexcept(struct knote *kn, long hint);
 void	ttystats_init(struct itty **, int *, size_t *);
 int	ttywait_nsec(struct tty *, uint64_t);
-int	ttysleep_nsec(struct tty *, void *, int, char *, uint64_t);
 
 /* Symbolic sleep message strings. */
 char ttclos[]	= "ttycls";
@@ -747,8 +746,8 @@ ttioctl(struct tty *tp, u_long cmd, caddr_t data, int flag, struct proc *p)
 			if (pr->ps_pgrp->pg_jobc == 0)
 				return (EIO);
 			pgsignal(pr->ps_pgrp, SIGTTOU, 1);
-			error = ttysleep(tp, &lbolt, TTOPRI | PCATCH,
-			    ttybg);
+			error = ttysleep_nsec(tp, &nowake, TTOPRI | PCATCH,
+				ttybg, SEC_TO_NSEC(1));
 			if (error)
 				return (error);
 		}
@@ -1515,7 +1514,8 @@ loop:	lflag = tp->t_lflag;
 			goto out;
 		}
 		pgsignal(pr->ps_pgrp, SIGTTIN, 1);
-		error = ttysleep(tp, &lbolt, TTIPRI | PCATCH, ttybg);
+		error = ttysleep_nsec(tp, &nowake, TTIPRI | PCATCH, ttybg, 
+			SEC_TO_NSEC(1));
 		if (error)
 			goto out;
 		goto loop;
@@ -1613,8 +1613,8 @@ read:
 		    ISSET(lflag, IEXTEN | ISIG) == (IEXTEN | ISIG)) {
 			pgsignal(tp->t_pgrp, SIGTSTP, 1);
 			if (first) {
-				error = ttysleep(tp, &lbolt, TTIPRI | PCATCH,
-				    ttybg);
+				error = ttysleep_nsec(tp, &nowake, TTIPRI | PCATCH, 
+					ttybg, SEC_TO_NSEC(1));
 				if (error)
 					break;
 				goto loop;
@@ -1765,7 +1765,8 @@ loop:
 			goto out;
 		}
 		pgsignal(pr->ps_pgrp, SIGTTOU, 1);
-		error = ttysleep(tp, &lbolt, TTIPRI | PCATCH, ttybg);
+		error = ttysleep_nsec(tp, &nowake, TTIPRI | PCATCH, ttybg, 
+			SEC_TO_NSEC(1));
 		if (error)
 			goto out;
 		goto loop;
@@ -2198,8 +2199,8 @@ empty:		ttyprintf(tp, "empty foreground process group\n");
 			if (run2 || pctcpu2 > pctcpu)
 				goto update_pickpr;
 
-			/* if p has less cpu or is zombie, then it's worse */
-			if (pctcpu2 < pctcpu || (pr->ps_flags & PS_ZOMBIE))
+			/* if p has less cpu or is exiting, then it's worse */
+			if (pctcpu2 < pctcpu || (pr->ps_flags & PS_EXITING))
 				continue;
 update_pickpr:
 			pickpr = pr;
@@ -2209,7 +2210,7 @@ update_pickpr:
 
 		/* Calculate percentage cpu, resident set size. */
 		calc_pctcpu = (pctcpu * 10000 + FSCALE / 2) >> FSHIFT;
-		if ((pickpr->ps_flags & (PS_EMBRYO | PS_ZOMBIE)) == 0 &&
+		if ((pickpr->ps_flags & (PS_EMBRYO | PS_EXITING)) == 0 &&
 		    pickpr->ps_vmspace != NULL)
 			rss = vm_resident_count(pickpr->ps_vmspace);
 

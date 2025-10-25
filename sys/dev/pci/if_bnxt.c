@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bnxt.c,v 1.52 2024/10/06 23:43:18 jmatthew Exp $	*/
+/*	$OpenBSD: if_bnxt.c,v 1.56 2025/09/05 09:58:24 stsp Exp $	*/
 /*-
  * Broadcom NetXtreme-C/E network driver.
  *
@@ -321,8 +321,8 @@ u_int		bnxt_rx_fill_slots(struct bnxt_softc *, struct bnxt_ring *, void *,
 		    struct bnxt_slot *, uint *, int, uint16_t, u_int);
 void		bnxt_refill(void *);
 int		bnxt_rx(struct bnxt_softc *, struct bnxt_rx_queue *,
-		    struct bnxt_cp_ring *, struct mbuf_list *, int *, int *,
-		    struct cmpl_base *);
+		    struct bnxt_cp_ring *, struct mbuf_list *, struct mbuf_list *,
+		    int *, int *, struct cmpl_base *);
 
 void		bnxt_txeof(struct bnxt_softc *, struct bnxt_tx_queue *, int *,
 		    struct cmpl_base *);
@@ -423,11 +423,12 @@ bnxt_dmamem_alloc(struct bnxt_softc *sc, size_t size)
 	m->bdm_size = size;
 
 	if (bus_dmamap_create(sc->sc_dmat, size, 1, size, 0,
-	    BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW, &m->bdm_map) != 0)
+	    BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+	    &m->bdm_map) != 0)
 		goto bdmfree;
 
 	if (bus_dmamem_alloc(sc->sc_dmat, size, PAGE_SIZE, 0, &m->bdm_seg, 1,
-	    &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO) != 0)
+	    &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO | BUS_DMA_64BIT) != 0)
 		goto destroy;
 
 	if (bus_dmamem_map(sc->sc_dmat, &m->bdm_seg, nsegs, size, &m->bdm_kva,
@@ -649,6 +650,8 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
+	ifp->if_capabilities |= IFCAP_LRO;	
+
 	ifq_init_maxlen(&ifp->if_snd, 1024);	/* ? */
 
 	ifmedia_init(&sc->sc_media, IFM_IMASK, bnxt_media_change,
@@ -899,7 +902,8 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	for (i = 0; i < rx->rx_ring.ring_size; i++) {
 		bs = &rx->rx_slots[i];
 		if (bus_dmamap_create(sc->sc_dmat, MCLBYTES, 1, MCLBYTES, 0,
-		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW, &bs->bs_map) != 0) {
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
+		    &bs->bs_map) != 0) {
 			printf("%s: failed to allocate rx dma maps\n",
 			    DEVNAME(sc));
 			goto destroy_rx_slots;
@@ -916,7 +920,8 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	for (i = 0; i < rx->rx_ag_ring.ring_size; i++) {
 		bs = &rx->rx_ag_slots[i];
 		if (bus_dmamap_create(sc->sc_dmat, BNXT_AG_BUFFER_SIZE, 1,
-		    BNXT_AG_BUFFER_SIZE, 0, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW,
+		    BNXT_AG_BUFFER_SIZE, 0,
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &bs->bs_map) != 0) {
 			printf("%s: failed to allocate rx ag dma maps\n",
 			    DEVNAME(sc));
@@ -934,7 +939,8 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	for (i = 0; i < tx->tx_ring.ring_size; i++) {
 		bs = &tx->tx_slots[i];
 		if (bus_dmamap_create(sc->sc_dmat, MAXMCLBYTES, BNXT_MAX_TX_SEGS,
-		    BNXT_MAX_MTU, 0, BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW,
+		    BNXT_MAX_MTU, 0,
+		    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW | BUS_DMA_64BIT,
 		    &bs->bs_map) != 0) {
 			printf("%s: failed to allocate tx dma maps\n",
 			    DEVNAME(sc));
@@ -1360,8 +1366,8 @@ bnxt_start(struct ifqueue *ifq)
 	used = 0;
 
 	for (;;) {
-		/* +1 for tx_bd_long_hi */
-		if (used + BNXT_MAX_TX_SEGS + 1 > free) {
+		/* +1 for tx_bd_long_hi, + 1 to leave a slot free */
+		if (used + BNXT_MAX_TX_SEGS + 2 > free) {
 			ifq_set_oactive(ifq);
 			break;
 		}
@@ -1597,6 +1603,7 @@ bnxt_intr(void *xq)
 	struct bnxt_tx_queue *tx = &q->q_tx;
 	struct cmpl_base *cmpl;
 	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
+	struct mbuf_list mltcp = MBUF_LIST_INITIALIZER();
 	uint16_t type;
 	int rxfree, txfree, agfree, rv, rollback;
 
@@ -1615,8 +1622,8 @@ bnxt_intr(void *xq)
 			break;
 		case CMPL_BASE_TYPE_RX_L2:
 			if (ISSET(ifp->if_flags, IFF_RUNNING))
-				rollback = bnxt_rx(sc, rx, cpr, &ml, &rxfree,
-				    &agfree, cmpl);
+				rollback = bnxt_rx(sc, rx, cpr, &ml, &mltcp,
+				    &rxfree, &agfree, cmpl);
 			break;
 		case CMPL_BASE_TYPE_TX_L2:
 			if (ISSET(ifp->if_flags, IFF_RUNNING))
@@ -1644,6 +1651,8 @@ bnxt_intr(void *xq)
 	    (cpr->commit_cons+1) % cpr->ring.ring_size, 1);
 
 	if (rxfree != 0) {
+		int livelocked = 0;
+
 		rx->rx_cons += rxfree;
 		if (rx->rx_cons >= rx->rx_ring.ring_size)
 			rx->rx_cons -= rx->rx_ring.ring_size;
@@ -1655,7 +1664,12 @@ bnxt_intr(void *xq)
 		if_rxr_put(&rx->rxr[0], rxfree);
 		if_rxr_put(&rx->rxr[1], agfree);
 
-		if (ifiq_input(rx->rx_ifiq, &ml)) {
+		if (ifiq_input(rx->rx_ifiq, &mltcp))
+			livelocked = 1;
+		if (ifiq_input(rx->rx_ifiq, &ml))
+			livelocked = 1;
+
+		if (livelocked) {
 			if_rxr_livelocked(&rx->rxr[0]);
 			if_rxr_livelocked(&rx->rxr[1]);
 		}
@@ -2280,8 +2294,8 @@ bnxt_refill(void *xq)
 
 int
 bnxt_rx(struct bnxt_softc *sc, struct bnxt_rx_queue *rx,
-    struct bnxt_cp_ring *cpr, struct mbuf_list *ml, int *slots, int *agslots,
-    struct cmpl_base *cmpl)
+    struct bnxt_cp_ring *cpr, struct mbuf_list *ml, struct mbuf_list *mltcp,
+    int *slots, int *agslots, struct cmpl_base *cmpl)
 {
 	struct mbuf *m, *am;
 	struct bnxt_slot *bs;
@@ -2355,7 +2369,15 @@ bnxt_rx(struct bnxt_softc *sc, struct bnxt_rx_queue *rx,
 		(*agslots)++;
 	}
 
-	ml_enqueue(ml, m);
+#ifndef SMALL_KERNEL
+	if (ISSET(sc->sc_ac.ac_if.if_xflags, IFXF_LRO) &&
+	    ((lemtoh16(&rxlo->flags_type) & RX_PKT_CMPL_FLAGS_ITYPE_TCP) ==
+	    RX_PKT_CMPL_FLAGS_ITYPE_TCP))
+		tcp_softlro_glue(mltcp, m, &sc->sc_ac.ac_if);
+	else
+#endif
+		ml_enqueue(ml, m);
+
 	return (0);
 }
 

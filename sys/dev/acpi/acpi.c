@@ -1,4 +1,4 @@
-/* $OpenBSD: acpi.c,v 1.451 2025/06/17 13:01:11 krw Exp $ */
+/* $OpenBSD: acpi.c,v 1.454 2025/09/20 17:43:28 kettenis Exp $ */
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
@@ -184,7 +184,7 @@ struct acpi_softc *acpi_softc;
 extern struct aml_node aml_root;
 
 struct cfdriver acpi_cd = {
-	NULL, "acpi", DV_DULL
+	NULL, "acpi", DV_DULL, CD_COCOVM
 };
 
 uint8_t
@@ -925,6 +925,7 @@ acpi_gpio_event(void *arg)
 	if (cpu_suspended) {
 		cpu_suspended = 0;
 		sc->sc_wakegpe = -3;
+		sc->sc_wakegpio = ev->pin;
 	}
 
 	acpi_addtask(acpi_softc, acpi_gpio_event_task, ev, ev->pin);
@@ -2773,7 +2774,7 @@ acpi_create_thread(void *arg)
 		    DEVNAME(sc));
 }
 
-#if __arm64__
+#ifdef __arm64__
 int
 acpi_foundsectwo(struct aml_node *node, void *arg)
 {

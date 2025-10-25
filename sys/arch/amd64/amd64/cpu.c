@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.196 2025/06/05 09:29:54 claudio Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.200 2025/09/22 13:19:03 hshoexer Exp $	*/
 /* $NetBSD: cpu.c,v 1.1 2003/04/26 18:39:26 fvdl Exp $ */
 
 /*-
@@ -445,7 +445,7 @@ const struct cfattach cpu_ca = {
 };
 
 struct cfdriver cpu_cd = {
-	NULL, "cpu", DV_DULL
+	NULL, "cpu", DV_DULL, CD_COCOVM
 };
 
 /*
@@ -482,6 +482,11 @@ cpu_match(struct device *parent, void *match, void *aux)
 		return 0;
 
 	if (cf->cf_unit >= MAXCPUS)
+		return 0;
+
+	/* XXX We don't support MP with SEV-ES, yet */
+	if (ISSET(cpu_sev_guestmode, SEV_STAT_ES_ENABLED) &&
+	    cf->cf_unit >= 1)
 		return 0;
 
 	return 1;
@@ -856,12 +861,6 @@ cpu_init(struct cpu_info *ci)
 	} else {
 		fpureset();
 	}
-
-#if NVMM > 0
-	/* Re-enable VMM if needed */
-	if (ci->ci_flags & CPUF_VMM)
-		start_vmm_on_cpu(ci);
-#endif /* NVMM > 0 */
 
 #ifdef MULTIPROCESSOR
 	atomic_setbits_int(&ci->ci_flags, CPUF_RUNNING);
@@ -1488,28 +1487,27 @@ wbinvd_on_all_cpus_acked(void)
 	int s;
 
 	CPU_INFO_FOREACH(cii, ci) {
-		if (ci == self)
+		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
 		wait++;
 	}
 
-	KASSERT(wait > 0);
-
-	s = splvm();
-	while (atomic_cas_ulong(&wbinvd_wait, 0 , wait) != 0) {
-		while (wbinvd_wait != 0) {
-			CPU_BUSY_CYCLE();
+	if (wait > 0) {
+		s = splvm();
+		while (atomic_cas_ulong(&wbinvd_wait, 0 , wait) != 0) {
+			while (wbinvd_wait != 0)
+				CPU_BUSY_CYCLE();
 		}
-	}
 
-	CPU_INFO_FOREACH(cii, ci) {
-		if ((mask & (1ULL << ci->ci_cpuid)) == 0)
-			continue;
-		if (x86_fast_ipi(ci, LAPIC_IPI_WBINVD) != 0)
-			panic("%s: ipi failed", __func__);
+		CPU_INFO_FOREACH(cii, ci) {
+			if ((mask & (1ULL << ci->ci_cpuid)) == 0)
+				continue;
+			if (x86_fast_ipi(ci, LAPIC_IPI_WBINVD) != 0)
+				panic("%s: ipi failed", __func__);
+		}
+		splx(s);
 	}
-	splx(s);
 
 	wbinvd();
 

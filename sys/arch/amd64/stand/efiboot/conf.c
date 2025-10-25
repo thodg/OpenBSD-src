@@ -1,4 +1,4 @@
-/*	$OpenBSD: conf.c,v 1.44 2024/06/04 21:48:20 krw Exp $	*/
+/*	$OpenBSD: conf.c,v 1.46 2025/09/16 05:07:33 yasuoka Exp $	*/
 
 /*
  * Copyright (c) 1996 Michael Shalayeff
@@ -40,7 +40,7 @@
 #include "efidev.h"
 #include "efipxe.h"
 
-const char version[] = "3.67";
+const char version[] = "3.69";
 
 #ifdef EFI_DEBUG
 int	debug = 0;

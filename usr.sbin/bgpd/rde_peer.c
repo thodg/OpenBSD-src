@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_peer.c,v 1.49 2025/06/04 09:11:38 claudio Exp $ */
+/*	$OpenBSD: rde_peer.c,v 1.51 2025/09/24 14:04:04 claudio Exp $ */
 
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
@@ -29,15 +29,9 @@
 struct peer_tree	 peertable = RB_INITIALIZER(&peertable);
 struct peer_tree	 zombietable = RB_INITIALIZER(&zombietable);
 struct rde_peer		*peerself;
-static long		 imsg_pending;
 
 CTASSERT(sizeof(peerself->recv_eor) * 8 >= AID_MAX);
 CTASSERT(sizeof(peerself->sent_eor) * 8 >= AID_MAX);
-
-struct iq {
-	SIMPLEQ_ENTRY(iq)	entry;
-	struct imsg		imsg;
-};
 
 int
 peer_has_as4byte(struct rde_peer *peer)
@@ -178,7 +172,6 @@ peer_add(uint32_t id, struct peer_config *p_conf, struct filter_head *rules)
 	peer->role = peer->conf.role;
 	peer->export_type = peer->conf.export_type;
 	peer->flags = peer->conf.flags;
-	SIMPLEQ_INIT(&peer->imsg_queue);
 	if ((peer->ibufq = ibufq_new()) == NULL)
 		fatal(NULL);
 
@@ -666,9 +659,17 @@ peer_reaper(struct rde_peer *peer)
 int
 peer_work_pending(void)
 {
+	struct rde_peer *p;
+
 	if (!RB_EMPTY(&zombietable))
 		return 1;
-	return imsg_pending != 0;
+
+	RB_FOREACH(p, peer_tree, &peertable) {
+		if (ibufq_queuelen(p->ibufq) != 0)
+			return 1;
+	}
+
+	return 0;
 }
 
 /*
@@ -678,7 +679,6 @@ void
 peer_imsg_push(struct rde_peer *peer, struct imsg *imsg)
 {
 	imsg_ibufq_push(peer->ibufq, imsg);
-	imsg_pending++;
 }
 
 /*
@@ -692,7 +692,6 @@ peer_imsg_pop(struct rde_peer *peer, struct imsg *imsg)
 	case 0:
 		return 0;
 	case 1:
-		imsg_pending--;
 		return 1;
 	default:
 		fatal("imsg_ibufq_pop");

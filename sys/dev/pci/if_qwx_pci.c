@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_qwx_pci.c,v 1.27 2025/08/11 18:13:43 stsp Exp $	*/
+/*	$OpenBSD: if_qwx_pci.c,v 1.29 2025/09/17 07:41:45 stsp Exp $	*/
 
 /*
  * Copyright 2023 Stefan Sperling <stsp@openbsd.org>
@@ -1090,7 +1090,9 @@ unsupported_wcn6855_soc:
 	ic->ic_sup_rates[IEEE80211_MODE_11B] = ieee80211_std_rateset_11b;
 	ic->ic_sup_rates[IEEE80211_MODE_11G] = ieee80211_std_rateset_11g;
 
-	ic->ic_htcaps = IEEE80211_HTCAP_SGI20;
+	ic->ic_htcaps = IEEE80211_HTCAP_SGI20 | IEEE80211_HTCAP_AMSDU7935;
+	ic->ic_htcaps |=
+	    (IEEE80211_HTCAP_SMPS_DIS << IEEE80211_HTCAP_SMPS_SHIFT);
 	ic->ic_htxcaps = 0;
 	ic->ic_txbfcaps = 0;
 	ic->ic_aselcaps = 0;
@@ -3016,15 +3018,15 @@ qwx_mhi_fw_load_handler(struct qwx_pci_softc *psc)
 	u_char *data;
 	size_t len;
 
+	ret = snprintf(amss_path, sizeof(amss_path), "%s-%s-%s",
+	    ATH11K_FW_DIR, sc->hw_params.fw.dir, ATH11K_AMSS_FILE);
+	if (ret < 0 || ret >= sizeof(amss_path))
+		return ENOSPC;
+
 	if (sc->fw_img[QWX_FW_AMSS].data) {
 		data = sc->fw_img[QWX_FW_AMSS].data;
 		len = sc->fw_img[QWX_FW_AMSS].size;
 	} else {
-		ret = snprintf(amss_path, sizeof(amss_path), "%s-%s-%s",
-		    ATH11K_FW_DIR, sc->hw_params.fw.dir, ATH11K_AMSS_FILE);
-		if (ret < 0 || ret >= sizeof(amss_path))
-			return ENOSPC;
-
 		ret = loadfirmware(amss_path, &data, &len);
 		if (ret) {
 			printf("%s: could not read %s (error %d)\n",

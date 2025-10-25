@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6_nbr.c,v 1.162 2025/07/23 22:32:49 mvs Exp $	*/
+/*	$OpenBSD: nd6_nbr.c,v 1.165 2025/09/16 09:52:49 florian Exp $	*/
 /*	$KAME: nd6_nbr.c,v 1.61 2001/02/10 16:06:14 jinmei Exp $	*/
 
 /*
@@ -73,6 +73,7 @@ struct dadq {
 
 struct dadq *nd6_dad_find(struct ifaddr *);
 void nd6_dad_destroy(struct dadq *);
+void nd6_dad_reaper(void *);
 void nd6_dad_starttimer(struct dadq *);
 void nd6_dad_stoptimer(struct dadq *);
 void nd6_dad_timer(void *);
@@ -669,7 +670,6 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 		bcopy(lladdr, LLADDR(sdl), ifp->if_addrlen);
 		if (is_solicited) {
 			ln->ln_state = ND6_LLINFO_REACHABLE;
-			ln->ln_byhint = 0;
 			/* Notify userland that a new ND entry is reachable. */
 			rtm_send(rt, RTM_RESOLVE, 0, ifp->if_rdomain);
 			if (!ND6_LLINFO_PERMANENT(ln)) {
@@ -763,7 +763,6 @@ nd6_na_input(struct mbuf *m, int off, int icmp6len)
 			 */
 			if (is_solicited) {
 				ln->ln_state = ND6_LLINFO_REACHABLE;
-				ln->ln_byhint = 0;
 				if (!ND6_LLINFO_PERMANENT(ln)) {
 					nd6_llinfo_settimer(ln,
 					    ifp->if_nd->reachable);
@@ -994,9 +993,18 @@ void
 nd6_dad_destroy(struct dadq *dp)
 {
 	TAILQ_REMOVE(&dadq, dp, dad_list);
+	ip6_dad_pending--;
+	timeout_set_proc(&dp->dad_timer_ch, nd6_dad_reaper, dp);
+	timeout_add(&dp->dad_timer_ch, 0);
+}
+
+void
+nd6_dad_reaper(void *arg)
+{
+	struct dadq *dp = arg;
+
 	ifafree(dp->dad_ifa);
 	free(dp, M_IP6NDP, sizeof(*dp));
-	ip6_dad_pending--;
 }
 
 void
@@ -1089,9 +1097,9 @@ nd6_dad_stop(struct ifaddr *ifa)
 }
 
 void
-nd6_dad_timer(void *xifa)
+nd6_dad_timer(void *arg)
 {
-	struct ifaddr *ifa;
+	struct ifaddr *ifa = arg;
 	struct in6_ifaddr *ia6;
 	struct in6_addr daddr6, taddr6;
 	struct ifnet *ifp;
@@ -1100,12 +1108,6 @@ nd6_dad_timer(void *xifa)
 
 	NET_LOCK();
 
-	/* Sanity check */
-	if (xifa == NULL) {
-		log(LOG_ERR, "%s: called with null parameter\n", __func__);
-		goto done;
-	}
-	ifa = xifa;
 	ia6 = ifatoia6(ifa);
 	taddr6 = ia6->ia_addr.sin6_addr;
 	ifp = ifa->ifa_ifp;
@@ -1206,18 +1208,10 @@ nd6_dad_ns_output(struct dadq *dp, struct ifaddr *ifa)
 	struct ifnet *ifp = ifa->ifa_ifp;
 
 	dp->dad_ns_tcount++;
-	if ((ifp->if_flags & IFF_UP) == 0) {
-#if 0
-		printf("%s: interface down?\n", ifp->if_xname);
-#endif
+	if ((ifp->if_flags & IFF_UP) == 0)
 		return;
-	}
-	if ((ifp->if_flags & IFF_RUNNING) == 0) {
-#if 0
-		printf("%s: interface not running?\n", ifp->if_xname);
-#endif
+	if ((ifp->if_flags & IFF_RUNNING) == 0)
 		return;
-	}
 
 	dp->dad_ns_ocount++;
 	nd6_ns_output(ifp, NULL, &ia6->ia_addr.sin6_addr, NULL, 1);

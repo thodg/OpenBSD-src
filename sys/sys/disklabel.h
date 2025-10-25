@@ -1,4 +1,4 @@
-/*	$OpenBSD: disklabel.h,v 1.89 2025/07/05 16:36:30 krw Exp $	*/
+/*	$OpenBSD: disklabel.h,v 1.93 2025/09/17 10:16:09 deraadt Exp $	*/
 /*	$NetBSD: disklabel.h,v 1.41 1996/05/10 23:07:37 mark Exp $	*/
 
 /*
@@ -48,16 +48,6 @@
 #include <machine/disklabel.h>
 
 #include <sys/uuid.h>
-
-/*
- * The absolute maximum number of disk partitions allowed.
- * This is the maximum value of MAXPARTITIONS for which 'struct disklabel'
- * is <= DEV_BSIZE bytes long.  If MAXPARTITIONS is greater than this, beware.
- */
-#define	MAXMAXPARTITIONS	22
-#if MAXPARTITIONS > MAXMAXPARTITIONS
-#warn beware: MAXPARTITIONS bigger than MAXMAXPARTITIONS
-#endif
 
 /*
  * Translate between device numbers and major/disk unit/disk partition.
@@ -129,19 +119,6 @@ struct disklabel {
 		u_int16_t p_cpg;	/* UFS: FS cylinders per group */
 	} d_partitions[MAXPARTITIONS];	/* actually may be more */
 };
-
-
-struct	__partitionv0 {		/* old (v0) partition table entry */
-	u_int32_t p_size;	/* number of sectors in partition */
-	u_int32_t p_offset;	/* starting sector */
-	u_int32_t p_fsize;	/* filesystem basic fragment size */
-	u_int8_t p_fstype;	/* filesystem type, see below */
-	u_int8_t p_frag;	/* filesystem fragments per block */
-	union {
-		u_int16_t cpg;	/* UFS: FS cylinders per group */
-		u_int16_t sgs;	/* LFS: FS segment shift */
-	} __partitionv0_u1;
-};
 #endif /* _LOCORE */
 
 
@@ -193,6 +170,32 @@ struct	__partitionv0 {		/* old (v0) partition table entry */
 #define DL_SECTOBLK(d, n)	((n) * DL_BLKSPERSEC(d))
 #define DL_BLKTOSEC(d, n)	((n) / DL_BLKSPERSEC(d))
 #define DL_BLKOFFSET(d, n)	(((n) % DL_BLKSPERSEC(d)) * DEV_BSIZE)
+
+static __inline char
+DL_PARTNUM2NAME(int partnum)
+{
+	if (partnum >= MAXPARTITIONS)
+		return -1;
+	if (partnum <= 'z' - 'a')
+		return 'a' + partnum;
+	else if (partnum - 26 <= 'Z' - 'A')
+		return 'A' + partnum - 26;
+	return -1;
+}
+
+static __inline int
+DL_PARTNAME2NUM(char partname)
+{
+	int partnum = -1;
+
+	if (partname >= 'a' && partname <= 'z')
+		partnum = partname - 'a';
+	else if (partname >= 'A' && partname <= 'Z')
+		partnum = partname - 'A' + 26;
+	if (partnum >= MAXPARTITIONS)
+		partnum = -1;
+	return partnum;
+}
 
 /* d_type values: */
 #define	DTYPE_SMD		1		/* SMD, XSMD; VAX hp/up */
@@ -449,7 +452,7 @@ void	 diskerr(struct buf *, char *, char *, int, int, struct disklabel *);
 u_int	 dkcksum(struct disklabel *);
 int	 initdisklabel(struct disklabel *);
 int	 checkdisklabel(dev_t, void *, struct disklabel *, u_int64_t, u_int64_t);
-int	 setdisklabel(struct disklabel *, struct disklabel *, u_int);
+int	 setdisklabel(struct disklabel *, struct disklabel *, u_int64_t);
 int	 readdisklabel(dev_t, void (*)(struct buf *), struct disklabel *, int);
 int	 writedisklabel(dev_t, void (*)(struct buf *), struct disklabel *);
 int	 bounds_check_with_label(struct buf *, struct disklabel *);

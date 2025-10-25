@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-pkcs11.c,v 1.69 2025/07/30 04:27:42 djm Exp $ */
+/* $OpenBSD: ssh-pkcs11.c,v 1.73 2025/10/08 21:02:16 djm Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
  * Copyright (c) 2014 Pedro Martelletto. All rights reserved.
@@ -26,6 +26,7 @@
 #include <dlfcn.h>
 
 #ifdef WITH_OPENSSL
+#include <openssl/bn.h>
 #include <openssl/ecdsa.h>
 #include <openssl/x509.h>
 #include <openssl/err.h>
@@ -548,7 +549,7 @@ pkcs11_sign_rsa(struct sshkey *key,
 	const u_char		*oid;
 
 	if (sigp != NULL)
-		*sigp = 0;
+		*sigp = NULL;
 	if (lenp != NULL)
 		*lenp = 0;
 
@@ -637,7 +638,7 @@ pkcs11_sign_ecdsa(struct sshkey *key,
 	int			hashalg, ret = -1, r, siglen;
 
 	if (sigp != NULL)
-		*sigp = 0;
+		*sigp = NULL;
 	if (lenp != NULL)
 		*lenp = 0;
 
@@ -721,7 +722,7 @@ pkcs11_sign_ed25519(struct sshkey *key,
 	int			ret = -1;
 
 	if (sigp != NULL)
-		*sigp = 0;
+		*sigp = NULL;
 	if (lenp != NULL)
 		*lenp = 0;
 
@@ -1059,7 +1060,7 @@ pkcs11_fetch_rsa_pubkey(struct pkcs11_provider *p, CK_ULONG slotidx,
 	key->type = KEY_RSA;
 	key->flags |= SSHKEY_FLAG_EXT;
 	if (EVP_PKEY_bits(key->pkey) < SSH_RSA_MINIMUM_MODULUS_SIZE) {
-		error_f("RSA key too small %d < minumum %d",
+		error_f("RSA key too small %d < minimum %d",
 		    EVP_PKEY_bits(key->pkey), SSH_RSA_MINIMUM_MODULUS_SIZE);
 		goto fail;
 	}
@@ -1292,7 +1293,7 @@ pkcs11_fetch_x509_pubkey(struct pkcs11_provider *p, CK_ULONG slotidx,
 		key->type = KEY_RSA;
 		key->flags |= SSHKEY_FLAG_EXT;
 		if (EVP_PKEY_bits(key->pkey) < SSH_RSA_MINIMUM_MODULUS_SIZE) {
-			error_f("RSA key too small %d < minumum %d",
+			error_f("RSA key too small %d < minimum %d",
 			    EVP_PKEY_bits(key->pkey),
 			    SSH_RSA_MINIMUM_MODULUS_SIZE);
 			goto out;
@@ -2003,8 +2004,10 @@ pkcs11_terminate(void)
 
 	debug3_f("called");
 
-	while ((k11 = TAILQ_FIRST(&pkcs11_keys)) != NULL)
+	while ((k11 = TAILQ_FIRST(&pkcs11_keys)) != NULL) {
+		TAILQ_REMOVE(&pkcs11_keys, k11, next);
 		pkcs11_k11_free(k11);
+	}
 	while ((p = TAILQ_FIRST(&pkcs11_providers)) != NULL) {
 		TAILQ_REMOVE(&pkcs11_providers, p, next);
 		pkcs11_provider_finalize(p);

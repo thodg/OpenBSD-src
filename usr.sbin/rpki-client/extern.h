@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.257 2025/08/14 15:12:00 claudio Exp $ */
+/*	$OpenBSD: extern.h,v 1.264 2025/09/14 14:02:27 job Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -202,6 +202,7 @@ enum rtype {
 	RTYPE_TAK,
 	RTYPE_GEOFEED,
 	RTYPE_SPL,
+	RTYPE_CCR,
 };
 
 enum location {
@@ -221,7 +222,7 @@ struct mftfile {
 };
 
 /*
- * A manifest, RFC 6486.
+ * A manifest, RFC 9286.
  * This consists of a bunch of files found in the same directory as the
  * manifest file.
  */
@@ -233,6 +234,7 @@ struct mft {
 	char		*sia; /* SIA signedObject */
 	char		*crl; /* CRL file name */
 	unsigned char	 mfthash[SHA256_DIGEST_LENGTH];
+	size_t		 mftsize;
 	unsigned char	 crlhash[SHA256_DIGEST_LENGTH];
 	time_t		 signtime; /* CMS signing-time attribute */
 	time_t		 thisupdate; /* from the eContent */
@@ -259,7 +261,7 @@ struct roa_ip {
 };
 
 /*
- * An ROA, RFC 6482.
+ * An ROA, RFC 9582.
  * This consists of the concerned ASID and its IP prefixes.
  */
 struct roa {
@@ -459,12 +461,54 @@ struct brk {
 RB_HEAD(brk_tree, brk);
 RB_PROTOTYPE(brk_tree, brk, entry, brkcmp);
 
+struct ccr_mft {
+	RB_ENTRY(ccr_mft) entry;
+	char hash[SHA256_DIGEST_LENGTH];
+	char aki[SHA_DIGEST_LENGTH];
+	size_t size;
+	time_t thisupdate;
+	char *seqnum;
+	char *sia;
+};
+
+RB_HEAD(ccr_mft_tree, ccr_mft);
+RB_PROTOTYPE(ccr_mft_tree, ccr_mft, entry, ccr_mft_cmp);
+
+RB_HEAD(ccr_vrp_tree, vrp);
+RB_PROTOTYPE(ccr_vrp_tree, vrp, entry, ccr_vrp_cmp);
+
+struct ccr_tas_ski {
+	RB_ENTRY(ccr_tas_ski) entry;
+	unsigned char keyid[SHA_DIGEST_LENGTH];
+};
+
+RB_HEAD(ccr_tas_tree, ccr_tas_ski);
+RB_PROTOTYPE(ccr_tas_tree, ccr_tas_ski, entry, ccr_tas_ski_cmp);
+
+struct ccr {
+	struct ccr_mft_tree mfts;
+	struct ccr_vrp_tree vrps;
+	struct vap_tree vaps; /* only used in filemode */
+	struct ccr_tas_tree tas;
+	struct brk_tree brks; /* only used in filemode */
+	char *mfts_hash;
+	char *vrps_hash;
+	char *vaps_hash;
+	char *tas_hash;
+	char *brks_hash;
+	time_t producedat;
+	time_t most_recent_update;
+	unsigned char *der;
+	size_t der_len;
+};
+
 struct validation_data {
 	struct vrp_tree	vrps;
 	struct brk_tree	brks;
 	struct vap_tree	vaps;
 	struct vsp_tree	vsps;
 	struct nca_tree ncas;
+	struct ccr ccr;
 };
 
 /*
@@ -669,6 +713,7 @@ extern ASN1_OBJECT *aspa_oid;
 extern ASN1_OBJECT *tak_oid;
 extern ASN1_OBJECT *geofeed_oid;
 extern ASN1_OBJECT *spl_oid;
+extern ASN1_OBJECT *ccr_oid;
 
 extern int verbose;
 extern int noop;
@@ -932,6 +977,8 @@ struct ibuf	*io_buf_get(struct msgbuf *);
 void		 x509_init_oid(void);
 char		*x509_pubkey_get_ski(X509_PUBKEY *, const char *);
 int		 x509_get_time(const ASN1_TIME *, time_t *);
+int		 x509_get_generalized_time(const char *, const char *,
+		    const ASN1_TIME *, time_t *);
 char		*x509_convert_seqnum(const char *, const char *,
 		    const ASN1_INTEGER *);
 int		 x509_valid_seqnum(const char *, const char *,
@@ -973,15 +1020,28 @@ extern int	 outformats;
 #define FORMAT_CSV	0x04
 #define FORMAT_JSON	0x08
 #define FORMAT_OMETRIC	0x10
+#define FORMAT_CCR	0x20
 
 int		 outputfiles(struct validation_data *, struct stats *);
-int		 outputheader(FILE *, struct stats *);
+int		 outputheader(FILE *, struct validation_data *, struct stats *);
 int		 output_bgpd(FILE *, struct validation_data *, struct stats *);
 int		 output_bird(FILE *, struct validation_data *, struct stats *);
 int		 output_csv(FILE *, struct validation_data *, struct stats *);
 int		 output_json(FILE *, struct validation_data *, struct stats *);
 int		 output_ometric(FILE *, struct validation_data *,
 		    struct stats *);
+int		 output_ccr_der(FILE *, struct validation_data *, struct stats *);
+
+/*
+ * Canonical Cache Representation
+ */
+void ccr_free(struct ccr *);
+void ccr_print(struct ccr *);
+struct ccr *ccr_parse(const char *, const unsigned char *, size_t);
+void ccr_insert_mft(struct ccr_mft_tree *, const struct mft *);
+void ccr_insert_roa(struct ccr_vrp_tree *, const struct roa *);
+void ccr_insert_tas(struct ccr_tas_tree *, const struct cert *);
+void serialize_ccr_content(struct validation_data *);
 
 void		 logx(const char *fmt, ...)
 		    __attribute__((format(printf, 1, 2)));

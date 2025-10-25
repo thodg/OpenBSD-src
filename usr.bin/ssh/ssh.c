@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh.c,v 1.615 2025/08/18 03:43:01 djm Exp $ */
+/* $OpenBSD: ssh.c,v 1.619 2025/09/25 07:05:11 djm Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -652,6 +652,8 @@ valid_ruser(const char *s)
 	if (*s == '-')
 		return 0;
 	for (i = 0; s[i] != 0; i++) {
+		if (iscntrl((u_char)s[i]))
+			return 0;
 		if (strchr("'`\";&<>|(){}", s[i]) != NULL)
 			return 0;
 		/* Disallow '-' after whitespace */
@@ -673,6 +675,7 @@ main(int ac, char **av)
 	struct ssh *ssh = NULL;
 	int i, r, opt, exit_status, use_syslog, direct, timeout_ms;
 	int was_addr, config_test = 0, opt_terminated = 0, want_final_pass = 0;
+	int user_on_commandline = 0, user_was_default = 0, user_expanded = 0;
 	char *p, *cp, *line, *argv0, *logfile, *args;
 	char cname[NI_MAXHOST], thishost[NI_MAXHOST];
 	struct stat st;
@@ -1011,8 +1014,10 @@ main(int ac, char **av)
 			}
 			break;
 		case 'l':
-			if (options.user == NULL)
+			if (options.user == NULL) {
 				options.user = xstrdup(optarg);
+				user_on_commandline = 1;
+			}
 			break;
 
 		case 'L':
@@ -1115,6 +1120,7 @@ main(int ac, char **av)
 			if (options.user == NULL) {
 				options.user = tuser;
 				tuser = NULL;
+				user_on_commandline = 1;
 			}
 			free(tuser);
 			if (options.port == -1 && tport != -1)
@@ -1129,6 +1135,7 @@ main(int ac, char **av)
 				if (options.user == NULL) {
 					options.user = p;
 					p = NULL;
+					user_on_commandline = 1;
 				}
 				*cp++ = '\0';
 				host = xstrdup(cp);
@@ -1293,8 +1300,10 @@ main(int ac, char **av)
 	if (fill_default_options(&options) != 0)
 		cleanup_exit(255);
 
-	if (options.user == NULL)
+	if (options.user == NULL) {
+		user_was_default = 1;
 		options.user = xstrdup(pw->pw_name);
+	}
 
 	/*
 	 * If ProxyJump option specified, then construct a ProxyCommand now.
@@ -1443,19 +1452,29 @@ main(int ac, char **av)
 	    "" : options.jump_host);
 
 	/*
-	 * Expand User. It cannot contain %r (itself) or %C since User is
+	 * If the user was specified via a configuration directive then attempt
+	 * to expand it. It cannot contain %r (itself) or %C since User is
 	 * a component of the hash.
 	 */
-	if (options.user != NULL) {
+	if (!user_on_commandline && !user_was_default) {
 		if ((p = percent_dollar_expand(options.user,
 		    DEFAULT_CLIENT_PERCENT_EXPAND_ARGS_NOUSER(cinfo),
 		    (char *)NULL)) == NULL)
 			fatal("invalid environment variable expansion");
+		user_expanded = strcmp(p, options.user) != 0;
 		free(options.user);
 		options.user = p;
-		if (!valid_ruser(options.user))
-			fatal("remote username contains invalid characters");
 	}
+
+	/*
+	 * Usernames specified on the commandline or expanded from the
+	 * configuration file must be validated.
+	 * Conversely, usernames from getpwnam(3) or specified as literals
+	 * via configuration (i.e. not expanded) are not subject to validation.
+	 */
+	if ((user_on_commandline || user_expanded) &&
+	    !valid_ruser(options.user))
+		fatal("remote username contains invalid characters");
 
 	/* Now User is expanded, store it and calculate hash. */
 	cinfo->remuser = xstrdup(options.user);
@@ -1689,8 +1708,6 @@ main(int ac, char **av)
 	    &timeout_ms, options.tcp_keep_alive) != 0)
 		exit(255);
 
-	if (addrs != NULL)
-		freeaddrinfo(addrs);
 
 	ssh_packet_set_timeout(ssh, options.server_alive_interval,
 	    options.server_alive_count_max);
@@ -1741,8 +1758,6 @@ main(int ac, char **av)
 			L_PUBKEY(_PATH_HOST_ECDSA_KEY_FILE, 4);
 			L_PUBKEY(_PATH_HOST_ED25519_KEY_FILE, 5);
 			L_PUBKEY(_PATH_HOST_RSA_KEY_FILE, 6);
-			L_CERT(_PATH_HOST_XMSS_KEY_FILE, 8);
-			L_PUBKEY(_PATH_HOST_XMSS_KEY_FILE, 9);
 			if (loaded == 0)
 				debug("HostbasedAuthentication enabled but no "
 				   "local public host keys could be loaded.");
@@ -1833,9 +1848,13 @@ main(int ac, char **av)
 #endif
 
  skip_connect:
+	if (addrs != NULL)
+		freeaddrinfo(addrs);
 	exit_status = ssh_session2(ssh, cinfo);
 	ssh_conn_info_free(cinfo);
-	ssh_packet_close(ssh);
+	channel_free_channels(ssh);
+	ssh_packet_free(ssh);
+	pwfree(pw);
 
 	if (options.control_path != NULL && muxserver_sock != -1)
 		unlink(options.control_path);
@@ -2434,6 +2453,7 @@ load_public_identity_files(const struct ssh_conn_info *cinfo)
 			free(cp);
 			continue;
 		}
+		free(cp);
 		/* NB. leave filename pointing to private key */
 		identity_files[n_ids] = xstrdup(filename);
 		identity_keys[n_ids] = public;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_swap.c,v 1.174 2025/03/10 14:13:58 mpi Exp $	*/
+/*	$OpenBSD: uvm_swap.c,v 1.176 2025/09/20 13:53:36 mpi Exp $	*/
 /*	$NetBSD: uvm_swap.c,v 1.40 2000/11/17 11:39:39 mrg Exp $	*/
 
 /*
@@ -1274,7 +1274,7 @@ sw_reg_strategy(struct swapdev *sdp, struct buf *bp, int bn)
 		nbp->vb_buf.b_blkno    = nbn + btodb(off);
 		nbp->vb_buf.b_proc     = bp->b_proc;
 		nbp->vb_buf.b_iodone   = sw_reg_iodone;
-		nbp->vb_buf.b_vp       = NULLVP;
+		nbp->vb_buf.b_vp       = NULL;
 		nbp->vb_buf.b_vnbufs.le_next = NOLIST;
 
 		/*
@@ -1989,7 +1989,7 @@ swapmount(void)
 	/* Construct a potential path to swap */
 	if ((nam = findblkname(major(swap_dev))))
 		snprintf(path, sizeof(path), "/dev/%s%d%c", nam,
-		    DISKUNIT(swap_dev), 'a' + DISKPART(swap_dev));
+		    DISKUNIT(swap_dev), DL_PARTNUM2NAME(DISKPART(swap_dev)));
 	else
 		snprintf(path, sizeof(path), "blkdev0x%x",
 		    swap_dev);

@@ -1,4 +1,4 @@
-/* $OpenBSD: misc.c,v 1.203 2025/08/18 03:43:01 djm Exp $ */
+/* $OpenBSD: misc.c,v 1.208 2025/09/25 06:33:19 djm Exp $ */
 /*
  * Copyright (c) 2000 Markus Friedl.  All rights reserved.
  * Copyright (c) 2005-2020 Damien Miller.  All rights reserved.
@@ -81,10 +81,13 @@ rtrim(char *s)
 
 	if ((i = strlen(s)) == 0)
 		return;
-	for (i--; i > 0; i--) {
+	do {
+		i--;
 		if (isspace((unsigned char)s[i]))
 			s[i] = '\0';
-	}
+		else
+			break;
+	} while (i > 0);
 }
 
 /*
@@ -443,7 +446,7 @@ strdelim_internal(char **s, int split_equals)
 }
 
 /*
- * Return next token in configuration line; splts on whitespace or a
+ * Return next token in configuration line; splits on whitespace or a
  * single '=' character.
  */
 char *
@@ -453,7 +456,7 @@ strdelim(char **s)
 }
 
 /*
- * Return next token in configuration line; splts on whitespace only.
+ * Return next token in configuration line; splits on whitespace only.
  */
 char *
 strdelimw(char **s)
@@ -477,6 +480,21 @@ pwcopy(struct passwd *pw)
 	copy->pw_dir = xstrdup(pw->pw_dir);
 	copy->pw_shell = xstrdup(pw->pw_shell);
 	return copy;
+}
+
+void
+pwfree(struct passwd *pw)
+{
+	if (pw == NULL)
+		return;
+	free(pw->pw_name);
+	freezero(pw->pw_passwd,
+	    pw->pw_passwd == NULL ? 0 : strlen(pw->pw_passwd));
+	free(pw->pw_gecos);
+	free(pw->pw_class);
+	free(pw->pw_dir);
+	free(pw->pw_shell);
+	freezero(pw, sizeof(*pw));
 }
 
 /*
@@ -942,7 +960,7 @@ urldecode(const char *src)
 	size_t srclen;
 
 	if ((srclen = strlen(src)) >= SIZE_MAX)
-		fatal_f("input too large");
+		return NULL;
 	ret = xmalloc(srclen + 1);
 	for (dst = ret; *src != '\0'; src++) {
 		switch (*src) {
@@ -950,9 +968,10 @@ urldecode(const char *src)
 			*dst++ = ' ';
 			break;
 		case '%':
+			/* note: don't allow \0 characters */
 			if (!isxdigit((unsigned char)src[1]) ||
 			    !isxdigit((unsigned char)src[2]) ||
-			    (ch = hexchar(src + 1)) == -1) {
+			    (ch = hexchar(src + 1)) == -1 || ch == 0) {
 				free(ret);
 				return NULL;
 			}

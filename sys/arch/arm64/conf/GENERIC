@@ -1,4 +1,4 @@
-# $OpenBSD: GENERIC,v 1.303 2025/08/21 14:53:07 kettenis Exp $
+# $OpenBSD: GENERIC,v 1.307 2025/09/17 09:32:55 kettenis Exp $
 #
 # GENERIC machine description file
 #
@@ -224,7 +224,7 @@ ssdfb*		at spi?
 wsdisplay*	at ssdfb?
 imxtmu*		at fdt?
 
-# Raspberry Pi 3/4
+# Raspberry Pi 3/4/5
 bcmaux*		at fdt? early 1
 bcmbsc*		at fdt?
 iic*		at bcmbsc?
@@ -243,6 +243,7 @@ bcmrng*		at fdt?
 bcmsdhost*	at fdt?
 sdmmc*		at bcmsdhost?
 bcmstbgpio*	at fdt? early 1
+bcmstbintc*	at fdt? early 1
 bcmstbpinctrl*	at fdt? early 1
 bcmstbrescal*	at fdt? early 1
 bcmstbreset*	at fdt? early 1
@@ -253,7 +254,10 @@ bse*		at acpi?
 dwctwo*		at fdt?
 usb*		at dwctwo?
 rpone*		at pci?
+rpiclock*	at fdt? early 1
 rpigpio*	at fdt? early 1
+rpipwm*		at fdt?
+rpirtc*		at fdt?
 
 # Amlogic SoCs
 amlclock*	at fdt? early 1

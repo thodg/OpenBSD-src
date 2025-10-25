@@ -1,4 +1,4 @@
-/* $OpenBSD: rpki-asn1.h,v 1.1 2025/08/19 11:30:20 job Exp $ */
+/* $OpenBSD: rpki-asn1.h,v 1.7 2025/09/15 11:52:07 job Exp $ */
 /*
  * Copyright (c) 2025 Job Snijders <job@openbsd.org>
  * Copyright (c) 2025 Theo Buehler <tb@openbsd.org>
@@ -23,6 +23,7 @@
 
 #include <openssl/asn1.h>
 #include <openssl/asn1t.h>
+#include <openssl/x509.h>
 
 /*
  * Autonomous System Provider Authorization (ASPA)
@@ -38,6 +39,195 @@ typedef struct {
 } ASProviderAttestation;
 
 DECLARE_ASN1_FUNCTIONS(ASProviderAttestation);
+
+
+/*
+ * Canonical Cache Representation (CCR)
+ * reference: TBD
+ */
+
+extern ASN1_ITEM_EXP ContentInfo_it;
+extern ASN1_ITEM_EXP CanonicalCacheRepresentation_it;
+extern ASN1_ITEM_EXP ManifestRefs_it;
+extern ASN1_ITEM_EXP ManifestRef_it;
+extern ASN1_ITEM_EXP ROAPayloadSets_it;
+extern ASN1_ITEM_EXP ROAPayloadSet_it;
+extern ASN1_ITEM_EXP ASPAPayloadSets_it;
+extern ASN1_ITEM_EXP ASPAPayloadSet_it;
+extern ASN1_ITEM_EXP SubjectKeyIdentifiers_it;
+extern ASN1_ITEM_EXP SubjectKeyIdentifier_it;
+extern ASN1_ITEM_EXP RouterKeySets_it;
+extern ASN1_ITEM_EXP RouterKeySet_it;
+extern ASN1_ITEM_EXP RouterKey_it;
+
+typedef struct {
+	ASN1_OCTET_STRING *hash;
+	ASN1_INTEGER *size;
+	ASN1_OCTET_STRING *aki;
+	ASN1_INTEGER *manifestNumber;
+	ASN1_GENERALIZEDTIME *thisUpdate;
+	STACK_OF(ACCESS_DESCRIPTION) *location;
+} ManifestRef;
+
+DECLARE_STACK_OF(ManifestRef);
+
+#ifndef DEFINE_STACK_OF
+#define sk_ManifestRef_num(st) SKM_sk_num(ManifestRef, (st))
+#define sk_ManifestRef_push(st, i) SKM_sk_push(ManifestRef, (st), (i))
+#define sk_ManifestRef_value(st, i) SKM_sk_value(ManifestRef, (st), (i))
+#endif
+
+DECLARE_ASN1_FUNCTIONS(ManifestRef);
+
+typedef STACK_OF(ManifestRef) ManifestRefs;
+
+DECLARE_ASN1_FUNCTIONS(ManifestRefs);
+
+typedef struct {
+	STACK_OF(ManifestRef) *mftrefs;
+	ASN1_GENERALIZEDTIME *mostRecentUpdate;
+	ASN1_OCTET_STRING *hash;
+} ManifestState;
+
+DECLARE_ASN1_FUNCTIONS(ManifestState);
+
+typedef struct {
+	ASN1_INTEGER *asID;
+	STACK_OF(ROAIPAddressFamily) *ipAddrBlocks;
+} ROAPayloadSet;
+
+DECLARE_STACK_OF(ROAPayloadSet);
+
+#ifndef DEFINE_STACK_OF
+#define sk_ROAPayloadSet_num(st) SKM_sk_num(ROAPayloadSet, (st))
+#define sk_ROAPayloadSet_push(st, i) SKM_sk_push(ROAPayloadSet, (st), (i))
+#define sk_ROAPayloadSet_value(st, i) SKM_sk_value(ROAPayloadSet, (st), (i))
+#endif
+
+DECLARE_ASN1_FUNCTIONS(ROAPayloadSet);
+
+typedef STACK_OF(ROAPayloadSet) ROAPayloadSets;
+
+DECLARE_ASN1_FUNCTIONS(ROAPayloadSets);
+
+typedef struct {
+	STACK_OF(ROAPayloadSet) *rps;
+	ASN1_OCTET_STRING *hash;
+} ROAPayloadState;
+
+DECLARE_ASN1_FUNCTIONS(ROAPayloadState);
+
+typedef struct {
+	ASN1_INTEGER *asID;
+	STACK_OF(ASN1_INTEGER) *providers;
+} ASPAPayloadSet;
+
+DECLARE_STACK_OF(ASPAPayloadSet);
+
+#ifndef DEFINE_STACK_OF
+#define sk_ASPAPayloadSet_num(st) SKM_sk_num(ASPAPayloadSet, (st))
+#define sk_ASPAPayloadSet_push(st, i) SKM_sk_push(ASPAPayloadSet, (st), (i))
+#define sk_ASPAPayloadSet_value(st, i) SKM_sk_value(ASPAPayloadSet, (st), (i))
+#endif
+
+DECLARE_ASN1_FUNCTIONS(ASPAPayloadSet);
+
+typedef STACK_OF(ASPAPayloadSet) ASPAPayloadSets;
+
+DECLARE_ASN1_FUNCTIONS(ASPAPayloadSets);
+
+typedef struct {
+	STACK_OF(ASPAPayloadSet) *aps;
+	ASN1_OCTET_STRING *hash;
+} ASPAPayloadState;
+
+DECLARE_ASN1_FUNCTIONS(ASPAPayloadState);
+
+typedef ASN1_OCTET_STRING SubjectKeyIdentifier;
+
+DECLARE_ASN1_FUNCTIONS(SubjectKeyIdentifier);
+
+DECLARE_STACK_OF(SubjectKeyIdentifier);
+
+#ifndef DEFINE_STACK_OF
+#define sk_SubjectKeyIdentifier_num(st) SKM_sk_num(SubjectKeyIdentifier, (st))
+#define sk_SubjectKeyIdentifier_push(st, i) \
+    SKM_sk_push(SubjectKeyIdentifier, (st), (i))
+#define sk_SubjectKeyIdentifier_value(st, i) \
+    SKM_sk_value(SubjectKeyIdentifier, (st), (i))
+#endif
+
+typedef STACK_OF(SubjectKeyIdentifier) SubjectKeyIdentifiers;
+
+DECLARE_ASN1_FUNCTIONS(SubjectKeyIdentifiers);
+
+typedef struct {
+	STACK_OF(SubjectKeyIdentifier) *skis;
+	ASN1_OCTET_STRING *hash;
+} TrustAnchorState;
+
+DECLARE_ASN1_FUNCTIONS(TrustAnchorState);
+
+typedef struct {
+	STACK_OF(RouterKeySet) *rksets;
+	ASN1_OCTET_STRING *hash;
+} RouterKeyState;
+
+DECLARE_ASN1_FUNCTIONS(RouterKeyState);
+
+typedef struct {
+	ASN1_INTEGER *asID;
+	STACK_OF(RouterKey) *routerKeys;
+} RouterKeySet;
+
+DECLARE_STACK_OF(RouterKeySet);
+
+#ifndef DEFINE_STACK_OF
+#define sk_RouterKeySet_num(st) SKM_sk_num(RouterKeySet, (st))
+#define sk_RouterKeySet_push(st, i) SKM_sk_push(RouterKeySet, (st), (i))
+#define sk_RouterKeySet_value(st, i) SKM_sk_value(RouterKeySet, (st), (i))
+#endif
+
+DECLARE_ASN1_FUNCTIONS(RouterKeySet);
+
+typedef STACK_OF(RouterKeySet) RouterKeySets;
+
+DECLARE_ASN1_FUNCTIONS(RouterKeySets);
+
+typedef struct {
+	SubjectKeyIdentifier *ski;
+	X509_PUBKEY *spki;
+} RouterKey;
+
+DECLARE_STACK_OF(RouterKey);
+
+#ifndef DEFINE_STACK_OF
+#define sk_RouterKey_num(st) SKM_sk_num(RouterKey, (st))
+#define sk_RouterKey_push(st, i) SKM_sk_push(RouterKey, (st), (i))
+#define sk_RouterKey_value(st, i) SKM_sk_value(RouterKey, (st), (i))
+#endif
+
+DECLARE_ASN1_FUNCTIONS(RouterKey);
+
+typedef struct {
+	ASN1_INTEGER *version;
+	ASN1_OBJECT *hashAlg;
+	ASN1_GENERALIZEDTIME *producedAt;
+	ManifestState *mfts;
+	ROAPayloadState *vrps;
+	ASPAPayloadState *vaps;
+	TrustAnchorState *tas;
+	RouterKeyState *rks;
+} CanonicalCacheRepresentation;
+
+DECLARE_ASN1_FUNCTIONS(CanonicalCacheRepresentation);
+
+typedef struct {
+	ASN1_OBJECT *contentType;
+	ASN1_OCTET_STRING *content;
+} ContentInfo;
+
+DECLARE_ASN1_FUNCTIONS(ContentInfo);
 
 
 /*
@@ -91,20 +281,27 @@ typedef struct {
 	ASN1_INTEGER *maxLength;
 } ROAIPAddress;
 
+DECLARE_ASN1_FUNCTIONS(ROAIPAddress);
 DECLARE_STACK_OF(ROAIPAddress);
+
+#ifndef DEFINE_STACK_OF
+#define sk_ROAIPAddress_num(st) SKM_sk_num(ROAIPAddress, (st))
+#define sk_ROAIPAddress_push(st, i) SKM_sk_push(ROAIPAddress, (st), (i))
+#define sk_ROAIPAddress_value(st, i) SKM_sk_value(ROAIPAddress, (st), (i))
+#endif
 
 typedef struct {
 	ASN1_OCTET_STRING *addressFamily;
 	STACK_OF(ROAIPAddress) *addresses;
 } ROAIPAddressFamily;
 
+DECLARE_ASN1_FUNCTIONS(ROAIPAddressFamily);
 DECLARE_STACK_OF(ROAIPAddressFamily);
 
 #ifndef DEFINE_STACK_OF
-#define sk_ROAIPAddress_num(st)		SKM_sk_num(ROAIPAddress, (st))
-#define sk_ROAIPAddress_value(st, i)	SKM_sk_value(ROAIPAddress, (st), (i))
-
-#define sk_ROAIPAddressFamily_num(st)	SKM_sk_num(ROAIPAddressFamily, (st))
+#define sk_ROAIPAddressFamily_num(st) SKM_sk_num(ROAIPAddressFamily, (st))
+#define sk_ROAIPAddressFamily_push(st, i) \
+    SKM_sk_push(ROAIPAddressFamily, (st), (i))
 #define sk_ROAIPAddressFamily_value(st, i) \
     SKM_sk_value(ROAIPAddressFamily, (st), (i))
 #endif
