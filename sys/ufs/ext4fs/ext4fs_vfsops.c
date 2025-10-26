@@ -634,6 +634,8 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	dev_t dev;
 	int error;
 
+	printf("ext4fs_vget: getting inode %llu\n", (unsigned long long)ino);
+
 	if (ino > (ufsino_t)-1)
 		panic("ext4fs_vget: alien ino_t %llu",
 		    (unsigned long long)ino);
@@ -670,6 +672,11 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	error = ufs_ihashins(ip);
 
 	if (error) {
+		/*
+		 * The vnode was locked by ufs_ihashins, then unlocked on error.
+		 * We need to properly clean up the inode and vnode.
+		 * vrele will trigger reclaim which will free the inode.
+		 */
 		vrele(vp);
 
 		if (error == EEXIST)
@@ -684,11 +691,15 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	u_int32_t inode_table_block = inode_group * fs->m_inode_table_blocks_per_group;
 	u_int32_t block_in_table = inode_index / fs->m_inodes_per_block;
 	u_int32_t offset_in_block = (inode_index % fs->m_inodes_per_block) * fs->m_inode_size;
-	
+
+	printf("ext4fs_vget: inode_group=%u, inode_table_block=%u, disk_block=%lld\n",
+	       inode_group, inode_table_block, (long long)((inode_table_block + block_in_table) << fs->m_fs_block_to_disk_block));
+
 	/* Read the block containing this inode */
 	daddr_t disk_block = (inode_table_block + block_in_table) << fs->m_fs_block_to_disk_block;
 	error = bread(ump->um_devvp, disk_block, fs->m_block_size, &bp);
 	if (error) {
+		printf("ext4fs_vget: bread failed with error %d\n", error);
 		/*
 		 * The inode does not contain anything useful, so it would
 		 * be misleading to leave it on its hash chain. With mode
@@ -744,13 +755,16 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	/* Set VROOT flag for root inode */
 	if (ip->i_number == EXT4FS_INODE_ROOT_DIR)
 		vp->v_flag |= VROOT;
-	
+
 	/* If the inode was deleted, reset all fields */
 	if (letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
 		vp->v_type = VNON;
 		ip->i_effnlink = 0;
 	}
-	
+
+	printf("ext4fs_vget: successfully loaded inode %llu, type=%d\n",
+	       (unsigned long long)ino, vp->v_type);
+
 	*vpp = vp;
 	return (0);
 }
