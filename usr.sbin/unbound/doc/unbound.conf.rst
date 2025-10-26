@@ -552,7 +552,7 @@ These options are part of the **server:** clause.
     On BSD, Solaris changes are similar to
     :ref:`so-rcvbuf<unbound.conf.so-rcvbuf>`.
 
-    Default: 4m
+    Default: 1m
 
 
 @@UAHL@unbound.conf@so-reuseport@@: *<yes or no>*
@@ -3098,6 +3098,14 @@ These options are part of the **server:** clause.
     When it is exceeded the query is failed and the lookup process stops.
 
     Default: 200
+
+
+@@UAHL@unbound.conf@iter-scrub-promiscuous@@: *<yes or no>*
+    Should the iterator scrubber remove promiscuous NS from positive answers.
+    This protects against poisonous contents, that could affect names in the
+    same zone as a spoofed packet.
+
+    Default: yes
 
 
 @@UAHL@unbound.conf@fast-server-permil@@: *<number>*

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bnxt.c,v 1.56 2025/09/05 09:58:24 stsp Exp $	*/
+/*	$OpenBSD: if_bnxt.c,v 1.59 2025/10/13 10:45:08 stsp Exp $	*/
 /*-
  * Broadcom NetXtreme-C/E network driver.
  *
@@ -288,7 +288,7 @@ const struct pci_matchid bnxt_devices[] = {
 int		bnxt_match(struct device *, void *, void *);
 void		bnxt_attach(struct device *, struct device *, void *);
 
-void		bnxt_up(struct bnxt_softc *);
+int		bnxt_up(struct bnxt_softc *);
 void		bnxt_down(struct bnxt_softc *);
 void		bnxt_iff(struct bnxt_softc *);
 int		bnxt_ioctl(struct ifnet *, u_long, caddr_t);
@@ -625,14 +625,14 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 	if (bnxt_cfg_async_cr(sc, cpr) != 0) {
 		printf("%s: failed to set async completion ring\n",
 		    DEVNAME(sc));
-		goto free_cp_mem;
+		goto free_cp_ring;
 	}
 	bnxt_write_cp_doorbell(sc, &cpr->ring, 1);
 
 	if (bnxt_set_cp_ring_aggint(sc, cpr) != 0) {
 		printf("%s: failed to set interrupt aggregation\n",
 		    DEVNAME(sc));
-		goto free_cp_mem;
+		goto free_cp_ring;
 	}
 
 	strlcpy(ifp->if_xname, DEVNAME(sc), IFNAMSIZ);
@@ -720,6 +720,9 @@ intrdisestablish:
 		pci_intr_disestablish(sc->sc_pc, bq->q_ihc);
 		bq->q_ihc = NULL;
 	}
+free_cp_ring:
+	bnxt_hwrm_ring_free(sc,
+	    HWRM_RING_ALLOC_INPUT_RING_TYPE_L2_CMPL, &cpr->ring);
 free_cp_mem:
 	bnxt_dmamem_free(sc, cpr->ring_mem);
 deintr:
@@ -821,13 +824,13 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 		    HWRM_NA_SIGNATURE, 1) != 0) {
 			printf("%s: failed to allocate completion queue %d\n",
 			    DEVNAME(sc), bq->q_index);
-			goto free_rx;
+			goto free_cp_mem;
 		}
 
 		if (bnxt_set_cp_ring_aggint(sc, cp) != 0) {
 			printf("%s: failed to set interrupt %d aggregation\n",
 			    DEVNAME(sc), bq->q_index);
-			goto free_rx;
+			goto free_cp_ring;
 		}
 		bnxt_write_cp_doorbell(sc, &cp->ring, 1);
 	}
@@ -836,7 +839,7 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	    BNXT_DMA_DVA(sc->sc_stats_ctx_mem) +
 	    (bq->q_index * sizeof(struct ctx_hw_stats))) != 0) {
 		printf("%s: failed to set up stats context\n", DEVNAME(sc));
-		goto free_rx;
+		goto free_cp_ring;
 	}
 
 	tx->tx_ring.phys_id = (uint16_t)HWRM_NA_SIGNATURE;
@@ -998,6 +1001,16 @@ dealloc_rx:
 	    &rx->rx_ring);
 dealloc_stats:
 	bnxt_hwrm_stat_ctx_free(sc, cp);
+free_cp_ring:
+	if (sc->sc_intrmap != NULL) {
+		bnxt_hwrm_ring_free(sc,
+		    HWRM_RING_ALLOC_INPUT_RING_TYPE_L2_CMPL, &cp->ring);
+	}
+free_cp_mem:
+	if (sc->sc_intrmap != NULL) {
+		bnxt_dmamem_free(sc, cp->ring_mem);
+		cp->ring_mem = NULL;
+	}
 free_rx:
 	bnxt_dmamem_free(sc, rx->rx_ring_mem);
 	rx->rx_ring_mem = NULL;
@@ -1054,36 +1067,38 @@ bnxt_queue_down(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	tx->tx_ring_mem = NULL;
 }
 
-void
+int
 bnxt_up(struct bnxt_softc *sc)
 {
 	struct ifnet *ifp = &sc->sc_ac.ac_if;
-	int i;
+	int i, ret = 0;
 
 	sc->sc_stats_ctx_mem = bnxt_dmamem_alloc(sc,
 	    sizeof(struct ctx_hw_stats) * sc->sc_nqueues);
 	if (sc->sc_stats_ctx_mem == NULL) {
 		printf("%s: failed to allocate stats contexts\n", DEVNAME(sc));
-		return;
+		return ENOMEM;
 	}
 
 	sc->sc_rx_cfg = bnxt_dmamem_alloc(sc, PAGE_SIZE * 2);
 	if (sc->sc_rx_cfg == NULL) {
 		printf("%s: failed to allocate rx config buffer\n",
 		    DEVNAME(sc));
+		ret = ENOMEM;
 		goto free_stats;
 	}
 
 	for (i = 0; i < sc->sc_nqueues; i++) {
-		if (bnxt_queue_up(sc, &sc->sc_queues[i]) != 0) {
+		ret = bnxt_queue_up(sc, &sc->sc_queues[i]);
+		if (ret != 0)
 			goto down_queues;
-		}
 	}
 
 	sc->sc_vnic.rss_id = (uint16_t)HWRM_NA_SIGNATURE;
 	if (bnxt_hwrm_vnic_ctx_alloc(sc, &sc->sc_vnic.rss_id) != 0) {
 		printf("%s: failed to allocate vnic rss context\n",
 		    DEVNAME(sc));
+		ret = ENOMEM;
 		goto down_all_queues;
 	}
 
@@ -1096,23 +1111,27 @@ bnxt_up(struct bnxt_softc *sc)
 	    BNXT_VNIC_FLAG_VLAN_STRIP;
 	if (bnxt_hwrm_vnic_alloc(sc, &sc->sc_vnic) != 0) {
 		printf("%s: failed to allocate vnic\n", DEVNAME(sc));
+		ret = ENOMEM;
 		goto dealloc_vnic_ctx;
 	}
 
 	if (bnxt_hwrm_vnic_cfg(sc, &sc->sc_vnic) != 0) {
 		printf("%s: failed to configure vnic\n", DEVNAME(sc));
+		ret = EIO;
 		goto dealloc_vnic;
 	}
 
 	if (bnxt_hwrm_vnic_cfg_placement(sc, &sc->sc_vnic) != 0) {
 		printf("%s: failed to configure vnic placement mode\n",
 		    DEVNAME(sc));
+		ret = EIO;
 		goto dealloc_vnic;
 	}
 
 	sc->sc_vnic.filter_id = -1;
 	if (bnxt_hwrm_set_filter(sc, &sc->sc_vnic) != 0) {
 		printf("%s: failed to set vnic filter\n", DEVNAME(sc));
+		ret = EIO;
 		goto dealloc_vnic;
 	}
 
@@ -1137,6 +1156,7 @@ bnxt_up(struct bnxt_softc *sc)
 		    BNXT_DMA_DVA(sc->sc_rx_cfg) + PAGE_SIZE +
 		    (HW_HASH_INDEX_SIZE * sizeof(uint16_t))) != 0) {
 			printf("%s: failed to set RSS config\n", DEVNAME(sc));
+			ret = EIO;
 			goto dealloc_vnic;
 		}
 	}
@@ -1144,7 +1164,7 @@ bnxt_up(struct bnxt_softc *sc)
 	bnxt_iff(sc);
 	SET(ifp->if_flags, IFF_RUNNING);
 
-	return;
+	return 0;
 
 dealloc_vnic:
 	bnxt_hwrm_vnic_free(sc, &sc->sc_vnic);
@@ -1162,6 +1182,7 @@ down_queues:
 free_stats:
 	bnxt_dmamem_free(sc, sc->sc_stats_ctx_mem);
 	sc->sc_stats_ctx_mem = NULL;
+	return ret;
 }
 
 void
@@ -1255,7 +1276,7 @@ bnxt_ioctl(struct ifnet *ifp, u_long cmd, caddr_t data)
 			if (ISSET(ifp->if_flags, IFF_RUNNING))
 				error = ENETRESET;
 			else
-				bnxt_up(sc);
+				error = bnxt_up(sc);
 		} else {
 			if (ISSET(ifp->if_flags, IFF_RUNNING))
 				bnxt_down(sc);

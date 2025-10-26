@@ -1,4 +1,4 @@
-/*	$OpenBSD: ccr.c,v 1.20 2025/10/04 10:52:30 tb Exp $ */
+/*	$OpenBSD: ccr.c,v 1.26 2025/10/18 08:12:32 tb Exp $ */
 /*
  * Copyright (c) 2025 Job Snijders <job@openbsd.org>
  *
@@ -15,6 +15,7 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/tree.h>
 
@@ -33,13 +34,13 @@
 #include "rpki-asn1.h"
 
 /*
- * CCR definition in draft-spaghetti-sidrops-rpki-ccr-00, section 3.
+ * CCR definition in draft-spaghetti-sidrops-rpki-ccr-04, section 3.
  */
 
-ASN1_ITEM_EXP ContentInfo_it;
+ASN1_ITEM_EXP EncapContentInfo_it;
 ASN1_ITEM_EXP CanonicalCacheRepresentation_it;
-ASN1_ITEM_EXP ManifestRefs_it;
-ASN1_ITEM_EXP ManifestRef_it;
+ASN1_ITEM_EXP ManifestInstances_it;
+ASN1_ITEM_EXP ManifestInstance_it;
 ASN1_ITEM_EXP ROAPayloadSets_it;
 ASN1_ITEM_EXP ROAPayloadSet_it;
 ASN1_ITEM_EXP ASPAPayloadSets_it;
@@ -50,16 +51,12 @@ ASN1_ITEM_EXP RouterKeySets_it;
 ASN1_ITEM_EXP RouterKeySet_it;
 ASN1_ITEM_EXP RouterKey_it;
 
-/*
- * Can't use CMS_ContentInfo since it is not backed by a public struct
- * and since the OpenSSL CMS API does not support custom contentTypes.
- */
-ASN1_SEQUENCE(ContentInfo) = {
-	ASN1_SIMPLE(ContentInfo, contentType, ASN1_OBJECT),
-	ASN1_EXP(ContentInfo, content, ASN1_OCTET_STRING, 0),
-} ASN1_SEQUENCE_END(ContentInfo);
+ASN1_SEQUENCE(EncapContentInfo) = {
+	ASN1_SIMPLE(EncapContentInfo, contentType, ASN1_OBJECT),
+	ASN1_EXP(EncapContentInfo, content, ASN1_OCTET_STRING, 0),
+} ASN1_SEQUENCE_END(EncapContentInfo);
 
-IMPLEMENT_ASN1_FUNCTIONS(ContentInfo);
+IMPLEMENT_ASN1_FUNCTIONS(EncapContentInfo);
 
 ASN1_SEQUENCE(CanonicalCacheRepresentation) = {
 	ASN1_EXP_OPT(CanonicalCacheRepresentation, version, ASN1_INTEGER, 0),
@@ -76,29 +73,32 @@ ASN1_SEQUENCE(CanonicalCacheRepresentation) = {
 IMPLEMENT_ASN1_FUNCTIONS(CanonicalCacheRepresentation);
 
 ASN1_SEQUENCE(ManifestState) = {
-	ASN1_SEQUENCE_OF(ManifestState, mftrefs, ManifestRef),
+	ASN1_SEQUENCE_OF(ManifestState, mis, ManifestInstance),
 	ASN1_SIMPLE(ManifestState, mostRecentUpdate, ASN1_GENERALIZEDTIME),
 	ASN1_SIMPLE(ManifestState, hash, ASN1_OCTET_STRING),
 } ASN1_SEQUENCE_END(ManifestState);
 
 IMPLEMENT_ASN1_FUNCTIONS(ManifestState);
 
-ASN1_ITEM_TEMPLATE(ManifestRefs) =
-    ASN1_EX_TEMPLATE_TYPE(ASN1_TFLG_SEQUENCE_OF, 0, mftrefs, ManifestRef)
-ASN1_ITEM_TEMPLATE_END(ManifestRefs);
+ASN1_ITEM_TEMPLATE(ManifestInstances) =
+    ASN1_EX_TEMPLATE_TYPE(ASN1_TFLG_SEQUENCE_OF, 0, mis, ManifestInstance)
+ASN1_ITEM_TEMPLATE_END(ManifestInstances);
 
-IMPLEMENT_ASN1_ENCODE_FUNCTIONS_fname(ManifestRefs, ManifestRefs, ManifestRefs);
+IMPLEMENT_ASN1_ENCODE_FUNCTIONS_fname(ManifestInstances, ManifestInstances,
+    ManifestInstances);
 
-ASN1_SEQUENCE(ManifestRef) = {
-	ASN1_SIMPLE(ManifestRef, hash, ASN1_OCTET_STRING),
-	ASN1_SIMPLE(ManifestRef, size, ASN1_INTEGER),
-	ASN1_SIMPLE(ManifestRef, aki, ASN1_OCTET_STRING),
-	ASN1_SIMPLE(ManifestRef, manifestNumber, ASN1_INTEGER),
-	ASN1_SIMPLE(ManifestRef, thisUpdate, ASN1_GENERALIZEDTIME),
-	ASN1_SEQUENCE_OF(ManifestRef, location, ACCESS_DESCRIPTION),
-} ASN1_SEQUENCE_END(ManifestRef);
+ASN1_SEQUENCE(ManifestInstance) = {
+	ASN1_SIMPLE(ManifestInstance, hash, ASN1_OCTET_STRING),
+	ASN1_SIMPLE(ManifestInstance, size, ASN1_INTEGER),
+	ASN1_SIMPLE(ManifestInstance, aki, ASN1_OCTET_STRING),
+	ASN1_SIMPLE(ManifestInstance, manifestNumber, ASN1_INTEGER),
+	ASN1_SIMPLE(ManifestInstance, thisUpdate, ASN1_GENERALIZEDTIME),
+	ASN1_SEQUENCE_OF(ManifestInstance, locations, ACCESS_DESCRIPTION),
+	ASN1_SEQUENCE_OF_OPT(ManifestInstance, subordinates,
+	    SubjectKeyIdentifier),
+} ASN1_SEQUENCE_END(ManifestInstance);
 
-IMPLEMENT_ASN1_FUNCTIONS(ManifestRef);
+IMPLEMENT_ASN1_FUNCTIONS(ManifestInstance);
 
 ASN1_SEQUENCE(ROAPayloadState) = {
 	ASN1_SEQUENCE_OF(ROAPayloadState, rps, ROAPayloadSet),
@@ -260,32 +260,60 @@ location_add_sia(STACK_OF(ACCESS_DESCRIPTION) *sad, const char *sia)
 		errx(1, "sk_ACCESS_DESCRIPTION_push");
 }
 
-static void
-append_cached_manifest(STACK_OF(ManifestRef) *mftrefs, struct ccr_mft *cm)
+static int
+ski_cmp(const SubjectKeyIdentifier *const *a, const SubjectKeyIdentifier *const *b)
 {
-	ManifestRef *mr;
+	return ASN1_OCTET_STRING_cmp(*a, *b);
+}
 
-	if ((mr = ManifestRef_new()) == NULL)
-		errx(1, "ManifestRef_new");
+static void
+append_cached_manifest(STACK_OF(ManifestInstance) *mis, struct ccr_mft *cm)
+{
+	ManifestInstance *mi;
+	struct ccr_mft_sub_ski *sub;
+	SubjectKeyIdentifier *ski;
 
-	if (!ASN1_OCTET_STRING_set(mr->hash, cm->hash, sizeof(cm->hash)))
+	if ((mi = ManifestInstance_new()) == NULL)
+		errx(1, "ManifestInstance_new");
+
+	if (!ASN1_OCTET_STRING_set(mi->hash, cm->hash, sizeof(cm->hash)))
 		errx(1, "ASN1_OCTET_STRING_set");
 
-	if (!ASN1_OCTET_STRING_set(mr->aki, cm->aki, sizeof(cm->aki)))
+	if (!ASN1_OCTET_STRING_set(mi->aki, cm->aki, sizeof(cm->aki)))
 		errx(1, "ASN1_OCTET_STRING_set");
 
-	if (!ASN1_INTEGER_set_uint64(mr->size, cm->size))
+	if (!ASN1_INTEGER_set_uint64(mi->size, cm->size))
 		errx(1, "ASN1_INTEGER_set_uint64");
 
-	asn1int_set_seqnum(mr->manifestNumber, cm->seqnum);
+	asn1int_set_seqnum(mi->manifestNumber, cm->seqnum);
 
-	if (ASN1_GENERALIZEDTIME_set(mr->thisUpdate, cm->thisupdate) == NULL)
+	if (ASN1_GENERALIZEDTIME_set(mi->thisUpdate, cm->thisupdate) == NULL)
 		errx(1, "ASN1_GENERALIZEDTIME_set");
 
-	location_add_sia(mr->location, cm->sia);
+	location_add_sia(mi->locations, cm->sia);
 
-	if (sk_ManifestRef_push(mftrefs, mr) <= 0)
-		errx(1, "sk_ManifestRef_push");
+	if (SLIST_EMPTY(&cm->subordinates))
+		goto done;
+
+	if ((mi->subordinates = sk_SubjectKeyIdentifier_new(ski_cmp)) == NULL)
+		err(1, NULL);
+
+	SLIST_FOREACH(sub, &cm->subordinates, entry) {
+		if ((ski = SubjectKeyIdentifier_new()) == NULL)
+			err(1, NULL);
+
+		if (!ASN1_OCTET_STRING_set(ski, sub->ski, sizeof(sub->ski)))
+			errx(1, "ASN1_OCTET_STRING_set");
+
+		if (sk_SubjectKeyIdentifier_push(mi->subordinates, ski) <= 0)
+			errx(1, "sk_SubjectKeyIdentifier_push");
+	}
+
+	sk_SubjectKeyIdentifier_sort(mi->subordinates);
+
+ done:
+	if (sk_ManifestInstance_push(mis, mi) <= 0)
+		errx(1, "sk_ManifestInstance_push");
 }
 
 static int
@@ -306,7 +334,7 @@ generate_manifeststate(struct validation_data *vd)
 		errx(1, "ManifestState_new");
 
 	RB_FOREACH(cm, ccr_mft_tree, &ccr->mfts) {
-		append_cached_manifest(ms->mftrefs, cm);
+		append_cached_manifest(ms->mis, cm);
 
 		if (cm->thisupdate > most_recent_update)
 			most_recent_update = cm->thisupdate;
@@ -316,7 +344,7 @@ generate_manifeststate(struct validation_data *vd)
 	    most_recent_update) == NULL)
 		errx(1, "ASN1_GENERALIZEDTIME_set");
 
-	hash_asn1_item(ms->hash, ASN1_ITEM_rptr(ManifestRefs), ms->mftrefs);
+	hash_asn1_item(ms->hash, ASN1_ITEM_rptr(ManifestInstances), ms->mis);
 
 	if (!base64_encode_asn1str(ms->hash, &ccr->mfts_hash))
 		errx(1, "base64_encode_asn1str");
@@ -609,15 +637,12 @@ void
 serialize_ccr_content(struct validation_data *vd)
 {
 	CanonicalCacheRepresentation *ccr;
-	ContentInfo *ci = NULL;
+	EncapContentInfo *ci = NULL;
 	unsigned char *out;
 	int out_len, ci_der_len;
 
-	/* XXX - This should probably move to main(). */
-	x509_init_oid();
-
-	if ((ci = ContentInfo_new()) == NULL)
-		errx(1, "ContentInfo_new");
+	if ((ci = EncapContentInfo_new()) == NULL)
+		errx(1, "EncapContentInfo_new");
 
 	/*
 	 * At some point the below PEN OID should be replaced by one from IANA.
@@ -640,11 +665,11 @@ serialize_ccr_content(struct validation_data *vd)
 	free(out);
 
 	vd->ccr.der = NULL;
-	if ((ci_der_len = i2d_ContentInfo(ci, &vd->ccr.der)) <= 0)
-		errx(1, "i2d_ContentInfo");
+	if ((ci_der_len = i2d_EncapContentInfo(ci, &vd->ccr.der)) <= 0)
+		errx(1, "i2d_EncapContentInfo");
 	vd->ccr.der_len = ci_der_len;
 
-	ContentInfo_free(ci);
+	EncapContentInfo_free(ci);
 }
 
 static inline int
@@ -672,6 +697,28 @@ ccr_insert_tas(struct ccr_tas_tree *tree, const struct cert *cert)
 		errx(1, "multiple TALs with the same key are not supported");
 }
 
+void
+ccr_insert_mft_sub(struct ccr_mft_tree *tree, const struct cert *cert)
+{
+	struct ccr_mft *m, needle = { 0 };
+	struct ccr_mft_sub_ski *sub;
+
+	assert(cert->purpose == CERT_PURPOSE_CA);
+
+	memcpy(needle.hash, cert->mfthash, sizeof(cert->mfthash));
+
+	if ((m = RB_FIND(ccr_mft_tree, tree, &needle)) == NULL)
+		errx(1, "RB_FIND ccr_mft_tree");
+
+	if ((sub = calloc(1, sizeof(*sub))) == NULL)
+		err(1, NULL);
+
+	if (hex_decode(cert->ski, sub->ski, sizeof(sub->ski)) != 0)
+		errx(1, "hex_decode");
+
+	SLIST_INSERT_HEAD(&m->subordinates, sub, entry);
+}
+
 static inline int
 ccr_mft_cmp(const struct ccr_mft *a, const struct ccr_mft *b)
 {
@@ -680,13 +727,25 @@ ccr_mft_cmp(const struct ccr_mft *a, const struct ccr_mft *b)
 
 RB_GENERATE(ccr_mft_tree, ccr_mft, entry, ccr_mft_cmp);
 
+static struct ccr_mft *
+ccr_mft_new(void)
+{
+	struct ccr_mft *ccr_mft = NULL;
+
+	if ((ccr_mft = calloc(1, sizeof(*ccr_mft))) == NULL)
+		err(1, NULL);
+
+	SLIST_INIT(&ccr_mft->subordinates);
+
+	return ccr_mft;
+}
+
 void
 ccr_insert_mft(struct ccr_mft_tree *tree, const struct mft *mft)
 {
 	struct ccr_mft *ccr_mft;
 
-	if ((ccr_mft = calloc(1, sizeof(*ccr_mft))) == NULL)
-		err(1, NULL);
+	ccr_mft = ccr_mft_new();
 
 	if (hex_decode(mft->aki, ccr_mft->aki, sizeof(ccr_mft->aki)) != 0)
 		errx(1, "hex_decode");
@@ -787,8 +846,16 @@ output_ccr_der(FILE *out, struct validation_data *vd, struct stats *st)
 static void
 ccr_mft_free(struct ccr_mft *ccr_mft)
 {
+	struct ccr_mft_sub_ski *sub_ski;
+
 	if (ccr_mft == NULL)
 		return;
+
+	while (!SLIST_EMPTY(&ccr_mft->subordinates)) {
+		sub_ski = SLIST_FIRST(&ccr_mft->subordinates);
+		SLIST_REMOVE_HEAD(&ccr_mft->subordinates, entry);
+		free(sub_ski);
+	}
 
 	free(ccr_mft->seqnum);
 	free(ccr_mft->sia);
@@ -893,76 +960,97 @@ ccr_free(struct ccr *ccr)
 }
 
 static int
-parse_mft_refs(const char *fn, struct ccr *ccr,
-    const STACK_OF(ManifestRef) *refs)
+parse_mft_instances(const char *fn, struct ccr *ccr,
+    const STACK_OF(ManifestInstance) *mis)
 {
-	ManifestRef *ref;
+	ManifestInstance *mi;
 	struct ccr_mft *ccr_mft = NULL, *prev;
-	int i, refs_num;
+	int i, j, instances_num, sub_num;
 	const ACCESS_DESCRIPTION *ad;
+	const SubjectKeyIdentifier *s;
+	struct ccr_mft_sub_ski *sub = NULL;
 	int rc = 0;
 	uint64_t size = 0;
 
-	refs_num = sk_ManifestRef_num(refs);
+	instances_num = sk_ManifestInstance_num(mis);
 
 	RB_INIT(&ccr->mfts);
 
 	prev = NULL;
-	for (i = 0; i < refs_num; i++) {
-		if ((ccr_mft = calloc(1, sizeof(*ccr_mft))) == NULL)
-			err(1, NULL);
+	for (i = 0; i < instances_num; i++) {
+		ccr_mft = ccr_mft_new();
 
-		ref = sk_ManifestRef_value(refs, i);
+		mi = sk_ManifestInstance_value(mis, i);
 
-		if (ref->hash->length != sizeof(ccr_mft->hash)) {
-			warnx("%s: manifest ref #%d corrupted", fn, i);
+		if (mi->hash->length != sizeof(ccr_mft->hash)) {
+			warnx("%s: manifest instance #%d corrupted", fn, i);
 			goto out;
 		}
-		memcpy(ccr_mft->hash, ref->hash->data, ref->hash->length);
+		memcpy(ccr_mft->hash, mi->hash->data, mi->hash->length);
 
 		if (prev != NULL) {
 			if (ccr_mft_cmp(ccr_mft, prev) <= 0) {
-				warnx("%s: misordered ManifestRef", fn);
+				warnx("%s: misordered ManifestInstances", fn);
 				goto out;
 			}
 		}
 
-		if (ref->aki->length != sizeof(ccr_mft->aki)) {
-			warnx("%s: manifest ref #%d corrupted", fn, i);
+		if (mi->aki->length != sizeof(ccr_mft->aki)) {
+			warnx("%s: manifest instance #%d corrupted", fn, i);
 			goto out;
 		}
-		memcpy(ccr_mft->aki, ref->aki->data, ref->aki->length);
+		memcpy(ccr_mft->aki, mi->aki->data, mi->aki->length);
 
-		if (!ASN1_INTEGER_get_uint64(&size, ref->size)) {
-			warnx("%s: manifest ref #%d corrupted", fn, i);
+		if (!ASN1_INTEGER_get_uint64(&size, mi->size)) {
+			warnx("%s: manifest instance #%d corrupted", fn, i);
 			goto out;
 		}
 		if (size < 1000 || size > MAX_FILE_SIZE) {
-			warnx("%s: manifest ref #%d corrupted", fn, i);
+			warnx("%s: manifest instance #%d corrupted", fn, i);
 			goto out;
 		}
 		ccr_mft->size = size;
 
 		ccr_mft->seqnum = x509_convert_seqnum(fn, "manifest number",
-		    ref->manifestNumber);
+		    mi->manifestNumber);
 		if (ccr_mft->seqnum == NULL)
 			goto out;
 
-		if (!x509_get_generalized_time(fn, "ManifestRef thisUpdate",
-		    ref->thisUpdate, &ccr_mft->thisupdate))
+		if (!x509_get_generalized_time(fn, "ManifestInstance "
+		    "thisUpdate", mi->thisUpdate, &ccr_mft->thisupdate))
 			goto out;
 
-		if (sk_ACCESS_DESCRIPTION_num(ref->location) != 1) {
+		if (sk_ACCESS_DESCRIPTION_num(mi->locations) != 1) {
 			warnx("%s: unexpected number of locations", fn);
 			goto out;
 		}
 
-		ad = sk_ACCESS_DESCRIPTION_value(ref->location, 0);
+		ad = sk_ACCESS_DESCRIPTION_value(mi->locations, 0);
 
 		if (!x509_location(fn, "SIA: signedObject", ad->location,
 		    &ccr_mft->sia))
 			goto out;
 
+		sub_num = sk_SubjectKeyIdentifier_num(mi->subordinates);
+		if (sub_num <= 0)
+			goto insert;
+
+		for (j = 0; j < sub_num; j++) {
+			if ((sub = calloc(1, sizeof(*sub))) == NULL)
+				err(1, NULL);
+
+			s = sk_SubjectKeyIdentifier_value(mi->subordinates, j);
+			if (s->length != sizeof(sub->ski)) {
+				warnx("%s: manifest instance #%d corrupted",
+				    fn, j);
+				goto out;
+			}
+			memcpy(sub->ski, s->data, sizeof(sub->ski));
+			SLIST_INSERT_HEAD(&ccr_mft->subordinates, sub, entry);
+			sub = NULL;
+		}
+
+ insert:
 		if (RB_INSERT(ccr_mft_tree, &ccr->mfts, ccr_mft) != NULL) {
 			warnx("%s: manifest state corrupted", fn);
 			goto out;
@@ -975,6 +1063,7 @@ parse_mft_refs(const char *fn, struct ccr *ccr,
 	rc = 1;
  out:
 	ccr_mft_free(ccr_mft);
+	free(sub);
 	return rc;
 }
 
@@ -984,7 +1073,7 @@ parse_manifeststate(const char *fn, struct ccr *ccr, const ManifestState *state)
 	int rc = 0;
 
 	ccr->mfts_hash = validate_asn1_hash(fn, "ManifestState", state->hash,
-	    ASN1_ITEM_rptr(ManifestRefs), state->mftrefs);
+	    ASN1_ITEM_rptr(ManifestInstances), state->mis);
 	if (ccr->mfts_hash == NULL)
 		goto out;
 
@@ -992,7 +1081,7 @@ parse_manifeststate(const char *fn, struct ccr *ccr, const ManifestState *state)
 	    state->mostRecentUpdate, &ccr->most_recent_update))
 		goto out;
 
-	if (!parse_mft_refs(fn, ccr, state->mftrefs))
+	if (!parse_mft_instances(fn, ccr, state->mis))
 		goto out;
 
 	rc = 1;
@@ -1475,7 +1564,7 @@ struct ccr *
 ccr_parse(const char *fn, const unsigned char *der, size_t len)
 {
 	const unsigned char *oder;
-	ContentInfo *ci = NULL;
+	EncapContentInfo *ci = NULL;
 	CanonicalCacheRepresentation *ccr_asn1 = NULL;
 	struct ccr *ccr = NULL;
 	int nid, rc = 0;
@@ -1484,8 +1573,8 @@ ccr_parse(const char *fn, const unsigned char *der, size_t len)
 		return NULL;
 
 	oder = der;
-	if ((ci = d2i_ContentInfo(NULL, &der, len)) == NULL) {
-		warnx("%s: d2i_ContentInfo", fn);
+	if ((ci = d2i_EncapContentInfo(NULL, &der, len)) == NULL) {
+		warnx("%s: d2i_EncapContentInfo", fn);
 		goto out;
 	}
 	if (der != oder + len) {
@@ -1497,7 +1586,7 @@ ccr_parse(const char *fn, const unsigned char *der, size_t len)
 		char buf[128];
 
 		OBJ_obj2txt(buf, sizeof(buf), ci->contentType, 1);
-		warnx("%s: unexpected OID: got %s, want 1.3.6.1.4.1.41948.825",
+		warnx("%s: unexpected OID: got %s, want 1.3.6.1.4.1.41948.828",
 		    fn, buf);
 		goto out;
 	}
@@ -1567,7 +1656,7 @@ ccr_parse(const char *fn, const unsigned char *der, size_t len)
 	rc = 1;
  out:
 	CanonicalCacheRepresentation_free(ccr_asn1);
-	ContentInfo_free(ci);
+	EncapContentInfo_free(ci);
 
 	if (rc == 0) {
 		ccr_free(ccr);

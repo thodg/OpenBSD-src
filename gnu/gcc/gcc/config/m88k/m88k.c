@@ -2103,7 +2103,7 @@ print_operand (FILE *file, rtx x, int code)
 		 to be aligned to an 8-byte boundary to make sure this can
 		 never happen. */
 	      ASM_OUTPUT_ALIGN (file, 3);
-	      asm_fprintf (file, "fldcr\t %R%s,%Rfcr63\n\t", reg_names[0]);
+	      asm_fprintf (file, "\tfldcr\t %R%s,%Rfcr63\n\t", reg_names[0]);
 	    }
 	  m88k_volatile_code = code;
 	  last_addr = (GET_CODE (XEXP (x, 0)) == LO_SUM
@@ -2436,10 +2436,9 @@ m88k_adjust_cost (rtx insn, rtx link, rtx dep, int cost)
     return 0;  /* Anti or output dependence.  */
 
   if (TARGET_88110
-      && recog_memoized (insn) >= 0
       && get_attr_type (insn) == TYPE_STORE
       && SET_SRC (PATTERN (insn)) == SET_DEST (PATTERN (dep)))
-    return cost - 4;  /* 88110 store reservation station.  */
+    return cost - COSTS_N_INSNS (1);  /* 88110 store reservation station.  */
 
   return cost;
 }

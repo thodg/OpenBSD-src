@@ -1,4 +1,4 @@
-/* $OpenBSD: atomic.h,v 1.25 2025/02/07 03:03:31 jsg Exp $ */
+/* $OpenBSD: atomic.h,v 1.32 2025/10/22 02:14:31 jsg Exp $ */
 /**
  * \file drm_atomic.h
  * Atomic operations used in the DRM which may or may not be provided by the OS.
@@ -59,7 +59,6 @@
 #define atomic_cmpxchg(p, o, n)	__sync_val_compare_and_swap(p, o, n)
 #define cmpxchg(p, o, n)	__sync_val_compare_and_swap(p, o, n)
 #define cmpxchg64(p, o, n)	__sync_val_compare_and_swap(p, o, n)
-#define atomic_set_release(p, v)	atomic_set((p), (v))
 #define atomic_andnot(bits, p)		atomic_clearbits_int(p,bits)
 #define atomic_fetch_inc(p)		__sync_fetch_and_add(p, 1)
 #define atomic_fetch_xor(n, p)		__sync_fetch_and_xor(p, n)
@@ -406,7 +405,7 @@ find_next_bit(const volatile void *p, int max, int b)
 #define smp_mb()	__asm volatile("lock; addl $0,-4(%%esp)" : : : "memory", "cc")
 #define smp_rmb()	__membar("")
 #define smp_wmb()	__membar("")
-#define __smp_store_mb(var, value)	do { (void)xchg(&var, value); } while (0)
+#define smp_store_mb(var, value)	do { (void)xchg(&var, value); } while (0)
 #define smp_mb__after_atomic()	do { } while (0)
 #define smp_mb__before_atomic()	do { } while (0)
 #elif defined(__amd64__)
@@ -416,7 +415,7 @@ find_next_bit(const volatile void *p, int max, int b)
 #define smp_mb()	__asm volatile("lock; addl $0,-4(%%rsp)" : : : "memory", "cc")
 #define smp_rmb()	__membar("")
 #define smp_wmb()	__membar("")
-#define __smp_store_mb(var, value)	do { (void)xchg(&var, value); } while (0)
+#define smp_store_mb(var, value)	do { (void)xchg(&var, value); } while (0)
 #define smp_mb__after_atomic()	do { } while (0)
 #define smp_mb__before_atomic()	do { } while (0)
 #elif defined(__aarch64__)
@@ -426,6 +425,8 @@ find_next_bit(const volatile void *p, int max, int b)
 #define dma_rmb() __membar("dmb oshld")
 #define dma_wmb() __membar("dmb oshst")
 #define dma_mb() __membar("dmb osh")
+#define smp_rmb() __membar("dmb ishld")
+#define smp_wmb() __membar("dmb ishst")
 #define smp_mb() __membar("dmb ish")
 #elif defined(__arm__)
 #define rmb()	__membar("dsb sy")
@@ -468,20 +469,24 @@ find_next_bit(const volatile void *p, int max, int b)
 #define smp_wmb()	wmb()
 #endif
 
+#ifndef smp_mb
+#define smp_mb()	mb()
+#endif
+
 #ifndef mmiowb
 #define mmiowb()	wmb()
 #endif
 
 #ifndef smp_mb__before_atomic
-#define smp_mb__before_atomic()	mb()
+#define smp_mb__before_atomic()	smp_mb()
 #endif
 
 #ifndef smp_mb__after_atomic
-#define smp_mb__after_atomic()	mb()
+#define smp_mb__after_atomic()	smp_mb()
 #endif
 
 #ifndef smp_store_mb
-#define smp_store_mb(x, v)	do { x = v; mb(); } while (0)
+#define smp_store_mb(x, v)	do { WRITE_ONCE(x, v); smp_mb(); } while (0)
 #endif
 
 #ifndef smp_store_release
@@ -496,5 +501,17 @@ find_next_bit(const volatile void *p, int max, int b)
 	_v;					\
 })
 #endif
+
+#define atomic_set_release(p, v) do {		\
+	smp_mb__before_atomic();		\
+	atomic_set((p), (v));			\
+} while(0)
+
+#define atomic_read_acquire(x)			\
+({						\
+	__typeof(*x) _v = atomic_read(x);	\
+	smp_mb__after_atomic();			\
+	_v;					\
+})
 
 #endif

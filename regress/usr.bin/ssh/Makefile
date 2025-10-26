@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.140 2025/07/04 07:52:17 djm Exp $
+#	$OpenBSD: Makefile,v 1.142 2025/10/20 00:45:10 djm Exp $
 
 OPENSSL?=	yes
 
@@ -107,7 +107,9 @@ LTESTS= 	connect \
 		agent-pkcs11-cert \
 		penalty \
 		penalty-expire \
-		connect-bigconf
+		connect-bigconf \
+		ssh-pkcs11 \
+		ssh-tty
 
 INTEROP_TESTS=	putty-transfer putty-ciphers putty-kex conch-ciphers
 INTEROP_TESTS+=	dropbear-ciphers dropbear-kex dropbear-server
@@ -142,7 +144,8 @@ CLEANFILES+=	*.core actual agent-key.* authorized_keys_${USERNAME} \
 		t10.out t10.out.pub t12.out t12.out.pub t2.out t3.out \
 		t6.out1 t6.out2 t7.out t7.out.pub t8.out t8.out.pub \
 		t9.out t9.out.pub \
-		timestamp testdata user_*key* user_ca* user_key*
+		timestamp testdata user_*key* user_ca* user_key* \
+		pin.sh nopin.sh wrongpin.sh key.pub test.sh ctl-sock
 
 # Enable all malloc(3) randomisations and checks
 TEST_ENV=      "MALLOC_OPTIONS=CFGJRSUX"
@@ -263,5 +266,6 @@ clean: ${CLEAN_SUBDIR}
 	rm -f ${CLEANFILES}
 	rm -rf .putty
 	rm -rf .dropbear
+	rm -rf .fakehome
 
 .include <bsd.regress.mk>

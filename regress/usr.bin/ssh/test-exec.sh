@@ -1,4 +1,4 @@
-#	$OpenBSD: test-exec.sh,v 1.131 2025/07/26 01:53:31 djm Exp $
+#	$OpenBSD: test-exec.sh,v 1.133 2025/10/21 07:18:27 dtucker Exp $
 #	Placed in the Public Domain.
 
 #SUDO=sudo
@@ -337,11 +337,12 @@ save_debug_log ()
 
 	for logfile in $TEST_SSH_LOGDIR $TEST_REGRESS_LOGFILE \
 	    $TEST_SSH_LOGFILE $TEST_SSHD_LOGFILE; do
-		if [ ! -z "$SUDO" ] && [ -e "$logfile" ]; then
+		if [ ! -z "$SUDO" ]; then
+			touch $logfile
 			$SUDO chown -R $USER $logfile
+			$SUDO chmod ug+rw $logfile
 		fi
 	done
-	test -z "$SUDO" || $SUDO chmod ug+rw $TEST_SSHD_LOGFILE
 	echo $@ >>$TEST_REGRESS_LOGFILE
 	echo $@ >>$TEST_SSH_LOGFILE
 	echo $@ >>$TEST_SSHD_LOGFILE
@@ -791,13 +792,19 @@ EOF
 		fatal "softhsm import ed25519 fail"
 	chmod 600 $ED25519
 	ssh-keygen -y -f $ED25519 > ${ED25519}.pub
-	# Prepare askpass script to load PIN.
+	# Prepare some askpass scripts to load PINs.
 	PIN_SH=$SSH_SOFTHSM_DIR/pin.sh
 	cat > $PIN_SH << EOF
 #!/bin/sh
 echo "${TEST_SSH_PIN}"
 EOF
 	chmod 0700 "$PIN_SH"
+	WRONGPIN_SH=$SSH_SOFTHSM_DIR/wrongpin.sh
+	cat > $WRONGPIN_SH << EOF
+#!/bin/sh
+echo "0000"
+EOF
+	chmod 0700 "$WRONGPIN_SH"
 	PKCS11_OK=yes
 	return 0
 }
