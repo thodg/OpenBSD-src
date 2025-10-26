@@ -304,16 +304,92 @@ ext4fs_inactive(void *v)
 	struct vop_inactive_args *ap = v;
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
+	u_int16_t mode, nlink;
 	int error = 0;
+#ifdef DIAGNOSTIC
+	extern int prtactive;
+
+	if (prtactive && vp->v_usecount != 0)
+		vprint("ext4fs_inactive: pushing active", vp);
+#endif
+
+	printf("ext4fs_inactive: entry, vp=%p, ino=%llu, refcnt=%d\n",
+	    vp, (unsigned long long)ip->i_number, vp->v_usecount);
+
+	/*
+	 * DIAGNOSTIC: vop_inactive should be called with v_usecount == 1
+	 * (the last reference). If it's 0, something went wrong with
+	 * reference counting.
+	 */
+	if (vp->v_usecount == 0) {
+		printf("ext4fs_inactive: WARNING - vp->v_usecount is 0 for ino=%llu\n",
+		    (unsigned long long)ip->i_number);
+		printf("ext4fs_inactive: This indicates a reference counting bug!\n");
+	}
+
+	/*
+	 * Ignore inodes related to stale file handles.
+	 */
+	if (ip->i_e4din == NULL)
+		goto out;
+
+	mode = letoh16(ip->i_e4din->dinode.i_mode);
+	if (mode == 0)
+		goto out;
+
+	/*
+	 * If the inode was deleted (dtime != 0), skip further processing.
+	 */
+	if (letoh32(ip->i_e4din->dinode.i_dtime) != 0)
+		goto out;
+
+	nlink = letoh16(ip->i_e4din->dinode.i_links_count);
+
+	/*
+	 * Handle file deletion: if nlink == 0, truncate and free the inode.
+	 */
+	if (nlink == 0 && (vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
+		printf("ext4fs_inactive: inode %llu has nlink=0, needs deletion\n",
+		    (unsigned long long)ip->i_number);
+
+		/* TODO: implement truncate and inode freeing
+		 * For now, just set dtime to mark it as deleted
+		 */
+		printf("ext4fs_inactive: WARNING - truncate/free not implemented yet\n");
+
+		/* Mark inode as deleted by setting dtime */
+		/* This would require write support:
+		struct timespec ts;
+		getnanotime(&ts);
+		ip->i_e4din->dinode.i_dtime = htole32(ts.tv_sec);
+		ip->i_flag |= IN_CHANGE | IN_UPDATE;
+		*/
+	}
+
+	/*
+	 * Update inode if any flags are set.
+	 * TODO: implement ext4fs_update when write support is added
+	 */
+	if (ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE)) {
+		printf("ext4fs_inactive: inode %llu needs update (flags=0x%x)\n",
+		    (unsigned long long)ip->i_number, ip->i_flag);
+		/* ext4fs_update(ip, 0); */
+	}
+
+out:
+	VOP_UNLOCK(vp);
 
 	/*
 	 * If we are done with the inode, reclaim it
 	 * so that it can be reused immediately.
 	 */
-	if (ip->i_e4din != NULL && letoh32(ip->i_e4din->dinode.i_dtime) != 0)
+	if (ip->i_e4din == NULL || letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
+		printf("ext4fs_inactive: vrecycle inode %llu\n",
+		    (unsigned long long)ip->i_number);
 		vrecycle(vp, ap->a_p);
+	}
 
-	VOP_UNLOCK(vp);
+	printf("ext4fs_inactive: exit, ino=%llu\n", (unsigned long long)ip->i_number);
 	return (error);
 }
 
@@ -325,8 +401,13 @@ ext4fs_reclaim(void *v)
 	struct inode *ip = VTOI(vp);
 	int error;
 
-	if ((error = ufs_reclaim(vp)) != 0)
+	printf("ext4fs_reclaim: entry, vp=%p, ino=%llu, refcnt=%d\n",
+	    vp, (unsigned long long)ip->i_number, vp->v_usecount);
+
+	if ((error = ufs_reclaim(vp)) != 0) {
+		printf("ext4fs_reclaim: ufs_reclaim failed with error %d\n", error);
 		return (error);
+	}
 
 	if (ip->i_e4din != NULL)
 		pool_put(&ext4fs_dinode_pool, ip->i_e4din);
@@ -335,6 +416,7 @@ ext4fs_reclaim(void *v)
 
 	vp->v_data = NULL;
 
+	printf("ext4fs_reclaim: exit, ino=%llu\n", (unsigned long long)ip->i_number);
 	return (0);
 }
 

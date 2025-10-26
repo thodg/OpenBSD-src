@@ -107,18 +107,22 @@ ext4fs_flushfiles(struct mount *mp, int flags, struct proc *p)
 	struct ufsmount *ump;
 	int error;
 
+	printf("ext4fs_flushfiles: entry, flags=0x%x\n", flags);
 	ump = VFSTOUFS(mp);
 	/*
 	 * Flush all the files.
 	 */
-	if ((error = vflush(mp, NULL, flags)) != 0)
+	if ((error = vflush(mp, NULL, flags)) != 0) {
+		printf("ext4fs_flushfiles: vflush failed with error %d\n", error);
 		return (error);
+	}
 	/*
 	 * Flush filesystem metadata.
 	 */
 	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
 	error = VOP_FSYNC(ump->um_devvp, p->p_ucred, MNT_WAIT, p);
 	VOP_UNLOCK(ump->um_devvp);
+	printf("ext4fs_flushfiles: exit, error=%d\n", error);
 	return (error);
 }
 
@@ -150,6 +154,8 @@ ext4fs_mount(struct mount *mp, const char *path, void *data,
 	char fname[MNAMELEN];
 	char fspec[MNAMELEN];
 	struct ufsmount *ump = NULL;
+
+	printf("ext4fs_mount: entry, update=%d\n", (mp->mnt_flag & MNT_UPDATE) != 0);
 	args = data;
 	error = copyinstr(args->fspec, fspec, sizeof(fspec), NULL);
 	if (error)
@@ -171,13 +177,19 @@ ext4fs_mount(struct mount *mp, const char *path, void *data,
 		error = ENXIO;
 		goto error_devvp;
 	}
-	if ((mp->mnt_flag & MNT_UPDATE) == 0)
+	if ((mp->mnt_flag & MNT_UPDATE) == 0) {
+		printf("ext4fs_mount: calling ext4fs_mountfs\n");
 		error = ext4fs_mountfs(devvp, mp, p);
-	else {
-		if (devvp != ump->um_devvp)
+	} else {
+		printf("ext4fs_mount: MNT_UPDATE path\n");
+		ump = VFSTOUFS(mp);
+		if (devvp != ump->um_devvp) {
+			printf("ext4fs_mount: devvp mismatch\n");
 			error = EINVAL;	/* XXX needs translation */
-		else
+		} else {
+			printf("ext4fs_mount: vrele(devvp) in update path\n");
 			vrele(devvp);
+		}
 	}
 	if (error)
 		goto error_devvp;
@@ -193,12 +205,15 @@ ext4fs_mount(struct mount *mp, const char *path, void *data,
 
 error_devvp:
 	/* Error with devvp held. */
+	printf("ext4fs_mount: error_devvp path, vrele(devvp)\n");
 	vrele(devvp);
 
 error:
 	/* Error with no state to backout. */
+	printf("ext4fs_mount: error path, error=%d\n", error);
 
 success:
+	printf("ext4fs_mount: exit, error=%d\n", error);
 	return (error);
 }
 
@@ -216,6 +231,7 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	int error, ronly;
 	struct ucred *cred;
 
+	printf("ext4fs_mountfs: entry, devvp=%p\n", devvp);
 	dev = devvp->v_rdev;
 	cred = p ? p->p_ucred : NOCRED;
 	/*
@@ -293,8 +309,10 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	ump->um_seqinc = 1; /* no frags */
 	ump->um_maxsymlinklen = EXT4FS_SYMLINK_LEN_MAX;
 	devvp->v_specmountpoint = mp;
+	printf("ext4fs_mountfs: success\n");
 	return (0);
 out:
+	printf("ext4fs_mountfs: error path, error=%d\n", error);
 	if (devvp->v_specinfo)
 		devvp->v_specmountpoint = NULL;
 	if (bp)
@@ -303,6 +321,11 @@ out:
 	(void)VOP_CLOSE(devvp, ronly ? FREAD : FREAD|FWRITE, cred, p);
 	VOP_UNLOCK(devvp);
 	if (ump) {
+		if (mfs && mfs->m_gd != NULL) {
+			size_t gd_size = mfs->m_block_group_count *
+			    sizeof(struct ext4fs_block_group_descriptor);
+			free(mfs->m_gd, M_UFSMNT, gd_size);
+		}
 		free(mfs, M_UFSMNT, sizeof *mfs);
 		free(ump, M_UFSMNT, sizeof *ump);
 		mp->mnt_data = NULL;
@@ -396,7 +419,10 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 int
 ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 {
-	(void)devvp;
+	struct buf *bp;
+	daddr_t dblk;
+	size_t gd_size;
+	int error, i;
 
 	mfs->m_block_group_count = howmany(mfs->m_blocks_count -
 					   mfs->m_first_data_block,
@@ -414,7 +440,26 @@ ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 	mfs->m_inode_table_blocks_per_group = mfs->m_inodes_per_group /
 		mfs->m_inodes_per_block;
 
-	printf("ext4fs_sbfill: OK\n");
+	gd_size = mfs->m_block_group_count * sizeof(struct ext4fs_block_group_descriptor);
+	mfs->m_gd = malloc(gd_size, M_UFSMNT, M_WAITOK);
+
+	dblk = (mfs->m_first_data_block + 1) << mfs->m_fs_block_to_disk_block;
+	for (i = 0; i < mfs->m_block_group_descriptor_blocks_count; i++) {
+		error = bread(devvp, dblk + (i << mfs->m_fs_block_to_disk_block),
+		    mfs->m_block_size, &bp);
+		if (error) {
+			printf("ext4fs_sbfill: failed to read block group descriptors: %d\n", error);
+			free(mfs->m_gd, M_UFSMNT, gd_size);
+			mfs->m_gd = NULL;
+			return (error);
+		}
+		memcpy((char *)mfs->m_gd + i * mfs->m_block_size,
+		    bp->b_data, mfs->m_block_size);
+		brelse(bp);
+	}
+
+	printf("ext4fs_sbfill: OK, loaded %llu block group descriptors\n",
+	    mfs->m_block_group_count);
 	return (0);
 }
 
@@ -616,6 +661,11 @@ ext4fs_unmount(struct mount *mp, int mntflags, struct proc *p)
 	(void)VOP_CLOSE(ump->um_devvp, mfs->m_read_only ? FREAD :
 	    FREAD|FWRITE, NOCRED, p);
 	vput(ump->um_devvp);
+	if (mfs->m_gd != NULL) {
+		size_t gd_size = mfs->m_block_group_count *
+		    sizeof(struct ext4fs_block_group_descriptor);
+		free(mfs->m_gd, M_UFSMNT, gd_size);
+	}
 	free(mfs, M_UFSMNT, sizeof *mfs);
 	free(ump, M_UFSMNT, sizeof *ump);
 	mp->mnt_data = NULL;
@@ -645,8 +695,11 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	fs = ump->um_e4fs;
 
  retry:
-	if ((*vpp = ufs_ihashget(dev, ino)) != NULL)
+	if ((*vpp = ufs_ihashget(dev, ino)) != NULL) {
+		printf("ext4fs_vget: found cached vnode for ino=%llu, refcnt=%d\n",
+		    (unsigned long long)ino, (*vpp)->v_usecount);
 		return (0);
+	}
 
 	/* Allocate a new vnode/inode. */
 	if ((error = getnewvnode(VT_EXT4FS, mp, &ext4fs_vops, &vp)) != 0) {
@@ -688,11 +741,15 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	/* Calculate inode location on disk */
 	u_int32_t inode_group = (ino - 1) / fs->m_inodes_per_group;
 	u_int32_t inode_index = (ino - 1) % fs->m_inodes_per_group;
-	u_int32_t inode_table_block = inode_group * fs->m_inode_table_blocks_per_group;
 	u_int32_t block_in_table = inode_index / fs->m_inodes_per_block;
 	u_int32_t offset_in_block = (inode_index % fs->m_inodes_per_block) * fs->m_inode_size;
 
-	printf("ext4fs_vget: inode_group=%u, inode_table_block=%u, disk_block=%lld\n",
+	struct ext4fs_block_group_descriptor *gd = &fs->m_gd[inode_group];
+	u_int64_t inode_table_block = letoh32(gd->bgd_inode_table_block_lo);
+	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+		inode_table_block |= (u_int64_t)letoh32(gd->bgd_inode_table_block_hi) << 32;
+
+	printf("ext4fs_vget: inode_group=%u, inode_table_block=%llu, disk_block=%lld\n",
 	       inode_group, inode_table_block, (long long)((inode_table_block + block_in_table) << fs->m_fs_block_to_disk_block));
 
 	/* Read the block containing this inode */
@@ -762,8 +819,10 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 		ip->i_effnlink = 0;
 	}
 
-	printf("ext4fs_vget: successfully loaded inode %llu, type=%d\n",
-	       (unsigned long long)ino, vp->v_type);
+	vref(ip->i_devvp);
+
+	printf("ext4fs_vget: successfully loaded inode %llu, type=%d, refcnt=%d\n",
+	       (unsigned long long)ino, vp->v_type, vp->v_usecount);
 
 	*vpp = vp;
 	return (0);

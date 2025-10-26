@@ -386,6 +386,7 @@ struct m_ext4fs {
 	u_int32_t	m_fs_block_to_disk_block;
 	u_int32_t	m_inodes_per_block;
 	u_int32_t	m_inode_table_blocks_per_group;
+	struct ext4fs_block_group_descriptor *m_gd;
 };
 
 struct ext4fs_block_group_descriptor {
