@@ -17,6 +17,8 @@
 #include <sys/proc.h>
 #include <sys/ucred.h>
 
+#include <ufs/ext4fs/ext4fs_crc32c.h>
+
 struct fid;
 struct nameidata;
 struct statfs;
@@ -83,7 +85,8 @@ struct vfsconf;
 	(EXT4FS_FEATURE_INCOMPAT_FILETYPE |	\
 	 EXT4FS_FEATURE_INCOMPAT_EXTENTS |	\
 	 EXT4FS_FEATURE_INCOMPAT_64BIT |	\
-	 EXT4FS_FEATURE_INCOMPAT_FLEX_BG)
+	 EXT4FS_FEATURE_INCOMPAT_FLEX_BG |	\
+	 EXT4FS_FEATURE_INCOMPAT_CSUM_SEED)
 
 #define EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER   0x0001
 #define EXT4FS_FEATURE_RO_COMPAT_LARGE_FILE     0x0002
@@ -582,3 +585,15 @@ int ext4fs_strategy(void *);
 int ext4fs_print(void *);
 int ext4fs_pathconf(void *);
 int ext4fs_advlock(void *);
+
+u_int32_t ext4fs_sb_csum(struct ext4fs *);
+int ext4fs_sb_csum_verify(struct ext4fs *);
+u_int32_t ext4fs_csum_seed(struct m_ext4fs *);
+u_int16_t ext4fs_bgd_csum(struct m_ext4fs *,
+	struct ext4fs_block_group_descriptor *, u_int32_t);
+int ext4fs_bgd_csum_verify(struct m_ext4fs *,
+	struct ext4fs_block_group_descriptor *, u_int32_t);
+u_int32_t ext4fs_inode_csum(struct m_ext4fs *,
+	struct ext4fs_dinode_256 *, u_int32_t);
+int ext4fs_inode_csum_verify(struct m_ext4fs *,
+	struct ext4fs_dinode_256 *, u_int32_t);

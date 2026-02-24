@@ -345,6 +345,11 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		return (EIO);		/* XXX needs translation */
 	}
 
+	if (ext4fs_sb_csum_verify(sble) != 0) {
+		printf("ext4fs: superblock checksum verification failed\n");
+		return (EINVAL);
+	}
+
 	tmp = letoh32(sble->sb_log_block_size);
 	if (tmp > 2) {
 		/* skewed log(block size): 1024 -> 0 | 2048 -> 1 | 4096 -> 2 */
@@ -458,6 +463,18 @@ ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 		brelse(bp);
 	}
 
+	/* Verify block group descriptor checksums */
+	for (i = 0; i < mfs->m_block_group_count; i++) {
+		if ((error = ext4fs_bgd_csum_verify(mfs, &mfs->m_gd[i],
+		    i)) != 0) {
+			printf("ext4fs_sbfill: block group %d checksum "
+			    "verification failed\n", i);
+			free(mfs->m_gd, M_UFSMNT, gd_size);
+			mfs->m_gd = NULL;
+			return (error);
+		}
+	}
+
 	printf("ext4fs_sbfill: OK, loaded %llu block group descriptors\n",
 	    mfs->m_block_group_count);
 	return (0);
@@ -469,6 +486,8 @@ ext4fs_sbload(struct ext4fs *sble, struct m_ext4fs *dest)
 	int feature_incompat_64bit;
 	feature_incompat_64bit = letoh32(sble->sb_feature_incompat) &
 		EXT4FS_FEATURE_INCOMPAT_64BIT;
+	/* Keep a copy of the raw little-endian superblock */
+	memcpy(&dest->m_sble, sble, sizeof(dest->m_sble));
 	dest->m_inodes_count = letoh32(sble->sb_inodes_count);
 	dest->m_blocks_count = letoh32(sble->sb_blocks_count_lo);
 	dest->m_reserved_blocks_count =
@@ -776,6 +795,15 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK);
 	memcpy(ip->i_e4din, dp, sizeof(struct ext4fs_dinode_256));
 	brelse(bp);
+
+	/* Verify inode checksum */
+	if ((error = ext4fs_inode_csum_verify(fs, ip->i_e4din, ino)) != 0) {
+		printf("ext4fs_vget: inode %llu checksum verification failed\n",
+		    (unsigned long long)ino);
+		vput(vp);
+		*vpp = NULL;
+		return (error);
+	}
 
 	/* Set vnode type based on inode mode */
 	u_int16_t mode = letoh16(ip->i_e4din->dinode.i_mode);
