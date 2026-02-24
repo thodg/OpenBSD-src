@@ -142,7 +142,7 @@ u_int32_t
 ext4fs_csum_seed(struct m_ext4fs *fs)
 {
 	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_CSUM_SEED)
-		return fs->m_checksum_seed;
+		return ~fs->m_checksum_seed;
 
 	/* Compute seed from UUID */
 	return ext4fs_crc32c(0, fs->m_sble.sb_uuid,
@@ -182,7 +182,6 @@ u_int16_t
 ext4fs_bgd_csum(struct m_ext4fs *fs,
     struct ext4fs_block_group_descriptor *bgd, u_int32_t block_group_id)
 {
-	struct ext4fs *sble = &fs->m_sble;
 	u_int32_t crc;
 	u_int32_t seed;
 	u_int32_t block_group_id_le;
@@ -193,15 +192,10 @@ ext4fs_bgd_csum(struct m_ext4fs *fs,
 	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM))
 		return 0;
 
-	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_CSUM_SEED)
-		seed = fs->m_checksum_seed;
-	else {
-		block_group_id_le = htole32(block_group_id);
-		seed = ext4fs_crc32c(0, sble->sb_uuid,
-		    sizeof(sble->sb_uuid));
-		seed = ext4fs_crc32c(seed, &block_group_id_le,
-		    sizeof(block_group_id_le));
-	}
+	seed = ext4fs_csum_seed(fs);
+	block_group_id_le = htole32(block_group_id);
+	seed = ext4fs_crc32c(seed, &block_group_id_le,
+	    sizeof(block_group_id_le));
 
 	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
 		size = fs->m_block_group_descriptor_size;
@@ -255,7 +249,6 @@ u_int32_t
 ext4fs_inode_csum(struct m_ext4fs *fs,
     struct ext4fs_dinode_256 *dp, u_int32_t ino)
 {
-	struct ext4fs *sble = &fs->m_sble;
 	u_int32_t crc;
 	u_int32_t seed;
 	u_int32_t ino_le;
@@ -265,11 +258,7 @@ ext4fs_inode_csum(struct m_ext4fs *fs,
 	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM))
 		return 0;
 
-	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_CSUM_SEED)
-		seed = fs->m_checksum_seed;
-	else
-		seed = ext4fs_crc32c(0, sble->sb_uuid,
-		    sizeof(sble->sb_uuid));
+	seed = ext4fs_csum_seed(fs);
 
 	ino_le = htole32(ino);
 	crc = ext4fs_crc32c(seed, &ino_le, sizeof(ino_le));
