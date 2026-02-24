@@ -1,4 +1,4 @@
-/*	$OpenBSD: tal.c,v 1.42 2025/08/01 13:46:06 claudio Exp $ */
+/*	$OpenBSD: tal.c,v 1.45 2026/01/20 16:51:44 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -126,20 +126,25 @@ tal_parse_buffer(const char *fn, char *buf, size_t len)
 
 	/* Now the Base64-encoded public key. */
 	if ((base64_decode(buf, len, &der, &dersz)) == -1) {
-		warnx("%s: RFC 7730 section 2.1: subjectPublicKeyInfo: "
+		warnx("%s: RFC 8630 section 2.1: subjectPublicKeyInfo: "
 		    "bad public key", fn);
 		goto out;
 	}
 
-	tal->pkey = der;
-	tal->pkeysz = dersz;
+	tal->spki = der;
+	tal->spkisz = dersz;
 
 	/* Make sure it's a valid public key. */
 	pkey = d2i_PUBKEY(NULL, (const unsigned char **)&der, dersz);
 	if (pkey == NULL) {
-		warnx("%s: RFC 7730 section 2.1: subjectPublicKeyInfo: "
+		warnx("%s: RFC 8630 section 2.1: subjectPublicKeyInfo: "
 		    "failed public key parse", fn);
 		goto out;
+	}
+	if (der != tal->spki + tal->spkisz) {
+		warnx("%s: RFC 8630 section 2.1: subjectPublicKeyInfo: "
+		    "%td bytes of trailing garbage", fn,
+		    tal->spki + tal->spkisz - der);
 	}
 	rc = 1;
 out:
@@ -152,7 +157,7 @@ out:
 }
 
 /*
- * Parse a TAL from "buf" conformant to RFC 7730 originally from a file
+ * Parse a TAL from "buf" conformant to RFC 8630 originally from a file
  * named "fn".
  * Returns the encoded data or NULL on syntax failure.
  */
@@ -198,7 +203,7 @@ tal_free(struct tal *p)
 		for (i = 0; i < p->num_uris; i++)
 			free(p->uri[i]);
 
-	free(p->pkey);
+	free(p->spki);
 	free(p->uri);
 	free(p->descr);
 	free(p);
@@ -214,7 +219,7 @@ tal_buffer(struct ibuf *b, const struct tal *p)
 	size_t	 i;
 
 	io_simple_buffer(b, &p->id, sizeof(p->id));
-	io_buf_buffer(b, p->pkey, p->pkeysz);
+	io_buf_buffer(b, p->spki, p->spkisz);
 	io_str_buffer(b, p->descr);
 	io_simple_buffer(b, &p->num_uris, sizeof(p->num_uris));
 
@@ -237,10 +242,10 @@ tal_read(struct ibuf *b)
 		err(1, NULL);
 
 	io_read_buf(b, &p->id, sizeof(p->id));
-	io_read_buf_alloc(b, (void **)&p->pkey, &p->pkeysz);
+	io_read_buf_alloc(b, (void **)&p->spki, &p->spkisz);
 	io_read_str(b, &p->descr);
 	io_read_buf(b, &p->num_uris, sizeof(p->num_uris));
-	if (p->pkeysz <= 0 || p->num_uris <= 0)
+	if (p->spkisz <= 0 || p->num_uris <= 0)
 		errx(1, "tal_read: bad message");
 
 	if ((p->uri = calloc(p->num_uris, sizeof(char *))) == NULL)

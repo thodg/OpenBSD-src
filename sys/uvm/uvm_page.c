@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_page.c,v 1.183 2025/04/27 08:37:47 mpi Exp $	*/
+/*	$OpenBSD: uvm_page.c,v 1.188 2026/02/11 22:34:41 deraadt Exp $	*/
 /*	$NetBSD: uvm_page.c,v 1.44 2000/11/27 08:40:04 chs Exp $	*/
 
 /*
@@ -289,8 +289,8 @@ uvm_page_init(vaddr_t *kvm_startp, vaddr_t *kvm_endp)
 	 * XXX in most of the cases because the pmemrange tries hard to
 	 * XXX allocate them last.
 	 */
-	uvmexp.reserve_pagedaemon = 4;
-	uvmexp.reserve_kernel = uvmexp.reserve_pagedaemon + 4;
+	uvmexp.reserve_pagedaemon = 32;
+	uvmexp.reserve_kernel = uvmexp.reserve_pagedaemon + 32;
 
 	uvm.page_init_done = TRUE;
 }
@@ -1221,33 +1221,33 @@ uvm_pagelookup(struct uvm_object *obj, voff_t off)
 
 /*
  * uvm_pagewire: wire the page, thus removing it from the daemon's grasp
- *
- * => caller must lock page queues
  */
 void
 uvm_pagewire(struct vm_page *pg)
 {
 	KASSERT(uvm_page_owner_locked_p(pg, TRUE));
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
 
 	if (pg->wire_count == 0) {
+		uvm_lock_pageq();
 		uvm_pagedequeue(pg);
+		uvm_unlock_pageq();
 		atomic_inc_int(&uvmexp.wired);
 	}
+	KASSERT((pg->pg_flags & (PQ_INACTIVE|PQ_ACTIVE)) == 0);
 	pg->wire_count++;
+	KASSERT(pg->wire_count > 0);	/* detect wraparound */
 }
 
 /*
  * uvm_pageunwire: unwire the page.
  *
  * => activate if wire count goes to zero.
- * => caller must lock page queues
  */
 void
 uvm_pageunwire(struct vm_page *pg)
 {
 	KASSERT(uvm_page_owner_locked_p(pg, TRUE));
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+	KASSERT(pg->wire_count != 0);
 
 	pg->wire_count--;
 	if (pg->wire_count == 0) {
@@ -1257,61 +1257,64 @@ uvm_pageunwire(struct vm_page *pg)
 }
 
 /*
- * uvm_pagedeactivate: deactivate page.
+ * uvm_pagedeactivate: deactivate page (unless wired)
  *
- * => caller must lock page queues
- * => caller must check to make sure page is not wired
- * => object that page belongs to must be locked (so we can adjust pg->flags)
+ * => object that page belongs to must be locked
  */
 void
 uvm_pagedeactivate(struct vm_page *pg)
 {
 	KASSERT(uvm_page_owner_locked_p(pg, FALSE));
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
 
+	if (pg->wire_count > 0) {
+		KASSERT((pg->pg_flags & (PQ_INACTIVE|PQ_ACTIVE)) == 0);
+		return;
+	}
+
+	uvm_lock_pageq();
+	if (pg->pg_flags & PQ_INACTIVE) {
+		uvm_unlock_pageq();
+		return;
+	}
+
+	/* Make sure next access to this page will fault. */
 	pmap_page_protect(pg, PROT_NONE);
 
-	if (pg->pg_flags & PQ_ACTIVE) {
-		TAILQ_REMOVE(&uvm.page_active, pg, pageq);
-		atomic_clearbits_int(&pg->pg_flags, PQ_ACTIVE);
-		uvmexp.active--;
-	}
-	if ((pg->pg_flags & PQ_INACTIVE) == 0) {
-		KASSERT(pg->wire_count == 0);
-		TAILQ_INSERT_TAIL(&uvm.page_inactive, pg, pageq);
-		atomic_setbits_int(&pg->pg_flags, PQ_INACTIVE);
-		uvmexp.inactive++;
-		pmap_clear_reference(pg);
-		/*
-		 * update the "clean" bit.  this isn't 100%
-		 * accurate, and doesn't have to be.  we'll
-		 * re-sync it after we zap all mappings when
-		 * scanning the inactive list.
-		 */
-		if ((pg->pg_flags & PG_CLEAN) != 0 &&
-		    pmap_is_modified(pg))
-			atomic_clearbits_int(&pg->pg_flags, PG_CLEAN);
-	}
+	uvm_pagedequeue(pg);
+	TAILQ_INSERT_TAIL(&uvm.page_inactive, pg, pageq);
+	atomic_setbits_int(&pg->pg_flags, PQ_INACTIVE);
+	atomic_inc_int(&uvmexp.inactive);
+	uvm_unlock_pageq();
+
+	pmap_clear_reference(pg);
+	/*
+	 * update the "clean" bit.  this isn't 100% accurate, and
+	 * doesn't have to be.  we'll re-sync it after we zap all
+	 * mappings when scanning the inactive list.
+	 */
+	if ((pg->pg_flags & PG_CLEAN) != 0 && pmap_is_modified(pg))
+		atomic_clearbits_int(&pg->pg_flags, PG_CLEAN);
 }
 
 /*
- * uvm_pageactivate: activate page
- *
- * => caller must lock page queues
+ * uvm_pageactivate: activate page (unless wired)
  */
 void
 uvm_pageactivate(struct vm_page *pg)
 {
 	KASSERT(uvm_page_owner_locked_p(pg, FALSE));
-	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
 
-	uvm_pagedequeue(pg);
-	if (pg->wire_count == 0) {
-		TAILQ_INSERT_TAIL(&uvm.page_active, pg, pageq);
-		atomic_setbits_int(&pg->pg_flags, PQ_ACTIVE);
-		uvmexp.active++;
-
+	if (pg->wire_count > 0) {
+		KASSERT((pg->pg_flags & (PQ_INACTIVE|PQ_ACTIVE)) == 0);
+		return;
 	}
+
+	uvm_lock_pageq();
+	uvm_pagedequeue(pg);
+	TAILQ_INSERT_TAIL(&uvm.page_active, pg, pageq);
+	atomic_setbits_int(&pg->pg_flags, PQ_ACTIVE);
+	atomic_inc_int(&uvmexp.active);
+	uvm_unlock_pageq();
 }
 
 /*
@@ -1320,15 +1323,19 @@ uvm_pageactivate(struct vm_page *pg)
 void
 uvm_pagedequeue(struct vm_page *pg)
 {
+	KASSERT(uvm_page_owner_locked_p(pg, FALSE));
+	MUTEX_ASSERT_LOCKED(&uvm.pageqlock);
+	KASSERT(pg->wire_count == 0);
+
 	if (pg->pg_flags & PQ_ACTIVE) {
 		TAILQ_REMOVE(&uvm.page_active, pg, pageq);
 		atomic_clearbits_int(&pg->pg_flags, PQ_ACTIVE);
-		uvmexp.active--;
+		atomic_dec_int(&uvmexp.active);
 	}
 	if (pg->pg_flags & PQ_INACTIVE) {
 		TAILQ_REMOVE(&uvm.page_inactive, pg, pageq);
 		atomic_clearbits_int(&pg->pg_flags, PQ_INACTIVE);
-		uvmexp.inactive--;
+		atomic_dec_int(&uvmexp.inactive);
 	}
 }
 /*

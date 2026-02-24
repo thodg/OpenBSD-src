@@ -1,6 +1,6 @@
 #!/bin/ksh
 #
-# $OpenBSD: sysupgrade.sh,v 1.58 2025/02/03 18:55:55 florian Exp $
+# $OpenBSD: sysupgrade.sh,v 1.61 2026/01/17 21:20:44 kn Exp $
 #
 # Copyright (c) 1997-2015 Todd Miller, Theo de Raadt, Ken Westerback
 # Copyright (c) 2015 Robert Peichaer <rpe@openbsd.org>
@@ -117,6 +117,10 @@ $FORCE_VERSION && $SNAP &&
 	err "incompatible options: -s -R $NEXT_VERSION"
 $FORCE && ! $SNAP &&
 	err "incompatible options: -f without -s"
+
+if df -kP /usr | ! awk 'NR == 2 && $4 < 1*1024^2 { exit(1) }' && ! $FORCE; then
+	err "/usr appears too small. See sysupgrade(8) manpage about PRUNING."
+fi
 
 if $SNAP; then
 	WHAT='snapshot'

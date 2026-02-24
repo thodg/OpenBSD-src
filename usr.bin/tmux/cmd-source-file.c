@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-source-file.c,v 1.59 2025/09/08 11:21:29 nicm Exp $ */
+/* $OpenBSD: cmd-source-file.c,v 1.62 2025/11/18 08:42:09 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Tiago Cunha <me@tiagocunha.org>
@@ -115,7 +115,7 @@ cmd_source_file_done(struct client *c, const char *path, int error,
 		return;
 
 	if (error != 0)
-		cmdq_error(item, "%s: %s", path, strerror(error));
+		cmdq_error(item, "%s: %s", strerror(error), path);
 	else if (bsize != 0) {
 		if (load_cfg_from_buffer(bdata, bsize, path, c, cdata->after,
 		    target, cdata->flags, &new_item) < 0)
@@ -136,16 +136,7 @@ cmd_source_file_done(struct client *c, const char *path, int error,
 static void
 cmd_source_file_add(struct cmd_source_file_data *cdata, const char *path)
 {
-	char	resolved[PATH_MAX];
-
-	if (realpath(path, resolved) == NULL) {
-		log_debug("%s: realpath(\"%s\") failed: %s", __func__,
-			path, strerror(errno));
-	} else
-		path = resolved;
-
 	log_debug("%s: %s", __func__, path);
-
 	cdata->files = xreallocarray(cdata->files, cdata->nfiles + 1,
 	    sizeof *cdata->files);
 	cdata->files[cdata->nfiles++] = xstrdup(path);
@@ -176,7 +167,7 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 	char				*pattern, *cwd, *expanded = NULL;
 	const char			*path, *error;
 	glob_t				 g;
-	int				 result;
+	int				 result, parse_flags;
 	u_int				 i, j;
 
 	if (c == NULL) {
@@ -202,8 +193,11 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 		cdata->flags |= CMD_PARSE_QUIET;
 	if (args_has(args, 'n'))
 		cdata->flags |= CMD_PARSE_PARSEONLY;
-	if (args_has(args, 'v') && (c == NULL || ~c->flags & CLIENT_CONTROL))
-		cdata->flags |= CMD_PARSE_VERBOSE;
+	if (c == NULL || ~c->flags & CLIENT_CONTROL) {
+		parse_flags = cmd_get_parse_flags(self);
+		if (args_has(args, 'v') || (parse_flags & CMD_PARSE_VERBOSE))
+			cdata->flags |= CMD_PARSE_VERBOSE;
+	}
 
 	cwd = cmd_source_file_quote_for_glob(server_client_get_cwd(c, NULL));
 
@@ -234,7 +228,7 @@ cmd_source_file_exec(struct cmd *self, struct cmdq_item *item)
 					error = strerror(ENOMEM);
 				else
 					error = strerror(EINVAL);
-				cmdq_error(item, "%s: %s", path, error);
+				cmdq_error(item, "%s: %s", error, path);
 				retval = CMD_RETURN_ERROR;
 			}
 			globfree(&g);

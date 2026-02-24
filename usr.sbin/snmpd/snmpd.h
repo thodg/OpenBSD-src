@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.h,v 1.120 2024/05/21 05:00:48 jsg Exp $	*/
+/*	$OpenBSD: snmpd.h,v 1.122 2025/12/24 13:36:38 martijn Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -22,7 +22,6 @@
 
 #include <sys/queue.h>
 #include <sys/socket.h>
-#include <sys/time.h>
 #include <sys/tree.h>
 #include <sys/types.h>
 #include <sys/un.h>
@@ -180,6 +179,11 @@ struct privsep_fd {
  * daemon structures
  */
 
+struct engineid {
+	uint8_t			 value[SNMPD_MAXENGINEIDLEN];
+	size_t			 length;
+};
+
 #define MSG_HAS_AUTH(m)		(((m)->sm_flags & SNMP_MSGFLAG_AUTH) != 0)
 #define MSG_HAS_PRIV(m)		(((m)->sm_flags & SNMP_MSGFLAG_PRIV) != 0)
 #define MSG_SECLEVEL(m)		((m)->sm_flags & SNMP_MSGFLAG_SECMASK)
@@ -220,8 +224,7 @@ struct snmp_message {
 	long long		 sm_secmodel;
 	u_int32_t		 sm_engine_boots;
 	u_int32_t		 sm_engine_time;
-	uint8_t			 sm_ctxengineid[SNMPD_MAXENGINEIDLEN];
-	size_t			 sm_ctxengineid_len;
+	struct engineid		 sm_ctxengineid;
 	char			 sm_ctxname[SNMPD_MAXCONTEXNAMELEN+1];
 
 	/* USM */
@@ -402,15 +405,13 @@ struct snmpd {
 	const char		*sc_confpath;
 	struct addresslist	 sc_addresses;
 	struct axmasterlist	 sc_agentx_masters;
-	struct timeval		 sc_starttime;
 	u_int32_t		 sc_engine_boots;
 
 	char			 sc_rdcommunity[SNMPD_MAXCOMMUNITYLEN];
 	char			 sc_rwcommunity[SNMPD_MAXCOMMUNITYLEN];
 	char			 sc_trcommunity[SNMPD_MAXCOMMUNITYLEN];
 
-	uint8_t			 sc_engineid[SNMPD_MAXENGINEIDLEN];
-	size_t			 sc_engineid_len;
+	struct engineid		 sc_engineid;
 
 	struct snmp_stats	 sc_stats;
 	struct snmp_system	 sc_system;
@@ -445,6 +446,9 @@ extern struct snmpd *snmpd_env;
 /* parse.y */
 struct snmpd	*parse_config(const char *, u_int);
 int		 cmdline_symset(char *);
+
+/* engine.c */
+int		 engineid_cmp(struct engineid *, struct engineid *);
 
 /* snmpe.c */
 void		 snmpe(struct privsep *, struct privsep_proc *);

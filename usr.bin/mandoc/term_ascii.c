@@ -1,6 +1,7 @@
-/* $OpenBSD: term_ascii.c,v 1.57 2025/07/16 14:23:55 schwarze Exp $ */
+/* $OpenBSD: term_ascii.c,v 1.59 2026/01/07 08:22:24 schwarze Exp $ */
 /*
- * Copyright (c) 2014,2015,2017-2020,2025 Ingo Schwarze <schwarze@openbsd.org>
+ * Copyright (c) 2014, 2015, 2017-2020, 2025, 2026
+ *               Ingo Schwarze <schwarze@openbsd.org>
  * Copyright (c) 2010, 2011 Kristaps Dzonsons <kristaps@bsd.lv>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -45,7 +46,7 @@ static	void		  ascii_begin(struct termp *);
 static	void		  ascii_end(struct termp *);
 static	void		  ascii_endline(struct termp *);
 static	void		  ascii_letter(struct termp *, int);
-static	void		  ascii_setwidth(struct termp *, int, int);
+static	void		  ascii_setwidth(struct termp *, int, size_t);
 
 static	void		  locale_advance(struct termp *, size_t);
 static	void		  locale_endline(struct termp *);
@@ -111,7 +112,7 @@ ascii_init(enum termenc enc, const struct manoutput *outopts)
 		}
 	}
 	p->defrmargin = term_len(p, outopts->width ? outopts->width : 78);
-	p->lastrmargin = p->defrmargin;
+	p->lastrmargin = p->maxrmargin = p->defrmargin;
 
 	if (outopts->indent)
 		p->defindent = outopts->indent;
@@ -142,21 +143,21 @@ locale_alloc(const struct manoutput *outopts)
 }
 
 static void
-ascii_setwidth(struct termp *p, int iop, int width)
+ascii_setwidth(struct termp *p, int iop, size_t width)
 {
-	p->tcol->rmargin = p->defrmargin;
+	p->tcol->rmargin = p->maxrmargin;
 	if (iop > 0)
-		p->defrmargin += width;
+		p->maxrmargin += width;
 	else if (iop == 0)
-		p->defrmargin = width ? (size_t)width : p->lastrmargin;
-	else if (p->defrmargin > (size_t)width)
-		p->defrmargin -= width;
+		p->maxrmargin = width ? width : p->lastrmargin;
+	else if (p->maxrmargin > width)
+		p->maxrmargin -= width;
 	else
-		p->defrmargin = 0;
-	if (p->defrmargin > term_len(p, 1000))
-		p->defrmargin = term_len(p, 1000);
+		p->maxrmargin = 0;
+	if (p->maxrmargin > term_len(p, 1000))
+		p->maxrmargin = term_len(p, 1000);
 	p->lastrmargin = p->tcol->rmargin;
-	p->tcol->rmargin = p->maxrmargin = p->defrmargin;
+	p->tcol->rmargin = p->maxrmargin;
 }
 
 void

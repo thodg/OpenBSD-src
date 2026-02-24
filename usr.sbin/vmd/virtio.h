@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.h,v 1.56 2025/08/02 15:16:18 dv Exp $	*/
+/*	$OpenBSD: virtio.h,v 1.61 2026/02/22 22:54:54 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -269,6 +269,7 @@ struct vioblk_dev {
  */
 struct vioscsi_dev {
 	struct virtio_backing file;
+	int cdrom_fd;		/* fd for iso file */
 
 	int locked;		/* is the device locked? */
 	uint64_t sz;		/* size of iso file in bytes */
@@ -358,7 +359,6 @@ struct virtio_dev {
 	uint64_t 	driver_feature;		/* driver features [rw] */
 
 	uint8_t		pci_id;			/* pci device id [r] */
-	uint32_t	vm_id;			/* vmm(4) vm identifier [r] */
 	int		irq;			/* assigned irq [r] */
 
 	/* Multi-process emulation fields. */
@@ -368,7 +368,8 @@ struct virtio_dev {
 	int sync_fd;				/* fd for synchronous channel */
 	int async_fd;				/* fd for async channel */
 
-	uint32_t	vm_vmid;		/* vmd(8) vm identifier [r] */
+	uint32_t	vm_id;			/* vmd(8) vm identifier [r] */
+	uint32_t	vmm_id;			/* vmm(4) vm identifier [r] */
 	pid_t		dev_pid;		/* pid of emulator process */
 	char		dev_type;		/* device type (as char) */
 	SLIST_ENTRY(virtio_dev) dev_next;
@@ -377,7 +378,7 @@ struct virtio_dev {
 /* virtio.c */
 extern struct virtio_dev vmmci;
 
-void virtio_init(struct vmd_vm *, int, int[][VM_MAX_BASE_PER_DISK], int *);
+int virtio_init(struct vmd_vm *, int, int[][VM_MAX_BASE_PER_DISK], int *);
 void virtio_vq_init(struct virtio_dev *, size_t);
 void virtio_broadcast_imsg(struct vmd_vm *, uint16_t, void *, uint16_t);
 void virtio_stop(struct vmd_vm *);
@@ -411,10 +412,6 @@ const char *vioblk_cmd_name(uint32_t);
 
 /* dhcp.c */
 ssize_t dhcp_request(struct virtio_dev *, char *, size_t, char **);
-
-/* vioscsi.c */
-int vioscsi_io(int, uint16_t, uint32_t *, uint8_t *, void *, uint8_t);
-int vioscsi_notifyq(struct virtio_dev *, uint16_t);
 
 /* imsg handling */
 void	viodev_msg_read(struct imsg *, struct viodev_msg *);

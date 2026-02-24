@@ -1,4 +1,4 @@
-$OpenBSD: usbdevs,v 1.783 2025/10/14 00:39:21 dlg Exp $
+$OpenBSD: usbdevs,v 1.786 2026/02/15 19:09:27 jcs Exp $
 /* $NetBSD: usbdevs,v 1.322 2003/05/10 17:47:14 hamajima Exp $ */
 
 /*
@@ -325,6 +325,7 @@ vendor ALLIEDCABLE	0x07e6	Allied Cable
 vendor STSN		0x07ef	STSN
 vendor BEWAN		0x07fa	Bewan
 vendor ZOOM		0x0803	Zoom Telephonics
+vendor ALPHASMART	0x081e	AlphaSmart
 vendor BROADLOGIC	0x0827	BroadLogic
 vendor HANDSPRING	0x082d	Handspring
 vendor PALM		0x0830	Palm Computing
@@ -576,6 +577,7 @@ vendor WIENERPLEINBAUS	0x16dc	WIENER Plein & Baus
 vendor AXESSTEL		0x1726	Axesstel
 vendor LINKSYS4		0x1737	Linksys
 vendor SENAO		0x1740	Senao
+vendor DMAX		0x174f	D-Max
 vendor ASUS2		0x1761	ASUS
 vendor STRAWBERRYLINUX	0x1774	Strawberry linux Co., Ltd.
 vendor SWEEX2		0x177f	Sweex
@@ -900,6 +902,9 @@ product ALLWIN RT3071		0x3071	RT3071
 product ALLWIN RT3072		0x3072	RT3072
 product ALLWIN RT3572		0x3572	RT3572
 
+/* AlphaSmart, Inc. */
+product ALPHASMART DANA		0xdf00	Dana
+
 /* Altec Lansing products */
 product ALTEC ADA70		0x0070	ADA70 Speakers
 product ALTEC ASC495		0xff05	ASC495 Speakers
@@ -1024,6 +1029,8 @@ product APPLE IPAD2		0x129f	iPad 2
 product APPLE IPHONE_4S		0x12a0	iPhone 4S
 product APPLE IPHONE_6		0x12a8	iPhone 6
 product APPLE ETHERNET		0x1402	Ethernet A1277
+product APPLE VIRTUAL_KEYBOARD	0x8105	Virtual USB Keyboard
+product APPLE VIRTUAL_DIGITIZER	0x8106	Virtual USB Digitizer
 product APPLE BLUETOOTH2	0x8205	Bluetooth
 product APPLE BLUETOOTH3	0x8207	Bluetooth
 product APPLE BLUETOOTH		0x8300	Bluetooth

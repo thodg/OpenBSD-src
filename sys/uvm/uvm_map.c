@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.c,v 1.347 2025/09/23 08:00:48 mpi Exp $	*/
+/*	$OpenBSD: uvm_map.c,v 1.355 2026/02/22 21:53:54 kettenis Exp $	*/
 /*	$NetBSD: uvm_map.c,v 1.86 2000/11/27 08:40:03 chs Exp $	*/
 
 /*
@@ -657,6 +657,7 @@ uvm_map_findspace(struct vm_map *map, struct vm_map_entry**first,
 	struct uvm_addr_state *uaddr;
 	int i;
 
+retry:
 	/*
 	 * Allocation for sz bytes at any address,
 	 * using the addr selectors in order.
@@ -674,6 +675,11 @@ uvm_map_findspace(struct vm_map *map, struct vm_map_entry**first,
 	if (uvm_addr_invoke(map, uaddr, first, last,
 	    addr, sz, pmap_align, pmap_offset, prot, hint) == 0)
 		return 0;
+
+	if (hint != 0) {
+		hint = 0;
+		goto retry;
+	}
 
 	return ENOMEM;
 }
@@ -1503,7 +1509,7 @@ uvm_mapent_alloc(struct vm_map *map, int flags)
 		}
 		me = SLIST_FIRST(&uvm.kentry_free);
 		SLIST_REMOVE_HEAD(&uvm.kentry_free, daddrs.addr_kentry);
-		uvmexp.kmapent++;
+		atomic_inc_int(&uvmexp.kmapent);
 		mtx_leave(&uvm_kmapent_mtx);
 		me->flags = UVM_MAP_STATIC;
 	} else if (map == kernel_map) {
@@ -1536,7 +1542,7 @@ uvm_mapent_free(struct vm_map_entry *me)
 	if (me->flags & UVM_MAP_STATIC) {
 		mtx_enter(&uvm_kmapent_mtx);
 		SLIST_INSERT_HEAD(&uvm.kentry_free, me, daddrs.addr_kentry);
-		uvmexp.kmapent--;
+		atomic_dec_int(&uvmexp.kmapent);
 		mtx_leave(&uvm_kmapent_mtx);
 	} else if (me->flags & UVM_MAP_KMEM) {
 		splassert(IPL_NONE);
@@ -2116,14 +2122,18 @@ uvm_map_pageable_wire(struct vm_map *map, struct vm_map_entry *first,
 	vm_map_unlock(map);
 
 	error = 0;
-	for (iter = first; error == 0 && iter != end;
+	for (iter = first; iter != end;
 	    iter = RBT_NEXT(uvm_map_addr, iter)) {
 		if (UVM_ET_ISHOLE(iter) || iter->start == iter->end ||
 		    iter->protection == PROT_NONE)
 			continue;
 
-		error = uvm_fault_wire(map, iter->start, iter->end,
-		    iter->protection);
+		if (iter->wired_count == 1) {
+			error = uvm_fault_wire(map, iter->start, iter->end,
+			    iter->protection);
+			if (error)
+				break;
+		}
 	}
 
 	vm_map_lock(map);
@@ -2137,7 +2147,8 @@ uvm_map_pageable_wire(struct vm_map *map, struct vm_map_entry *first,
 
 		/*
 		 * first is no longer needed to restart loops.
-		 * Use it as iterator to unmap successful mappings.
+		 * Use it as iterator to unwire entries that were
+		 * successfully wired above.
 		 */
 		for (; first != iter;
 		    first = RBT_NEXT(uvm_map_addr, first)) {
@@ -2947,7 +2958,7 @@ uvm_object_printit(struct uvm_object *uobj, boolean_t full,
  */
 static const char page_flagbits[] =
 	"\20\1BUSY\2WANTED\3TABLED\4CLEAN\5CLEANCHK\6RELEASED\7FAKE\10RDONLY"
-	"\11ZERO\12DEV\15PAGER1\21FREE\22INACTIVE\23ACTIVE\25ANON\26AOBJ"
+	"\11ZERO\12DEV\21FREE\22INACTIVE\23ACTIVE\25ANON\26AOBJ"
 	"\27ENCRYPT\31PMAP0\32PMAP1\33PMAP2\34PMAP3\35PMAP4\36PMAP5";
 
 void
@@ -4052,7 +4063,7 @@ out:
 }
 
 #ifdef PMAP_CHECK_COPYIN
-static void inline
+static inline void
 check_copyin_add(struct vm_map *map, vaddr_t start, vaddr_t end)
 {
 	if (PMAP_CHECK_COPYIN == 0 ||
@@ -4429,25 +4440,14 @@ uvm_map_clean(struct vm_map *map, vaddr_t start, vaddr_t end, int flags)
 
 			switch (flags & (PGO_CLEANIT|PGO_FREE|PGO_DEACTIVATE)) {
 			/*
-			 * XXX In these first 3 cases, we always just
-			 * XXX deactivate the page.  We may want to
-			 * XXX handle the different cases more
-			 * XXX specifically, in the future.
+			 * In these first 3 cases, we just deactivate the page.
 			 */
 			case PGO_CLEANIT|PGO_FREE:
 			case PGO_CLEANIT|PGO_DEACTIVATE:
 			case PGO_DEACTIVATE:
 deactivate_it:
-				/* skip the page if it's wired */
-				if (pg->wire_count != 0)
-					break;
-
-				uvm_lock_pageq();
-
 				KASSERT(pg->uanon == anon);
 				uvm_pagedeactivate(pg);
-
-				uvm_unlock_pageq();
 				break;
 			case PGO_FREE:
 				/*
@@ -4457,7 +4457,7 @@ deactivate_it:
 				if (amap_refs(amap) > 1)
 					goto deactivate_it;
 
-				/* XXX skip the page if it's wired */
+				/* skip the page if it's wired */
 				if (pg->wire_count != 0) {
 					break;
 				}
@@ -5386,37 +5386,7 @@ RBT_GENERATE_AUGMENT(uvm_map_addr, vm_map_entry, daddrs.addr_entry,
 /*
  * MD code: vmspace allocator setup.
  */
-
-#ifdef __i386__
-void
-uvm_map_setup_md(struct vm_map *map)
-{
-	vaddr_t		min, max;
-
-	min = map->min_offset;
-	max = map->max_offset;
-
-	/*
-	 * Ensure the selectors will not try to manage page 0;
-	 * it's too special.
-	 */
-	if (min < VMMAP_MIN_ADDR)
-		min = VMMAP_MIN_ADDR;
-
-#if 0	/* Cool stuff, not yet */
-	/* Executable code is special. */
-	map->uaddr_exe = uaddr_rnd_create(min, I386_MAX_EXE_ADDR);
-	/* Place normal allocations beyond executable mappings. */
-	map->uaddr_any[3] = uaddr_pivot_create(2 * I386_MAX_EXE_ADDR, max);
-#else	/* Crappy stuff, for now */
-	map->uaddr_any[0] = uaddr_rnd_create(min, max);
-#endif
-
-#ifndef SMALL_KERNEL
-	map->uaddr_brk_stack = uaddr_stack_brk_create(min, max);
-#endif /* !SMALL_KERNEL */
-}
-#elif __LP64__
+#if __LP64__
 void
 uvm_map_setup_md(struct vm_map *map)
 {
@@ -5442,7 +5412,7 @@ uvm_map_setup_md(struct vm_map *map)
 	map->uaddr_brk_stack = uaddr_stack_brk_create(min, max);
 #endif /* !SMALL_KERNEL */
 }
-#else	/* non-i386, 32 bit */
+#else	/* 32 bit */
 void
 uvm_map_setup_md(struct vm_map *map)
 {

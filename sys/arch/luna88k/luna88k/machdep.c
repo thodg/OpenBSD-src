@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.146 2025/06/26 20:28:07 miod Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.148 2025/12/23 19:16:51 miod Exp $	*/
 /*
  * Copyright (c) 1998, 1999, 2000, 2001 Steve Murphree, Jr.
  * Copyright (c) 1996 Nivas Madhur
@@ -71,6 +71,7 @@
 #include <sys/mount.h>
 #include <sys/msgbuf.h>
 #include <sys/syscallargs.h>
+#include <sys/pledge.h>
 #include <sys/exec.h>
 #include <sys/sysctl.h>
 #include <sys/errno.h>
@@ -200,7 +201,6 @@ extern int omfb_cnattach(void);	/* in dev/lunafb.c */
 extern void ws_cnattach(void);	/* in dev/lunaws.c */
 
 vaddr_t first_addr;
-vaddr_t last_addr;
 
 extern struct user *proc0paddr;
 
@@ -911,6 +911,9 @@ sys_sysarch(struct proc *p, void *v, register_t *retval)
 	} */ *uap = v;
 #endif
 
+	if ((p->p_p->ps_flags & PS_PLEDGE))
+		return pledge_fail(p, EINVAL, 0);
+
 	return (ENOSYS);
 }
 
@@ -974,6 +977,7 @@ luna88k_bootstrap()
 	extern const struct cmmu_p cmmu8820x;
 	extern vaddr_t avail_start;
 	extern vaddr_t avail_end;
+	vaddr_t last_addr;
 #ifndef MULTIPROCESSOR
 	cpuid_t master_cpu;
 #endif

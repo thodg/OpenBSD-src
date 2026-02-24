@@ -1,4 +1,4 @@
-/*	$OpenBSD: nd6.c,v 1.303 2025/09/16 09:19:43 florian Exp $	*/
+/*	$OpenBSD: nd6.c,v 1.305 2025/11/27 21:54:28 bluhm Exp $	*/
 /*	$KAME: nd6.c,v 1.280 2002/06/08 19:52:07 itojun Exp $	*/
 
 /*
@@ -829,6 +829,9 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 				ln_end = TAILQ_LAST(&nd6_list, llinfo_nd6_head);
 				if (ln_end == ln)
 					break;
+				/* cannot move the iterator, try next time */
+				if (ln_end->ln_rt == NULL)
+					break;
 
 				/* Move this entry to the head */
 				TAILQ_REMOVE(&nd6_list, ln_end, ln_list);
@@ -912,7 +915,7 @@ nd6_rtrequest(struct ifnet *ifp, int req, struct rtentry *rt)
 			llsol.s6_addr8[12] = 0xff;
 
 			KERNEL_LOCK();
-			IN6_LOOKUP_MULTI(llsol, ifp, in6m);
+			in6m = in6_lookupmulti(&llsol, ifp);
 			if (in6m)
 				in6_delmulti(in6m);
 			KERNEL_UNLOCK();

@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.746 2025/07/13 05:45:21 dlg Exp $
+#	$OpenBSD: files,v 1.750 2026/01/29 11:23:35 kettenis Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -20,6 +20,7 @@ define	radiobus {}
 define	i2cbus {}
 define	gpiobus {}
 define	onewirebus {}
+define	spi {}
 define	video {}
 define	intrmap {}
 define	fdt {[early = 0]}
@@ -320,6 +321,10 @@ file	dev/ic/com.c			com & (com | com_cardbus | com_gsc |
 device	pluart: tty
 file	dev/ic/pluart.c			pluart
 
+# Qualcomm GENI UART
+device	qcuart: tty
+file	dev/ic/qcuart.c			qcuart
+
 # PC-like keyboard controller
 define	pckbcslot {[slot = -1]}
 device	pckbc: pckbcslot
@@ -475,7 +480,7 @@ device	ccp {}
 file	dev/ic/ccp.c			ccp
 
 # AMD Platform Security Processor
-device	psp
+device	psp: xcall
 attach	psp at ccp
 file	dev/ic/psp.c			psp	needs-flag
 
@@ -565,6 +570,10 @@ device	qcscm
 # UFS HC
 device	ufshci: scsi
 file	dev/ic/ufshci.c			ufshci needs-flag
+
+# Intel LPSS SPI controller
+device	ispi: spi
+file	dev/ic/ispi.c			ispi
 
 # legitimate pseudo-devices
 pseudo-device vnd: disk
@@ -863,7 +872,6 @@ file net/slcompress.c			ppp
 file net/if_enc.c			enc
 file net/if_gre.c			gre			needs-count
 file net/if_trunk.c			trunk
-file net/trunklacp.c			trunk
 file net/if_aggr.c			aggr
 file net/if_tpmr.c			tpmr
 file net/if_mpe.c			mpe

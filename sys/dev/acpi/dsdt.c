@@ -1,4 +1,4 @@
-/* $OpenBSD: dsdt.c,v 1.275 2025/06/22 11:19:00 kettenis Exp $ */
+/* $OpenBSD: dsdt.c,v 1.279 2026/02/10 01:03:33 jsg Exp $ */
 /*
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
  *
@@ -35,6 +35,8 @@
 #include <dev/acpi/dsdt.h>
 
 #include <dev/i2c/i2cvar.h>
+
+#include <dev/pci/ppbreg.h>
 
 #ifdef SMALL_KERNEL
 #undef ACPI_DEBUG
@@ -2347,29 +2349,67 @@ void aml_rwindexfield(struct aml_value *, struct aml_value *val, int);
 int
 aml_rdpciaddr(struct aml_node *pcidev, union amlpci_t *addr)
 {
+	struct aml_node *path[10] = { NULL };
+	pci_chipset_tag_t pc;
+	pcitag_t tag;
 	int64_t res;
+	int n, reg;
 
-	addr->bus = 0;
-	addr->seg = 0;
-	if (aml_evalinteger(acpi_softc, pcidev, "_ADR", 0, NULL, &res) == 0) {
-		addr->fun = res & 0xFFFF;
-		addr->dev = res >> 16;
-	}
-	while (pcidev != NULL) {
-		/* HID device (PCI or PCIE root): eval _SEG and _BBN */
-		if (__aml_search(pcidev, "_HID", 0)) {
-			if (aml_evalinteger(acpi_softc, pcidev, "_SEG",
-			        0, NULL, &res) == 0) {
-				addr->seg = res;
-			}
-			if (aml_evalinteger(acpi_softc, pcidev, "_BBN",
-			        0, NULL, &res) == 0) {
-				addr->bus = res;
-				break;
-			}
-		}
+	/* invert */
+	n = 0;
+	for (;;) {
+		path[n] = pcidev;
 		pcidev = pcidev->parent;
+		if (pcidev == NULL || n == nitems(path) - 1)
+			break;
+		n++;
 	}
+
+	/* start from root */
+	addr->seg = 0;
+	for (; n >= 0; n--) {
+		if (aml_evalinteger(acpi_softc, path[n], "_ADR", 0, NULL,
+		    &res) == 0) {
+			addr->dev = res >> 16;
+			addr->fun = res & 0xFFFF;
+		} else if (__aml_search(path[n], "_HID", 0)) {
+			/* HID device (PCI or PCIE root): eval _SEG and _BBN */
+			if (aml_evalinteger(acpi_softc, path[n], "_SEG", 0,
+			    NULL, &res) == 0) {
+				addr->seg = res;
+				addr->bus = 0;
+				addr->dev = 0;
+				addr->fun = 0;
+			}
+			if (aml_evalinteger(acpi_softc, pcidev, "_BBN", 0, NULL,
+			    &res) == 0) {
+				addr->bus = res;
+				addr->dev = 0;
+				addr->fun = 0;
+			}
+		} else
+			continue;
+
+		if (n == 0)
+			break;
+
+		/* an intermediate device, if it's a bridge jump busses */
+		pc = pci_lookup_segment(ACPI_PCI_SEG(addr->addr),
+		    ACPI_PCI_BUS(addr->addr));
+		tag = pci_make_tag(pc, addr->bus, addr->dev, addr->fun);
+		reg = pci_conf_read(pc, tag, PCI_CLASS_REG);
+		if (PCI_CLASS(reg) == PCI_CLASS_BRIDGE &&
+		    PCI_SUBCLASS(reg) == PCI_SUBCLASS_BRIDGE_PCI) {
+			reg = pci_conf_read(pc, tag, PPB_REG_BUSINFO);
+			addr->bus = PPB_BUSINFO_SECONDARY(reg);
+			addr->dev = 0;
+			addr->fun = 0;
+		}
+	}
+
+	dnprintf(50, "%s: %s: addr 0x%llx\n", __func__, aml_nodename(pcidev),
+	    addr->addr);
+
 	return (0);
 }
 
@@ -2584,7 +2624,7 @@ aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
 	i2c_op_t op;
 	i2c_addr_t addr;
 	int cmdlen, buflen;
-	uint8_t cmd[2];
+	uint8_t cmd;
 	uint8_t *buf;
 	int err;
 
@@ -2592,8 +2632,7 @@ aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
 	    AML_CRSTYPE(crs) != LR_SERBUS || AML_CRSLEN(crs) > conn->length ||
 	    crs->lr_i2cbus.revid != 1 || crs->lr_i2cbus.type != LR_SERBUS_I2C)
 		aml_die("Invalid GenericSerialBus");
-	if (AML_FIELD_ACCESS(flag) != AML_FIELD_BUFFERACC ||
-	    bpos & 0x3 || (blen % 8) != 0 || blen > 16)
+	if (AML_FIELD_ACCESS(flag) != AML_FIELD_BUFFERACC || bpos & 0x3)
 		aml_die("Invalid GenericSerialBus access");
 
 	node = aml_searchname(conn->node,
@@ -2611,15 +2650,15 @@ aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
 			buflen = 1;
 			break;
 		case 0x06:	/* AttribByte */
-			cmdlen = blen / 8;
+			cmdlen = 1;
 			buflen = 1;
 			break;
 		case 0x08:	/* AttribWord */
-			cmdlen = blen / 8;
+			cmdlen = 1;
 			buflen = 2;
 			break;
 		case 0x0b:	/* AttribBytes */
-			cmdlen = blen / 8;
+			cmdlen = 1;
 			buflen = len;
 			break;
 		case 0x0e:	/* AttribRawBytes */
@@ -2642,7 +2681,7 @@ aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
 		}
 		break;
 	case 1:			/* AttribBytes */
-		cmdlen = blen / 8;
+		cmdlen = 1;
 		buflen = AML_FIELD_ATTR(flag);
 		break;
 	case 2:			/* AttribRawBytes */
@@ -2674,8 +2713,7 @@ aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
 
 	tag = node->i2c;
 	addr = crs->lr_i2cbus._adr;
-	cmd[0] = bpos >> 3;
-	cmd[1] = bpos >> 11;
+	cmd = bpos >> 3;
 
 	iic_acquire_bus(tag, 0);
 	err = iic_exec(tag, op, addr, &cmd, cmdlen, &buf[2], buflen, 0);
@@ -2704,8 +2742,7 @@ aml_rwgsb(struct aml_value *conn, int len, int bpos, int blen,
 	int buflen;
 	uint8_t *buf;
 
-	if (AML_FIELD_ACCESS(flag) != AML_FIELD_BUFFERACC ||
-	    bpos & 0x3 || (blen % 8) != 0 || blen > 16)
+	if (AML_FIELD_ACCESS(flag) != AML_FIELD_BUFFERACC || bpos & 0x3)
 		aml_die("Invalid GenericSerialBus access");
 
 	switch (((flag >> 6) & 0x3)) {
@@ -3136,6 +3173,13 @@ aml_store(struct aml_scope *scope, struct aml_value *lhs , int64_t ival,
 			    aml_getname(lhs->v_nameref));
 		}
 		aml_copyvalue(node->value, rhs);
+		break;
+	case AML_OBJTYPE_OBJREF:
+		if (lhs->v_objref.type != AMLOP_PACKAGE) {
+			aml_die("Package expected");
+		}
+		aml_freevalue(lhs->v_objref.ref);
+		aml_copyvalue(lhs->v_objref.ref, rhs);
 		break;
 	case AML_OBJTYPE_METHOD:
 		/* Method override */
@@ -3768,6 +3812,15 @@ struct aml_value *
 aml_gettgt(struct aml_value *val, int opcode)
 {
 	while (val && val->type == AML_OBJTYPE_OBJREF) {
+		/*
+		 * Stores into package elements need to be handled
+		 * differently than other stores.  Return the
+		 * corresponding object reference such that our caller
+		 * can still recognize them as such.
+		 */
+		if (opcode == AMLOP_STORE &&
+		    val->v_objref.type == AMLOP_PACKAGE)
+			return val;
 		val = val->v_objref.ref;
 	}
 	return val;
@@ -4162,8 +4215,9 @@ aml_parse(struct aml_scope *scope, int ret_type, const char *stype)
 				my_ret = opargs[0]->v_package[idx];
 				aml_addref(my_ret, "Index.Package");
 			} else {
-				my_ret = aml_allocvalue(AML_OBJTYPE_OBJREF, AMLOP_PACKAGE,
-				    opargs[0]->v_package[idx]);
+				my_ret = aml_allocvalue(AML_OBJTYPE_OBJREF,
+				    AMLOP_PACKAGE, opargs[0]->v_package[idx]);
+				my_ret->v_objref.index = idx;
 				aml_addref(my_ret->v_objref.ref,
 				    "Index.Package");
 			}

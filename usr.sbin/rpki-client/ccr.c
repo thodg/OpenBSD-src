@@ -1,4 +1,4 @@
-/*	$OpenBSD: ccr.c,v 1.26 2025/10/18 08:12:32 tb Exp $ */
+/*	$OpenBSD: ccr.c,v 1.33 2026/01/29 18:25:29 tb Exp $ */
 /*
  * Copyright (c) 2025 Job Snijders <job@openbsd.org>
  *
@@ -29,15 +29,16 @@
 #include <openssl/asn1t.h>
 #include <openssl/stack.h>
 #include <openssl/safestack.h>
+#include <openssl/x509.h>
 
 #include "extern.h"
 #include "rpki-asn1.h"
 
 /*
- * CCR definition in draft-spaghetti-sidrops-rpki-ccr-04, section 3.
+ * CCR definition in draft-ietf-sidrops-rpki-ccr-01, section 3.
  */
 
-ASN1_ITEM_EXP EncapContentInfo_it;
+ASN1_ITEM_EXP ContentInfo_it;
 ASN1_ITEM_EXP CanonicalCacheRepresentation_it;
 ASN1_ITEM_EXP ManifestInstances_it;
 ASN1_ITEM_EXP ManifestInstance_it;
@@ -51,16 +52,16 @@ ASN1_ITEM_EXP RouterKeySets_it;
 ASN1_ITEM_EXP RouterKeySet_it;
 ASN1_ITEM_EXP RouterKey_it;
 
-ASN1_SEQUENCE(EncapContentInfo) = {
-	ASN1_SIMPLE(EncapContentInfo, contentType, ASN1_OBJECT),
-	ASN1_EXP(EncapContentInfo, content, ASN1_OCTET_STRING, 0),
-} ASN1_SEQUENCE_END(EncapContentInfo);
+ASN1_SEQUENCE(ContentInfo) = {
+	ASN1_SIMPLE(ContentInfo, contentType, ASN1_OBJECT),
+	ASN1_EXP(ContentInfo, content, CanonicalCacheRepresentation, 0),
+} ASN1_SEQUENCE_END(ContentInfo);
 
-IMPLEMENT_ASN1_FUNCTIONS(EncapContentInfo);
+IMPLEMENT_ASN1_FUNCTIONS(ContentInfo);
 
 ASN1_SEQUENCE(CanonicalCacheRepresentation) = {
 	ASN1_EXP_OPT(CanonicalCacheRepresentation, version, ASN1_INTEGER, 0),
-	ASN1_SIMPLE(CanonicalCacheRepresentation, hashAlg, ASN1_OBJECT),
+	ASN1_SIMPLE(CanonicalCacheRepresentation, hashAlg, X509_ALGOR),
 	ASN1_SIMPLE(CanonicalCacheRepresentation, producedAt,
 	    ASN1_GENERALIZEDTIME),
 	ASN1_EXP_OPT(CanonicalCacheRepresentation, mfts, ManifestState, 1),
@@ -190,6 +191,35 @@ ASN1_SEQUENCE(RouterKey) = {
 
 IMPLEMENT_ASN1_FUNCTIONS(RouterKey);
 
+static char *
+hex_encode_asn1_string(const ASN1_STRING *str)
+{
+	return hex_encode(ASN1_STRING_get0_data(str), ASN1_STRING_length(str));
+}
+
+static int
+base64_encode_asn1_string(const ASN1_OCTET_STRING *astr, char **out)
+{
+	const unsigned char *data = ASN1_STRING_get0_data(astr);
+	int length = ASN1_STRING_length(astr);
+
+	return base64_encode(data, length, out) == 0;
+}
+
+static int
+copy_asn1_string(const ASN1_STRING *astr, unsigned char *buf, size_t len)
+{
+	const unsigned char *data = ASN1_STRING_get0_data(astr);
+	int length = ASN1_STRING_length(astr);
+
+	if (length < 0 || (size_t)length != len)
+		return 0;
+
+	memcpy(buf, data, length);
+
+	return 1;
+}
+
 static void
 hash_asn1_item(ASN1_OCTET_STRING *astr, const ASN1_ITEM *it, void *val)
 {
@@ -207,7 +237,7 @@ validate_asn1_hash(const char *fn, const char *descr,
     const ASN1_OCTET_STRING *hash, const ASN1_ITEM *it, void *val)
 {
 	ASN1_OCTET_STRING *astr = NULL;
-	char *hex = NULL;
+	char *b64 = NULL;
 
 	if ((astr = ASN1_OCTET_STRING_new()) == NULL)
 		errx(1, "ASN1_OCTET_STRING_new");
@@ -219,10 +249,12 @@ validate_asn1_hash(const char *fn, const char *descr,
 		goto out;
 	}
 
-	hex = hex_encode(hash->data, hash->length);
+	if (!base64_encode_asn1_string(astr, &b64))
+		errx(1, "base64_encode_asn1_string");
+
  out:
 	ASN1_OCTET_STRING_free(astr);
-	return hex;
+	return b64;
 }
 
 static void
@@ -316,12 +348,6 @@ append_cached_manifest(STACK_OF(ManifestInstance) *mis, struct ccr_mft *cm)
 		errx(1, "sk_ManifestInstance_push");
 }
 
-static int
-base64_encode_asn1str(const ASN1_OCTET_STRING *astr, char **out)
-{
-	return base64_encode(astr->data, astr->length, out) == 0;
-}
-
 static ManifestState *
 generate_manifeststate(struct validation_data *vd)
 {
@@ -346,8 +372,8 @@ generate_manifeststate(struct validation_data *vd)
 
 	hash_asn1_item(ms->hash, ASN1_ITEM_rptr(ManifestInstances), ms->mis);
 
-	if (!base64_encode_asn1str(ms->hash, &ccr->mfts_hash))
-		errx(1, "base64_encode_asn1str");
+	if (!base64_encode_asn1_string(ms->hash, &ccr->mfts_hash))
+		errx(1, "base64_encode_asn1_string");
 
 	return ms;
 }
@@ -440,8 +466,8 @@ generate_roapayloadstate(struct validation_data *vd)
 
 	hash_asn1_item(vrps->hash, ASN1_ITEM_rptr(ROAPayloadSets), vrps->rps);
 
-	if (!base64_encode_asn1str(vrps->hash, &ccr->vrps_hash))
-		errx(1, "base64_encode_asn1str");
+	if (!base64_encode_asn1_string(vrps->hash, &ccr->vrps_hash))
+		errx(1, "base64_encode_asn1_string");
 
 	return vrps;
 }
@@ -491,8 +517,8 @@ generate_aspapayloadstate(struct validation_data *vd)
 
 	hash_asn1_item(vaps->hash, ASN1_ITEM_rptr(ASPAPayloadSets), vaps->aps);
 
-	if (!base64_encode_asn1str(vaps->hash, &ccr->vaps_hash))
-		errx(1, "base64_encode_asn1str");
+	if (!base64_encode_asn1_string(vaps->hash, &ccr->vaps_hash))
+		errx(1, "base64_encode_asn1_string");
 
 	return vaps;
 }
@@ -528,8 +554,8 @@ generate_trustanchorstate(struct validation_data *vd)
 	hash_asn1_item(tas->hash, ASN1_ITEM_rptr(SubjectKeyIdentifiers),
 	    tas->skis);
 
-	if (!base64_encode_asn1str(tas->hash, &vd->ccr.tas_hash))
-		errx(1, "base64_encode_asn1str");
+	if (!base64_encode_asn1_string(tas->hash, &vd->ccr.tas_hash))
+		errx(1, "base64_encode_asn1_string");
 
 	return tas;
 }
@@ -538,7 +564,7 @@ static RouterKeyState *
 generate_routerkeystate(struct validation_data *vd)
 {
 	RouterKeyState *rks;
-	RouterKeySet *rkset;
+	RouterKeySet *rkset = NULL;
 	RouterKey *rk;
 	struct brk *brk, *prev;
 	unsigned char *pk_der = NULL;
@@ -593,8 +619,8 @@ generate_routerkeystate(struct validation_data *vd)
 
 	hash_asn1_item(rks->hash, ASN1_ITEM_rptr(RouterKeySets), rks->rksets);
 
-	if (!base64_encode_asn1str(rks->hash, &vd->ccr.brks_hash))
-		errx(1, "base64_encode_asn1str");
+	if (!base64_encode_asn1_string(rks->hash, &vd->ccr.brks_hash))
+		errx(1, "base64_encode_asn1_string");
 
 	return rks;
 }
@@ -603,16 +629,18 @@ static CanonicalCacheRepresentation *
 generate_ccr(struct validation_data *vd)
 {
 	CanonicalCacheRepresentation *ccr = NULL;
-	time_t now = get_current_time();
+	ASN1_OBJECT *oid;
 
 	if ((ccr = CanonicalCacheRepresentation_new()) == NULL)
 		errx(1, "CanonicalCacheRepresentation_new");
 
-	ASN1_OBJECT_free(ccr->hashAlg);
-	if ((ccr->hashAlg = OBJ_nid2obj(NID_sha256)) == NULL)
+	if ((oid = OBJ_nid2obj(NID_sha256)) == NULL)
 		errx(1, "OBJ_nid2obj");
 
-	if (ASN1_GENERALIZEDTIME_set(ccr->producedAt, now) == NULL)
+	if (!X509_ALGOR_set0(ccr->hashAlg, oid, V_ASN1_UNDEF, NULL))
+		errx(1, "X509_ALGOR_set0");
+
+	if (ASN1_GENERALIZEDTIME_set(ccr->producedAt, vd->buildtime) == NULL)
 		errx(1, "ASN1_GENERALIZEDTIME_set");
 
 	if ((ccr->mfts = generate_manifeststate(vd)) == NULL)
@@ -636,40 +664,25 @@ generate_ccr(struct validation_data *vd)
 void
 serialize_ccr_content(struct validation_data *vd)
 {
-	CanonicalCacheRepresentation *ccr;
-	EncapContentInfo *ci = NULL;
-	unsigned char *out;
-	int out_len, ci_der_len;
+	ContentInfo *ci = NULL;
+	int ci_der_len;
 
-	if ((ci = EncapContentInfo_new()) == NULL)
-		errx(1, "EncapContentInfo_new");
+	if ((ci = ContentInfo_new()) == NULL)
+		errx(1, "ContentInfo_new");
 
-	/*
-	 * At some point the below PEN OID should be replaced by one from IANA.
-	 */
 	ASN1_OBJECT_free(ci->contentType);
 	if ((ci->contentType = OBJ_dup(ccr_oid)) == NULL)
 		errx(1, "OBJ_dup");
 
-	ccr = generate_ccr(vd);
-
-	out = NULL;
-	if ((out_len = i2d_CanonicalCacheRepresentation(ccr, &out)) <= 0)
-		errx(1, "i2d_CanonicalCacheRepresentation");
-
-	CanonicalCacheRepresentation_free(ccr);
-
-	if (!ASN1_OCTET_STRING_set(ci->content, out, out_len))
-		errx(1, "ASN1_OCTET_STRING_set");
-
-	free(out);
+	CanonicalCacheRepresentation_free(ci->content);
+	ci->content = generate_ccr(vd);
 
 	vd->ccr.der = NULL;
-	if ((ci_der_len = i2d_EncapContentInfo(ci, &vd->ccr.der)) <= 0)
-		errx(1, "i2d_EncapContentInfo");
+	if ((ci_der_len = i2d_ContentInfo(ci, &vd->ccr.der)) <= 0)
+		errx(1, "i2d_ContentInfo");
 	vd->ccr.der_len = ci_der_len;
 
-	EncapContentInfo_free(ci);
+	ContentInfo_free(ci);
 }
 
 static inline int
@@ -982,11 +995,11 @@ parse_mft_instances(const char *fn, struct ccr *ccr,
 
 		mi = sk_ManifestInstance_value(mis, i);
 
-		if (mi->hash->length != sizeof(ccr_mft->hash)) {
+		if (!copy_asn1_string(mi->hash,
+		    ccr_mft->hash, sizeof(ccr_mft->hash))) {
 			warnx("%s: manifest instance #%d corrupted", fn, i);
 			goto out;
 		}
-		memcpy(ccr_mft->hash, mi->hash->data, mi->hash->length);
 
 		if (prev != NULL) {
 			if (ccr_mft_cmp(ccr_mft, prev) <= 0) {
@@ -995,11 +1008,11 @@ parse_mft_instances(const char *fn, struct ccr *ccr,
 			}
 		}
 
-		if (mi->aki->length != sizeof(ccr_mft->aki)) {
+		if (!copy_asn1_string(mi->aki,
+		    ccr_mft->aki, sizeof(ccr_mft->aki))) {
 			warnx("%s: manifest instance #%d corrupted", fn, i);
 			goto out;
 		}
-		memcpy(ccr_mft->aki, mi->aki->data, mi->aki->length);
 
 		if (!ASN1_INTEGER_get_uint64(&size, mi->size)) {
 			warnx("%s: manifest instance #%d corrupted", fn, i);
@@ -1040,12 +1053,11 @@ parse_mft_instances(const char *fn, struct ccr *ccr,
 				err(1, NULL);
 
 			s = sk_SubjectKeyIdentifier_value(mi->subordinates, j);
-			if (s->length != sizeof(sub->ski)) {
+			if (!copy_asn1_string(s, sub->ski, sizeof(sub->ski))) {
 				warnx("%s: manifest instance #%d corrupted",
-				    fn, j);
+				    fn, i);
 				goto out;
 			}
-			memcpy(sub->ski, s->data, sizeof(sub->ski));
 			SLIST_INSERT_HEAD(&ccr_mft->subordinates, sub, entry);
 			sub = NULL;
 		}
@@ -1392,12 +1404,10 @@ parse_tas_skis(const char *fn, struct ccr *ccr,
 
 		ski = sk_SubjectKeyIdentifier_value(skis, i);
 
-		if (ski->length != sizeof(cts->keyid)) {
+		if (!copy_asn1_string(ski, cts->keyid, sizeof(cts->keyid))) {
 			warnx("%s: TAS SKI #%d corrupted", fn, i);
 			goto out;
 		}
-
-		memcpy(cts->keyid, ski->data, ski->length);
 
 		if (prev != NULL) {
 			if (ccr_tas_ski_cmp(cts, prev) <= 0) {
@@ -1464,12 +1474,12 @@ parse_routerkeys(const char *fn, struct ccr *ccr, uint32_t asid,
 
 		rk = sk_RouterKey_value(routerkeys, i);
 
-		if (rk->ski->length != SHA_DIGEST_LENGTH) {
+		if (ASN1_STRING_length(rk->ski) != SHA_DIGEST_LENGTH) {
 			warnx("%s: AS%d RouterKey SKI corrupted", fn, asid);
 			goto out;
 		}
 
-		brk->ski = hex_encode(rk->ski->data, rk->ski->length);
+		brk->ski = hex_encode_asn1_string(rk->ski);
 
 		der = NULL;
 		if ((der_len = i2d_X509_PUBKEY(rk->spki, &der)) <= 0) {
@@ -1564,17 +1574,18 @@ struct ccr *
 ccr_parse(const char *fn, const unsigned char *der, size_t len)
 {
 	const unsigned char *oder;
-	EncapContentInfo *ci = NULL;
+	ContentInfo *ci = NULL;
 	CanonicalCacheRepresentation *ccr_asn1 = NULL;
+	const ASN1_OBJECT *oid;
 	struct ccr *ccr = NULL;
-	int nid, rc = 0;
+	int nid, ptype, rc = 0;
 
 	if (der == NULL)
 		return NULL;
 
 	oder = der;
-	if ((ci = d2i_EncapContentInfo(NULL, &der, len)) == NULL) {
-		warnx("%s: d2i_EncapContentInfo", fn);
+	if ((ci = d2i_ContentInfo(NULL, &der, len)) == NULL) {
+		warnx("%s: d2i_ContentInfo", fn);
 		goto out;
 	}
 	if (der != oder + len) {
@@ -1591,26 +1602,15 @@ ccr_parse(const char *fn, const unsigned char *der, size_t len)
 		goto out;
 	}
 
-	der = ASN1_STRING_get0_data(ci->content);
-	len = ASN1_STRING_length(ci->content);
-
-	oder = der;
-	ccr_asn1 = d2i_CanonicalCacheRepresentation(NULL, &der, len);
-	if (ccr_asn1 == NULL) {
-		warnx("%s: d2i_CanonicalCacheRepresentation failed", fn);
-		goto out;
-	}
-	if (der != oder + len) {
-		warnx("%s: %td bytes trailing garbage", fn, oder + len - der);
-		goto out;
-	}
+	ccr_asn1 = ci->content;
 
 	if (!valid_econtent_version(fn, ccr_asn1->version, 0))
 		goto out;
 
-	if ((nid = OBJ_obj2nid(ccr_asn1->hashAlg)) != NID_sha256) {
-		warnx("%s: hashAlg: want SHA256 object, have %s", fn,
-		    nid2str(nid));
+	X509_ALGOR_get0(&oid, &ptype, NULL, ccr_asn1->hashAlg);
+	if ((nid = OBJ_obj2nid(oid)) != NID_sha256 || ptype != V_ASN1_UNDEF) {
+		warnx("%s: hashAlg: want SHA256 object without parameters "
+		    "have %s with parameter type %d", fn, nid2str(nid), ptype);
 		goto out;
 	}
 
@@ -1655,8 +1655,7 @@ ccr_parse(const char *fn, const unsigned char *der, size_t len)
 
 	rc = 1;
  out:
-	CanonicalCacheRepresentation_free(ccr_asn1);
-	EncapContentInfo_free(ci);
+	ContentInfo_free(ci);
 
 	if (rc == 0) {
 		ccr_free(ccr);

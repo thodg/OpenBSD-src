@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-command-prompt.c,v 1.68 2025/04/09 06:27:43 nicm Exp $ */
+/* $OpenBSD: cmd-command-prompt.c,v 1.70 2026/01/14 19:43:43 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -42,8 +42,8 @@ const struct cmd_entry cmd_command_prompt_entry = {
 	.name = "command-prompt",
 	.alias = NULL,
 
-	.args = { "1bFkiI:Np:t:T:", 0, 1, cmd_command_prompt_args_parse },
-	.usage = "[-1bFkiN] [-I inputs] [-p prompts] " CMD_TARGET_CLIENT_USAGE
+	.args = { "1beFiklI:Np:t:T:", 0, 1, cmd_command_prompt_args_parse },
+	.usage = "[-1beFiklN] [-I inputs] [-p prompts] " CMD_TARGET_CLIENT_USAGE
 		 " [-T prompt-type] [template]",
 
 	.flags = CMD_CLIENT_TFLAG,
@@ -84,7 +84,7 @@ cmd_command_prompt_exec(struct cmd *self, struct cmdq_item *item)
 	struct client			*tc = cmdq_get_target_client(item);
 	struct cmd_find_state		*target = cmdq_get_target(item);
 	const char			*type, *s, *input;
-	struct cmd_command_prompt_cdata	*cdata;
+	struct cmd_command_prompt_cdata *cdata;
 	char				*tmp, *prompts, *prompt, *next_prompt;
 	char				*inputs = NULL, *next_input;
 	u_int				 count = args_count(args);
@@ -117,27 +117,33 @@ cmd_command_prompt_exec(struct cmd *self, struct cmdq_item *item)
 		next_input = inputs = xstrdup(s);
 	else
 		next_input = NULL;
-	while ((prompt = strsep(&next_prompt, ",")) != NULL) {
-		cdata->prompts = xreallocarray(cdata->prompts, cdata->count + 1,
-		    sizeof *cdata->prompts);
-		if (!space)
-			tmp = xstrdup(prompt);
-		else
-			xasprintf(&tmp, "%s ", prompt);
-		cdata->prompts[cdata->count].prompt = tmp;
+	if (args_has(args, 'l')) {
+		cdata->prompts = xcalloc(1, sizeof *cdata->prompts);
+		cdata->prompts[0].prompt = prompts;
+		cdata->prompts[0].input = inputs;
+		cdata->count = 1;
+	} else {
+		while ((prompt = strsep(&next_prompt, ",")) != NULL) {
+			cdata->prompts = xreallocarray(cdata->prompts,
+			    cdata->count + 1, sizeof *cdata->prompts);
+			if (!space)
+				tmp = xstrdup(prompt);
+			else
+				xasprintf(&tmp, "%s ", prompt);
+			cdata->prompts[cdata->count].prompt = tmp;
 
-		if (next_input != NULL) {
-			input = strsep(&next_input, ",");
-			if (input == NULL)
+			if (next_input != NULL) {
+				input = strsep(&next_input, ",");
+				if (input == NULL)
+					input = "";
+			} else
 				input = "";
-		} else
-			input = "";
-		cdata->prompts[cdata->count].input = xstrdup(input);
-
-		cdata->count++;
+			cdata->prompts[cdata->count].input = xstrdup(input);
+			cdata->count++;
+		}
+		free(inputs);
+		free(prompts);
 	}
-	free(inputs);
-	free(prompts);
 
 	if ((type = args_get(args, 'T')) != NULL) {
 		cdata->prompt_type = status_prompt_type(type);
@@ -157,6 +163,8 @@ cmd_command_prompt_exec(struct cmd *self, struct cmdq_item *item)
 		cdata->flags |= PROMPT_INCREMENTAL;
 	else if (args_has(args, 'k'))
 		cdata->flags |= PROMPT_KEY;
+	else if (args_has(args, 'e'))
+		cdata->flags |= PROMPT_BSPACE_EXIT;
 	status_prompt_set(tc, target, cdata->prompts[0].prompt,
 	    cdata->prompts[0].input, cmd_command_prompt_callback,
 	    cmd_command_prompt_free, cdata, cdata->flags, cdata->prompt_type);
@@ -228,7 +236,7 @@ out:
 static void
 cmd_command_prompt_free(void *data)
 {
-	struct cmd_command_prompt_cdata	*cdata = data;
+	struct cmd_command_prompt_cdata *cdata = data;
 	u_int				 i;
 
 	for (i = 0; i < cdata->count; i++) {

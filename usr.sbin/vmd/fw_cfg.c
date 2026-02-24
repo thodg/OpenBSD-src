@@ -1,4 +1,4 @@
-/*	$OpenBSD: fw_cfg.c,v 1.11 2025/06/12 21:04:37 dv Exp $	*/
+/*	$OpenBSD: fw_cfg.c,v 1.14 2026/02/11 13:58:55 dv Exp $	*/
 /*
  * Copyright (c) 2018 Claudio Jeker <claudio@openbsd.org>
  *
@@ -55,8 +55,6 @@ struct fw_cfg_file {
 	char		name[56];
 };
 
-extern char *__progname;
-
 static struct fw_cfg_state {
 	size_t offset;
 	size_t size;
@@ -74,16 +72,20 @@ void
 fw_cfg_init(struct vmop_create_params *vmc)
 {
 	unsigned int sd = 0;
-	size_t i, e820_len = 0;
+	size_t i, j, e820_len = 0;
 	char bootorder[64];
 	const char *bootfmt;
 	int bootidx = -1;
 
 	/* Define e820 memory ranges. */
 	memset(&e820, 0, sizeof(e820));
-	for (i = 0; i < vmc->vmc_params.vcp_nmemranges; i++) {
-		struct vm_mem_range *range = &vmc->vmc_params.vcp_memranges[i];
-		bios_memmap_t *entry = &e820[i];
+	for (i = 0, j = 0; i < vmc->vmc_nmemranges; i++) {
+		struct vm_mem_range *range = &vmc->vmc_memranges[i];
+		if (range->vmr_type == VM_MEM_MMIO) {
+			/* Create a hole for MMIO regions. */
+			continue;
+		}
+		bios_memmap_t *entry = &e820[j++];
 		entry->addr = range->vmr_gpa;
 		entry->size = range->vmr_size;
 		if (range->vmr_type == VM_MEM_RAM)
@@ -219,8 +221,8 @@ vcpu_exit_fw_cfg(struct vm_run_params *vrp)
 	switch (vei->vei.vei_port) {
 	case FW_CFG_IO_SELECT:
 		if (vei->vei.vei_dir == VEI_DIR_IN) {
-			log_warnx("%s: fw_cfg: read from selector port "
-			    "unsupported", __progname);
+			log_warnx("fw_cfg: read from selector port "
+			    "unsupported");
 			set_return_data(vei, 0);
 			break;
 		}
@@ -229,8 +231,8 @@ vcpu_exit_fw_cfg(struct vm_run_params *vrp)
 		break;
 	case FW_CFG_IO_DATA:
 		if (vei->vei.vei_dir == VEI_DIR_OUT) {
-			log_debug("%s: fw_cfg: discarding data written to "
-			    "data port", __progname);
+			log_debug("fw_cfg: discarding data written to "
+			    "data port");
 			break;
 		}
 		/* fw_cfg only defines 1-byte reads via IO port */
@@ -255,8 +257,8 @@ vcpu_exit_fw_cfg_dma(struct vm_run_params *vrp)
 	struct vm_exit *vei = vrp->vrp_exit;
 
 	if (vei->vei.vei_size != 4) {
-		log_debug("%s: fw_cfg_dma: discarding data written to "
-		    "dma addr", __progname);
+		log_debug("fw_cfg_dma: discarding data written to "
+		    "dma addr");
 		if (vei->vei.vei_dir == VEI_DIR_OUT)
 			fw_cfg_dma_addr = 0;
 		return 0xFF;
@@ -333,7 +335,7 @@ fw_cfg_add_file(const char *name, const void *data, size_t len)
 	struct fw_cfg_file_entry *f;
 
 	if (fw_cfg_lookup_file(name))
-		fatalx("%s: fw_cfg: file %s exists", __progname, name);
+		fatalx("fw_cfg: file %s exists", name);
 
 	if ((f = calloc(1, sizeof(*f))) == NULL)
 		fatal("%s", __func__);
@@ -343,7 +345,7 @@ fw_cfg_add_file(const char *name, const void *data, size_t len)
 
 	if (strlcpy(f->file.name, name, sizeof(f->file.name)) >=
 	    sizeof(f->file.name))
-		fatalx("%s: fw_cfg: file name too long", __progname);
+		fatalx("fw_cfg: file name too long");
 
 	f->file.size = htobe32(len);
 	f->file.selector = htobe16(file_id++);

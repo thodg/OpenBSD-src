@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_rport.c,v 1.6 2025/10/15 01:38:42 dlg Exp $ */
+/*	$OpenBSD: if_rport.c,v 1.12 2025/12/19 01:30:17 dlg Exp $ */
 
 /*
  * Copyright (c) 2023 David Gwynne <dlg@openbsd.org>
@@ -65,7 +65,6 @@ static int	rport_output(struct ifnet *, struct mbuf *, struct sockaddr *,
 		    struct rtentry *);
 static int	rport_enqueue(struct ifnet *, struct mbuf *);
 static void	rport_start(struct ifqueue *);
-static void	rport_input(struct ifnet *, struct mbuf *, struct netstack *);
 
 static int	rport_up(struct rport_softc *);
 static int	rport_down(struct rport_softc *);
@@ -107,7 +106,7 @@ rport_clone_create(struct if_clone *ifc, int unit)
 	ifp->if_output = rport_output;
 	ifp->if_enqueue = rport_enqueue;
 	ifp->if_qstart = rport_start;
-	ifp->if_input = rport_input;
+	ifp->if_input = p2p_input;
 	ifp->if_rtrequest = p2p_rtrequest;
 	ifp->if_type = IFT_TUNNEL;
 	ifp->if_softc = sc;
@@ -244,17 +243,29 @@ rport_start(struct ifqueue *ifq)
 	struct ifnet *ifp = ifq->ifq_if;
 	struct rport_softc *sc = ifp->if_softc;
 	struct ifnet *ifp0;
+	struct mbuf_list ml = MBUF_LIST_INITIALIZER();
 	struct mbuf *m;
 	uint16_t csum;
+	uint64_t packets = 0;
+	uint64_t bytes = 0;
+	struct counters_ref cr;
+	uint64_t *counters;
 
-	ifp0 = if_get(sc->sc_peer_idx);
+	smr_read_enter();
+	ifp0 = if_get_smr(sc->sc_peer_idx);
+	/*
+	 * this code is running in a softnet thread, so it can use
+	 * ifnets without refs.
+	 */
+	smr_read_leave();
+
 	if (ifp0 == NULL || !ISSET(ifp0->if_flags, IFF_RUNNING)) {
 		ifq_purge(ifq);
-		if_put(ifp0);
 		return;
 	}
 
-	NET_LOCK_SHARED();
+	/* this reproduces the work that ifq_input/if_vinput do */
+
 	while ((m = ifq_dequeue(ifq)) != NULL) {
 #if NBPFILTER > 0
 		caddr_t if_bpf = READ_ONCE(ifp->if_bpf);
@@ -263,6 +274,16 @@ rport_start(struct ifqueue *ifq)
 			m_freem(m);
 			continue;
 		}
+#endif
+
+		m->m_pkthdr.ph_ifidx = ifp0->if_index;
+		m->m_pkthdr.ph_rtableid = ifp0->if_rdomain;
+
+		packets++;
+		bytes += m->m_pkthdr.len;
+
+#if NPF > 0
+		pf_pkt_addr_changed(m);
 #endif
 
 		csum = m->m_pkthdr.csum_flags;
@@ -279,35 +300,24 @@ rport_start(struct ifqueue *ifq)
 		if (ISSET(csum, M_TCP_TSO) && m->m_pkthdr.len > ifp0->if_mtu)
 			tcpstat_inc(tcps_inhwlro);
 
-		if_vinput(ifp0, m, NULL);
+#if NBPFILTER > 0
+		if_bpf = READ_ONCE(ifp0->if_bpf);
+		if (if_bpf && bpf_mtap_af(if_bpf, m->m_pkthdr.ph_family,
+		    m, BPF_DIRECTION_IN)) {
+			m_freem(m);
+			continue;
+		}
+#endif
+
+		ml_enqueue(&ml, m);
 	}
-	NET_UNLOCK_SHARED();
 
-	if_put(ifp0);
-}
+	counters = counters_enter(&cr, ifp0->if_counters);
+	counters[ifc_ipackets] += packets;
+	counters[ifc_ibytes] += bytes;
+	counters_leave(&cr, ifp0->if_counters);
 
-static void
-rport_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
-{
-        switch (m->m_pkthdr.ph_family) {
-        case AF_INET:
-                ipv4_input(ifp, m, ns);
-                break;
-#ifdef INET6
-        case AF_INET6:
-                ipv6_input(ifp, m, ns);
-                break;
-#endif
-#ifdef MPLS
-        case AF_MPLS:
-                mpls_input(ifp, m, ns);
-                break;
-#endif
-        default:
-		counters_inc(ifp->if_counters, ifc_noproto);
-                m_freem(m);
-                break;
-        }
+	if_input_process(ifp0, &ml, ifq->ifq_idx);
 }
 
 static int
@@ -353,7 +363,7 @@ rport_set_parent(struct rport_softc *sc, const struct if_parent *p)
 		goto leave;
 	}
 
-	if (ifp0->if_input != rport_input) {
+	if (ifp0->if_enqueue != rport_enqueue) {
 		error = EPROTONOSUPPORT;
 		goto put;
 	}

@@ -1,4 +1,4 @@
-/* $OpenBSD: input-keys.c,v 1.109 2025/03/04 08:45:04 nicm Exp $ */
+/* $OpenBSD: input-keys.c,v 1.111 2026/01/06 20:05:57 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -314,12 +314,6 @@ static struct input_key_entry input_key_defaults[] = {
 	{ .key = KEYC_DC|KEYC_BUILD_MODIFIERS,
 	  .data = "\033[3;_~"
 	},
-	{ .key = KEYC_REPORT_DARK_THEME,
-	  .data = "\033[?997;1n"
-	},
-	{ .key = KEYC_REPORT_LIGHT_THEME,
-	  .data = "\033[?997;2n"
-	},
 };
 static const key_code input_key_modifiers[] = {
 	0,
@@ -606,7 +600,9 @@ input_key(struct screen *s, struct bufferevent *bev, key_code key)
 				ud.data[0] = newkey;
 			else if ((newkey & KEYC_MASK_MODIFIERS) == KEYC_CTRL) {
 				newkey &= KEYC_MASK_KEY;
-				if (newkey >= 'A' && newkey <= 'Z')
+				if (newkey == '?')
+					ud.data[0] = 0x7f;
+				else if (newkey >= '@' && newkey <= '_')
 					ud.data[0] = newkey - 0x40;
 				else if (newkey >= 'a' && newkey <= 'z')
 					ud.data[0] = newkey - 0x60;

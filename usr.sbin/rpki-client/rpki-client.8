@@ -1,4 +1,4 @@
-.\"	$OpenBSD: rpki-client.8,v 1.130 2025/09/11 09:25:05 job Exp $
+.\"	$OpenBSD: rpki-client.8,v 1.139 2026/02/17 13:54:42 job Exp $
 .\"
 .\" Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
 .\"
@@ -14,7 +14,7 @@
 .\" ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 .\" OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 .\"
-.Dd $Mdocdate: September 11 2025 $
+.Dd $Mdocdate: February 17 2026 $
 .Dt RPKI-CLIENT 8
 .Os
 .Sh NAME
@@ -116,11 +116,12 @@ and
 .Fl -address
 flags and connect with rsync-protocol locations.
 .It Fl f Ar
-Attempt to decode and validate the RPKI object in
+Attempt to decode and validate the signed RPKI object or CCR in
 .Ar file
 using the cache stored in
 .Ar cachedir
 and print human-readable information about the object.
+Gzip compressed files are inflated on the fly.
 If
 .Ar file
 is an rsync:// URI, the corresponding file from the cache will be used.
@@ -247,7 +248,8 @@ By default
 .Nm
 outputs validated payloads in
 .Fl o
-(OpenBGPD compatible) format.
+(OpenBGPD compatible) format
+and in canonical cache representation format.
 .Pp
 .Nm
 should be run hourly by
@@ -371,11 +373,6 @@ This facility is experimental and is still subject to change.
 .Re
 .Pp
 .Rs
-.%T The RPKI Ghostbusters Record
-.%R RFC 6493
-.Re
-.Pp
-.Rs
 .%T Policy Qualifiers in RPKI Certificates
 .%R RFC 7318
 .Re
@@ -421,11 +418,6 @@ This facility is experimental and is still subject to change.
 .Re
 .Pp
 .Rs
-.%T Finding and Using Geofeed Data
-.%R RFC 9632
-.Re
-.Pp
-.Rs
 .%T Same-Origin Policy for the RRDP
 .%R RFC 9674
 .Re
@@ -448,37 +440,37 @@ This facility is experimental and is still subject to change.
 .Rs
 .%T A Profile for Autonomous System Provider Authorization (ASPA)
 .%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-aspa-profile
-.%D Jun, 2023
+.%D February, 2026
 .Re
 .Pp
 .Rs
 .%T Constraining RPKI Trust Anchors
-.%U https://datatracker.ietf.org/doc/html/draft-snijders-constraining-rpki-trust-anchors
-.%D September, 2023
+.%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-constraining-rpki-trust-anchors
+.%D February, 2026
 .Re
 .Pp
 .Rs
 .%T A profile for Signed Prefix Lists for Use in the RPKI
-.%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-rpki-prefixlist-02
-.%D Jan, 2024
+.%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-rpki-prefixlist
+.%D March, 2025
 .Re
 .Pp
 .Rs
 .%T RPKI Manifest Number Handling
 .%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-manifest-numbers
-.%D June, 2024
+.%D August, 2025
 .Re
 .Pp
 .Rs
 .%T Tiebreaking RPKI Trust Anchors
 .%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-rpki-ta-tiebreaker
-.%D June, 2024
+.%D February, 2025
 .Re
 .Pp
 .Rs
 .%T A Profile for RPKI Canonical Cache Representation
-.%U https://datatracker.ietf.org/doc/html/draft-spaghetti-sidrops-rpki-ccr
-.%D September, 2025
+.%U https://datatracker.ietf.org/doc/html/draft-ietf-sidrops-rpki-ccr
+.%D December, 2025
 .Re
 .Sh HISTORY
 .Nm

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_aggr.c,v 1.50 2025/07/07 02:28:50 jsg Exp $ */
+/*	$OpenBSD: if_aggr.c,v 1.53 2025/12/02 03:50:56 dlg Exp $ */
 
 /*
  * Copyright (c) 2019 The University of Queensland
@@ -346,12 +346,14 @@ struct aggr_port {
 	struct ifnet		*p_ifp0;
 	struct kstat		*p_kstat;
 	struct mutex		 p_mtx;
+	struct ether_port	 p_ether_port;
+	struct refcnt		 p_refs;
+	struct cpumem		*p_cpurefs;
 
 	uint8_t			 p_lladdr[ETHER_ADDR_LEN];
 	uint32_t		 p_mtu;
 
 	int (*p_ioctl)(struct ifnet *, u_long, caddr_t);
-	void (*p_input)(struct ifnet *, struct mbuf *, struct netstack *);
 	int (*p_output)(struct ifnet *, struct mbuf *, struct sockaddr *,
 	    struct rtentry *);
 
@@ -743,75 +745,115 @@ aggr_start(struct ifqueue *ifq)
 	smr_read_leave();
 }
 
-static inline struct mbuf *
-aggr_input_control(struct aggr_port *p, struct mbuf *m, struct netstack *ns)
+static void
+aggr_port_take(void *port)
 {
-	struct ether_header *eh;
-	int hlen = sizeof(*eh);
-	uint16_t etype;
-	uint64_t dst;
+	struct aggr_port *p = port;
+	refcnt_take(&p->p_refs);
+}
 
-	if (ISSET(m->m_flags, M_VLANTAG))
-		return (m);
+static void
+aggr_port_rele(void *port)
+{
+	struct aggr_port *p = port;
+	refcnt_rele_wake(&p->p_refs);
+}
 
-	eh = mtod(m, struct ether_header *);
-	etype = eh->ether_type;
-	dst = ether_addr_to_e64((struct ether_addr *)eh->ether_dhost);
+static void *
+aggr_cpu_take(void *port)
+{
+	struct aggr_port *p = port;
+	struct refcnt *r;
 
-	if (__predict_false(etype == htons(ETHERTYPE_SLOW) &&
-	    dst == LACP_ADDR_SLOW_E64)) {
-		unsigned int rx_proto = AGGR_PROTO_RX_LACP;
-		struct ether_slowproto_hdr *sph;
-		int drop = 0;
+	r = cpumem_enter(p->p_cpurefs);
+	refcnt_take(r);
+	cpumem_leave(p->p_cpurefs, r);
 
-		hlen += sizeof(*sph);
-		if (m->m_len < hlen) {
-			m = m_pullup(m, hlen);
-			if (m == NULL) {
-				/* short++ */
-				return (NULL);
-			}
-			eh = mtod(m, struct ether_header *);
-		}
+	return (r);
+}
+ 
+static void
+aggr_cpu_rele(void *ref, void *port)
+{
+	struct refcnt *r = ref;
 
-		sph = (struct ether_slowproto_hdr *)(eh + 1);
-		switch (sph->sph_subtype) {
-		case SLOWPROTOCOLS_SUBTYPE_LACP_MARKER:
-			rx_proto = AGGR_PROTO_RX_MARKER;
-			/* FALLTHROUGH */
-		case SLOWPROTOCOLS_SUBTYPE_LACP:
-			mtx_enter(&p->p_mtx);
-			p->p_proto_counts[rx_proto].c_pkts++;
-			p->p_proto_counts[rx_proto].c_bytes += m->m_pkthdr.len;
+	if (refcnt_rele(r))
+		aggr_port_rele(port);
+}
 
-			if (ml_len(&p->p_rxm_ml) < AGGR_MAX_SLOW_PKTS)
-				ml_enqueue(&p->p_rxm_ml, m);
-			else {
-				p->p_rx_drops++;
-				drop = 1;
-			}
-			mtx_leave(&p->p_mtx);
+static inline int
+aggr_is_lldp(struct mbuf *m, uint64_t dst)
+{
+	struct ether_header *eh = mtod(m, struct ether_header *);
 
-			if (drop)
-				goto drop;
-			else
-				task_add(systq, &p->p_rxm_task);
-			return (NULL);
-		default:
-			break;
-		}
-	} else if (__predict_false(etype == htons(ETHERTYPE_LLDP) &&
-	    ETH64_IS_8021_RSVD(dst))) {
+	if (eh->ether_type == htons(ETHERTYPE_LLDP) &&
+	    ETH64_IS_8021_RSVD(dst)) {
 		/* look at the last nibble of the 802.1 reserved address */
 		switch (dst & 0xf) {
 		case 0x0: /* Nearest Customer Bridge */
 		case 0x3: /* Non-TPMR Bridge */
 		case 0xe: /* Nearest Bridge */
-			p->p_input(p->p_ifp0, m, ns);
-			return (NULL);
+			return (1);
 		default:
 			break;
 		}
+	}
+
+	return (0);
+}
+
+static inline struct mbuf *
+aggr_input_control(struct aggr_port *p, struct mbuf *m, uint64_t dst)
+{
+	struct ether_header *eh;
+	int hlen = sizeof(*eh);
+	unsigned int rx_proto = AGGR_PROTO_RX_LACP;
+	struct ether_slowproto_hdr *sph;
+	int drop = 0;
+
+	if (ISSET(m->m_flags, M_VLANTAG))
+		return (m);
+
+	eh = mtod(m, struct ether_header *);
+	if (__predict_true(eh->ether_type != htons(ETHERTYPE_SLOW) ||
+	    dst != LACP_ADDR_SLOW_E64))
+		return (m);
+
+	hlen += sizeof(*sph);
+	if (m->m_len < hlen) {
+		m = m_pullup(m, hlen);
+		if (m == NULL) {
+			/* short++ */
+			return (NULL);
+		}
+		eh = mtod(m, struct ether_header *);
+	}
+
+	sph = (struct ether_slowproto_hdr *)(eh + 1);
+	switch (sph->sph_subtype) {
+	case SLOWPROTOCOLS_SUBTYPE_LACP_MARKER:
+		rx_proto = AGGR_PROTO_RX_MARKER;
+		/* FALLTHROUGH */
+	case SLOWPROTOCOLS_SUBTYPE_LACP:
+		mtx_enter(&p->p_mtx);
+		p->p_proto_counts[rx_proto].c_pkts++;
+		p->p_proto_counts[rx_proto].c_bytes += m->m_pkthdr.len;
+
+		if (ml_len(&p->p_rxm_ml) < AGGR_MAX_SLOW_PKTS)
+			ml_enqueue(&p->p_rxm_ml, m);
+		else {
+			p->p_rx_drops++;
+			drop = 1;
+		}
+		mtx_leave(&p->p_mtx);
+
+		if (drop)
+			goto drop;
+		else
+			task_add(systq, &p->p_rxm_task);
+		return (NULL);
+	default:
+		break;
 	}
 
 	return (m);
@@ -821,20 +863,23 @@ drop:
 	return (NULL);
 }
 
-static void
-aggr_input(struct ifnet *ifp0, struct mbuf *m, struct netstack *ns)
+static struct mbuf *
+aggr_port_input(struct ifnet *ifp0, struct mbuf *m, uint64_t dst, void *port,
+    struct netstack *ns)
 {
-	struct arpcom *ac0 = (struct arpcom *)ifp0;
-	struct aggr_port *p = ac0->ac_trunkport;
+	struct aggr_port *p = port;
 	struct aggr_softc *sc = p->p_aggr;
 	struct ifnet *ifp = &sc->sc_if;
+
+	if (__predict_false(aggr_is_lldp(m, dst)))
+		return (m);
 
 	if (!ISSET(ifp->if_flags, IFF_RUNNING))
 		goto drop;
 
-	m = aggr_input_control(p, m, ns);
+	m = aggr_input_control(p, m, dst);
 	if (m == NULL)
-		return;
+		return (NULL);
 
 	if (__predict_false(!p->p_collecting))
 		goto drop;
@@ -844,10 +889,11 @@ aggr_input(struct ifnet *ifp0, struct mbuf *m, struct netstack *ns)
 
 	if_vinput(ifp, m, ns);
 
-	return;
+	return (NULL);
 
 drop:
 	m_freem(m);
+	return (NULL);
 }
 
 static int
@@ -1136,6 +1182,8 @@ aggr_add_port(struct aggr_softc *sc, const struct trunk_reqport *rp)
 	struct arpcom *ac0;
 	struct aggr_port *p;
 	struct aggr_multiaddr *ma;
+	struct cpumem_iter cmi;
+	struct refcnt *r;
 	int past = ticks - (hz * LACP_TIMEOUT_FACTOR);
 	int i;
 	int error;
@@ -1168,7 +1216,7 @@ aggr_add_port(struct aggr_softc *sc, const struct trunk_reqport *rp)
 	}
 
 	ac0 = (struct arpcom *)ifp0;
-	if (ac0->ac_trunkport != NULL) {
+	if (SMR_PTR_GET_LOCKED(&ac0->ac_trport) != NULL) {
 		error = EBUSY;
 		goto put;
 	}
@@ -1188,11 +1236,23 @@ aggr_add_port(struct aggr_softc *sc, const struct trunk_reqport *rp)
 	p->p_aggr = sc;
 	p->p_mtu = ifp0->if_mtu;
 	mtx_init(&p->p_mtx, IPL_SOFTNET);
+	refcnt_init(&p->p_refs);
+
+	/* each per cpu refcnt acts as a proxy for the port refcnt */
+	p->p_cpurefs = cpumem_malloc(sizeof(*r), M_DEVBUF);
+	CPUMEM_FOREACH(r, &cmi, p->p_cpurefs) {
+		aggr_port_take(p);
+		refcnt_init(r);
+	}
+
+	p->p_ether_port.ep_input = aggr_port_input;
+	p->p_ether_port.ep_port_take = aggr_cpu_take;
+	p->p_ether_port.ep_port_rele = aggr_cpu_rele;
+	p->p_ether_port.ep_port = p;
 
 	CTASSERT(sizeof(p->p_lladdr) == sizeof(ac0->ac_enaddr));
 	memcpy(p->p_lladdr, ac0->ac_enaddr, sizeof(p->p_lladdr));
 	p->p_ioctl = ifp0->if_ioctl;
-	p->p_input = ifp0->if_input;
 	p->p_output = ifp0->if_output;
 
 	error = aggr_group(sc, p, SIOCADDMULTI);
@@ -1256,16 +1316,16 @@ aggr_add_port(struct aggr_softc *sc, const struct trunk_reqport *rp)
 	aggr_update_capabilities(sc);
 
 	/*
-	 * use (and modification) of ifp->if_input and ac->ac_trunkport
-	 * is protected by NET_LOCK.
+	 * modification of ac->ac_trport is protected by NET_LOCK.
 	 */
 
-	ac0->ac_trunkport = p;
+	KASSERT(SMR_PTR_GET_LOCKED(&ac0->ac_trport) == NULL);
+	aggr_port_take(p); /* for the SMR ptr */
+	SMR_PTR_SET_LOCKED(&ac0->ac_trport, &p->p_ether_port);
 
 	/* make sure p is visible before handlers can run */
 	membar_producer();
 	ifp0->if_ioctl = aggr_p_ioctl;
-	ifp0->if_input = aggr_input;
 	ifp0->if_output = aggr_p_output;
 
 	aggr_mux(sc, p, LACP_MUX_E_BEGIN);
@@ -1291,6 +1351,7 @@ ungroup:
 		    ifp->if_xname, ifp0->if_xname);
 	}
 free:
+	cpumem_free(p->p_cpurefs, M_DEVBUF, sizeof(*r));
 	free(p, M_DEVBUF, sizeof(*p));
 put:
 	if_put(ifp0);
@@ -1399,9 +1460,19 @@ static int
 aggr_p_ioctl(struct ifnet *ifp0, u_long cmd, caddr_t data)
 {
 	struct arpcom *ac0 = (struct arpcom *)ifp0;
-	struct aggr_port *p = ac0->ac_trunkport;
+	const struct ether_port *ep = SMR_PTR_GET_LOCKED(&ac0->ac_trport);
+	struct aggr_port *p;
 	struct ifreq *ifr = (struct ifreq *)data;
 	int error = 0;
+
+	KASSERTMSG(ep != NULL,
+	    "%s: %s called without an ether_port set",
+	    ifp0->if_xname, __func__);
+	KASSERTMSG(ep->ep_input == aggr_port_input,
+	    "%s called %s, but ep_input (%p) seems wrong",
+	    ifp0->if_xname, __func__, ep->ep_input);
+
+	p = ep->ep_port;
 
 	switch (cmd) {
 	case SIOCGTRUNKPORT: {
@@ -1449,8 +1520,10 @@ static int
 aggr_p_output(struct ifnet *ifp0, struct mbuf *m, struct sockaddr *dst,
     struct rtentry *rt)
 {
+	int (*p_output)(struct ifnet *, struct mbuf *, struct sockaddr *,
+	    struct rtentry *) = NULL;
 	struct arpcom *ac0 = (struct arpcom *)ifp0;
-	struct aggr_port *p = ac0->ac_trunkport;
+	const struct ether_port *ep;
 
 	/* restrict transmission to bpf only */
 	if (m_tag_find(m, PACKET_TAG_DLT, NULL) == NULL) {
@@ -1458,7 +1531,20 @@ aggr_p_output(struct ifnet *ifp0, struct mbuf *m, struct sockaddr *dst,
 		return (EBUSY);
 	}
 
-	return ((*p->p_output)(ifp0, m, dst, rt));
+	smr_read_enter();
+	ep = SMR_PTR_GET(&ac0->ac_trport);
+	if (ep != NULL && ep->ep_input == aggr_port_input) {
+		struct aggr_port *p = ep->ep_port;
+		p_output = p->p_output; /* code doesn't go away */
+	}
+	smr_read_leave();
+
+	if (p_output == NULL) {
+		m_freem(m);
+		return (ENXIO);
+	}
+
+	return ((*p_output)(ifp0, m, dst, rt));
 }
 
 static void
@@ -1467,8 +1553,11 @@ aggr_p_dtor(struct aggr_softc *sc, struct aggr_port *p, const char *op)
 	struct ifnet *ifp = &sc->sc_if;
 	struct ifnet *ifp0 = p->p_ifp0;
 	struct arpcom *ac0 = (struct arpcom *)ifp0;
+	struct cpumem_iter cmi;
+	struct refcnt *r;
 	struct aggr_multiaddr *ma;
 	enum aggr_port_selected selected;
+	struct smr_entry smrdtor;
 	int error;
 
 	DPRINTF(sc, "%s %s %s: destroying port\n",
@@ -1486,14 +1575,24 @@ aggr_p_dtor(struct aggr_softc *sc, struct aggr_port *p, const char *op)
 	timeout_del(&p->p_wait_while_timer);
 
 	/*
-	 * use (and modification) of ifp->if_input and ac->ac_trunkport
-	 * is protected by NET_LOCK.
+	 * modification of ac->ac_trport is protected by NET_LOCK.
 	 */
 
-	ac0->ac_trunkport = NULL;
-	ifp0->if_input = p->p_input;
+	NET_ASSERT_LOCKED();
+	KASSERT(SMR_PTR_GET_LOCKED(&ac0->ac_trport) == &p->p_ether_port);
+	smr_init(&smrdtor);
+
 	ifp0->if_ioctl = p->p_ioctl;
 	ifp0->if_output = p->p_output;
+	SMR_PTR_SET_LOCKED(&ac0->ac_trport, NULL);
+
+	/* fold the per cpu refcnt back into the port refcnt */
+	CPUMEM_FOREACH(r, &cmi, p->p_cpurefs)
+		aggr_cpu_rele(r, p);
+
+	/* wait for all the refs to finalize */
+	smr_call(&smrdtor, aggr_port_rele, p);
+	refcnt_finalize(&p->p_refs, "aggrdtor");
 
 #if NKSTAT > 0
 	aggr_port_kstat_detach(p);
@@ -1542,6 +1641,7 @@ aggr_p_dtor(struct aggr_softc *sc, struct aggr_port *p, const char *op)
 	if_detachhook_del(ifp0, &p->p_dhook);
 	if_linkstatehook_del(ifp0, &p->p_lhook);
 	if_put(ifp0);
+	cpumem_free(p->p_cpurefs, M_DEVBUF, sizeof(*r));
 	free(p, M_DEVBUF, sizeof(*p));
 
 	/* XXX this is a pretty ugly place to update this */

@@ -1,4 +1,4 @@
-.\"	$OpenBSD: ifconfig.8,v 1.406 2025/10/21 05:27:04 dlg Exp $
+.\"	$OpenBSD: ifconfig.8,v 1.413 2025/12/03 10:19:27 stsp Exp $
 .\"	$NetBSD: ifconfig.8,v 1.11 1996/01/04 21:27:29 pk Exp $
 .\"     $FreeBSD: ifconfig.8,v 1.16 1998/02/01 07:03:29 steve Exp $
 .\"
@@ -31,7 +31,7 @@
 .\"
 .\"     @(#)ifconfig.8	8.4 (Berkeley) 6/1/94
 .\"
-.Dd $Mdocdate: October 21 2025 $
+.Dd $Mdocdate: December 3 2025 $
 .Dt IFCONFIG 8
 .Os
 .Sh NAME
@@ -1261,7 +1261,8 @@ Set the comma-separated list of allowed authentication and key management
 protocols.
 .Pp
 The supported values are
-.Dq psk
+.Dq psk ,
+.Dq sha256-psk ,
 and
 .Dq 802.1x .
 .Ar psk
@@ -1271,8 +1272,13 @@ authentication (also known as enterprise mode) is used with
 an external IEEE 802.1X authentication server,
 such as wpa_supplicant.
 The default value is
-.Dq psk .
+.Dq psk ,
+or
+.Dq psk,sha256-psk
+if the driver for the interface supports protected management frames (PMF).
 .Dq psk
+and
+.Dq sha256-psk
 can only be used if a pre-shared key is configured using the
 .Cm wpakey
 option.
@@ -1565,7 +1571,7 @@ If configured, disconnect the interface pair.
 .Nm ifconfig
 .Ar pflow-interface
 .Op Oo Fl Oc Ns Cm flowdst Ar addr : Ns Ar port
-.Op Oo Fl Oc Ns Cm flowsrc Ar addr Ns Oo : Ns Ar port Oc
+.Op Oo Fl Oc Ns Cm flowsrc Ar addr Ns Op Pf : Ar port
 .Op Cm pflowproto Ar n
 .Ek
 .nr nS 0
@@ -1586,7 +1592,7 @@ is the port number of the flow collector.
 Pflow data will be sent to this address/port.
 .It Cm -flowdst
 Unset the receiver address and stop sending pflow data.
-.It Cm flowsrc Ar addr Ns Oo : Ns Ar port Oc
+.It Cm flowsrc Ar addr Ns Op Pf : Ar port
 Set the source IP address for pflow packets.
 .Ar addr
 is the IP address used as sender of the UDP packets and may be used to
@@ -2078,7 +2084,7 @@ device will try to establish a data connection with the service provider.
 .Op Cm add Ar child-iface
 .Op Cm addspan Ar child-iface
 .Op Cm del Ar child-iface
-.Op Cm deladdr Ar address
+.Op Cm deladdr Ar address Ns Op Pf @ Ar vid
 .Op Cm delspan Ar child-iface
 .Op Oo Fl Oc Ns Cm discover Ar child-iface
 .Op Cm flushrule Ar interface
@@ -2091,8 +2097,22 @@ device will try to establish a data connection with the service provider.
 .Op Cm rule Ar filtering-rule
 .Op Cm rulefile Ar filename
 .Op Cm rules Ar interface
-.Op Cm static Ar interface Ar address
+.Op Cm static Ar child-iface Ar address Ns Op Pf @ Ar vid
 .Op Cm timeout Ar time
+.Op Cm tagged Ar child-iface Ar vids
+.Op Cm -tagged Ar child-iface
+.Op Cm untagged Ar child-iface Ar vid
+.Op Cm -untagged Ar child-iface
+.Op Cm pvlan Ar vid
+.Op Cm -pvlan Ar vid
+.Op Cm pvlan-isolated Ar vid Ar ivid
+.Op Cm -pvlan-isolated Ar vid Ar ivid
+.Op Cm pvlan-community Ar vid Ar cvid
+.Op Cm -pvlan-community Ar vid Ar cvid
+.Op Cm rxprio Ar prio
+.Op Cm txprio Ar prio
+.Op Cm vnetid Ar vid
+.Op Cm -vnetid
 .Op Cm up
 .Ek
 .nr nS 0
@@ -2112,10 +2132,15 @@ as a span port on the bridge.
 .It Cm del Ar child-iface
 Remove the member
 .Ar child-iface .
-.It Cm deladdr Ar address
+.It Cm deladdr Ar address Ns Op Pf @ Ar vid
 Delete
 .Ar address
+on VLAN
+.Ar vid
 from the cache.
+if
+.Ar vid
+is not specified it uses the default VLAN identifier on the bridge.
 .It Cm delspan Ar child-iface
 Delete
 .Ar child-iface
@@ -2268,11 +2293,19 @@ Load a set of rules from the file
 .It Cm rules Ar interface
 Display the active filtering rules in use on
 .Ar interface .
-.It Cm static Ar interface Ar address
-Add a static entry into the address cache pointing to
-.Ar interface .
-Static entries are never aged out of the cache or replaced, even if the address
-is seen on a different interface.
+.It Cm static Ar child-iface Ar address Ns Op Pf @ Ar vid
+Add a static entry for
+.Ar address
+on VLAN
+.Ar vid
+into the address cache pointing to
+.Ar child-iface .
+If
+.Ar vid
+is not specified it defaults to the VLAN used by untagged packets on
+.Ar child-iface .
+Static entries are never aged out of the cache or replaced, even
+if the address is seen on a different interface.
 .It Cm timeout Ar time
 Set the timeout, in seconds, for addresses in the cache to
 .Ar time .
@@ -2280,6 +2313,117 @@ The default is 240 seconds.
 If
 .Ar time
 is set to zero, then entries will not be expired.
+.It Cm tagged Ar child-iface Ar vids
+Modify the set of VLAN identifiers that can be sent and received
+as VLAN tagged traffic on
+.Ar child-iface
+with the specified
+.Ar vids .
+Multiple VLAN identifiers can specified as comma separated values.
+Each VLAN identifier may be specified as a range with a minimum and
+maximum value separated by a hyphen.
+If
+.Ar vids
+is prefixed with +, -, or =, the identifiers are added to, removed
+from, or replaced with the set respectively.
+Without a prefix the VLAN identifiers are added to the set.
+.\" XXX tagged all|none
+By default the set of tagged VLAN is empty.
+.It Cm -tagged Ar child-iface
+Clear all the VLAN identifiers from the set that can be sent or
+received as VLAN tagged traffic on
+.Ar child-iface .
+This effectively disables VLAN tagged packet handling by the bridge
+on the specified port.
+.It Cm untagged Ar child-iface Ar vid
+Set untagged traffic on
+.Ar child-iface
+to operate in the VLAN specified by
+.Ar vid .
+The
+.Ar vid
+can be specified as
+.Cm passthrough
+to configure the bridge to decline untagged packets on this port
+and return them to the network stack for local processing.
+By default ports are configured with the default VLAN identifier
+configured on the bridge.
+.It Cm -untagged Ar child-iface
+Block untagged traffic on
+.Ar child-iface .
+.It Cm pvlan Ar vid
+Configure a Private VLAN (PVLAN) with
+.Ar vid
+as a primary VLAN identifier.
+.It Cm -pvlan Ar vid
+Remove the Private VLAN identified by the primary VLAN identifier
+.Ar vid .
+.It Cm pvlan-isolated Ar vid Ar ivid
+Configure
+.Ar ivid
+as an isolated VLAN within the Private VLAN identified by the
+primary VLAN identifier
+.Ar vid .
+A PVLAN only supports a single isolated VLAN.
+An isolated VLAN can only be configured if the identifier is not
+in use.
+.It Cm -pvlan-isolated Ar vid Ar ivid
+Remove the isolated VLAN
+.Ar ivid
+from the Private VLAN identified by the
+primary VLAN identifier
+.Ar vid .
+An isolated VLAN can only be removed from the PVLAN if it not in
+use.
+.It Cm pvlan-community Ar vid Ar cvid
+Configure
+.Ar cvid
+as a community VLAN within the Private VLAN identified by the
+primary VLAN identifier
+.Ar vid .
+A community VLAN can only be configured if the identifier is not
+in use.
+.It Cm -pvlan-community Ar vid Ar cvid
+Remove the community VLAN
+.Ar cvid
+from the Private VLAN identified by the
+primary VLAN identifier
+.Ar vid .
+A community VLAN can only be removed from the PVLAN if it not in
+use.
+.It Cm pvptags Ar child-iface
+Configure the
+.Ar child-iface
+port so PVLANs will only use primary VLANs when sending tagged packets.
+.It Cm -pvptags Ar child-iface
+Configure the
+.Ar child-iface
+port so PVLANs will use primary and secondary VLANs when sending
+tagged packets.
+This is the default.
+.It Cm rxprio Ar prio
+Configure the handling of the VLAN priority field in received packets.
+This is compatible with the configuration of
+.Cm rxprio
+on
+.Xr vlan 4
+interfaces.
+.It Cm txprio Ar prio
+Configure the handling of the VLAN priority field in transmitted packets.
+This is compatible with the configuration of
+.Cm txprio
+on
+.Xr vlan 4
+interfaces.
+.It Cm vnetid Ar vid
+Set the default VLAN identifier for untagged packets for ports added
+to the bridge.
+The default is VLAN 1.
+.It Cm -vnetid
+Remove the default VLAN identifier for untagged packets for ports added
+to the bridge.
+Ports added to the bridge will not be able to send or receive packets
+until they are explicitly configured.
 .It Cm up
 Start forwarding packets.
 .El

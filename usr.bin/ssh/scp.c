@@ -1,4 +1,4 @@
-/* $OpenBSD: scp.c,v 1.269 2025/10/13 00:53:51 djm Exp $ */
+/* $OpenBSD: scp.c,v 1.272 2026/02/08 19:54:31 dtucker Exp $ */
 /*
  * scp - secure remote copy.  This is basically patched BSD rcp which
  * uses ssh to do the data transfer (instead of using rcmd).
@@ -72,10 +72,9 @@
  */
 
 #include <sys/types.h>
-#include <sys/poll.h>
-#include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <sys/uio.h>
 
 #include <ctype.h>
@@ -86,6 +85,7 @@
 #include <glob.h>
 #include <libgen.h>
 #include <locale.h>
+#include <poll.h>
 #include <pwd.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -204,7 +204,7 @@ suspchild(int signo)
 static int
 do_local_cmd(arglist *a)
 {
-	u_int i;
+	char *cp;
 	int status;
 	pid_t pid;
 
@@ -212,10 +212,9 @@ do_local_cmd(arglist *a)
 		fatal("do_local_cmd: no arguments");
 
 	if (verbose_mode) {
-		fprintf(stderr, "Executing:");
-		for (i = 0; i < a->num; i++)
-			fmprintf(stderr, " %s", a->list[i]);
-		fprintf(stderr, "\n");
+		cp = argv_assemble(a->num, a->list);
+		fmprintf(stderr, "Executing: %s\n", cp);
+		free(cp);
 	}
 	if ((pid = fork()) == -1)
 		fatal("do_local_cmd: fork: %s", strerror(errno));
@@ -925,7 +924,7 @@ brace_expand(const char *pattern, char ***patternsp, size_t *npatternsp)
 			continue;
 		}
 		/*
-		 * Pattern did not expand; append the finename component to
+		 * Pattern did not expand; append the filename component to
 		 * the completed list
 		 */
 		if ((cp2 = strrchr(cp, '/')) != NULL)

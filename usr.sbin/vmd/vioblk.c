@@ -1,4 +1,4 @@
-/*	$OpenBSD: vioblk.c,v 1.25 2025/10/20 19:21:59 dv Exp $	*/
+/*	$OpenBSD: vioblk.c,v 1.27 2026/01/14 03:09:05 dv Exp $	*/
 
 /*
  * Copyright (c) 2023 Dave Voutila <dv@openbsd.org>
@@ -33,7 +33,6 @@
 #include "virtio.h"
 #include "vmd.h"
 
-extern char *__progname;
 extern struct vmd_vm *current_vm;
 struct iovec io_v[VIRTIO_QUEUE_SIZE_MAX];
 
@@ -66,7 +65,6 @@ vioblk_main(int fd, int fd_vmm)
 	struct vioblk_dev	*vioblk = NULL;
 	struct viodev_msg 	 msg;
 	struct vmd_vm		 vm;
-	struct vm_create_params	*vcp;
 	ssize_t			 sz;
 	off_t			 szp = 0;
 	int			 i, ret, type;
@@ -110,11 +108,10 @@ vioblk_main(int fd, int fd_vmm)
 		log_warnx("failed to receive vm details");
 		goto fail;
 	}
-	vcp = &vm.vm_params.vmc_params;
 	current_vm = &vm;
 
-	setproctitle("%s/vioblk%d", vcp->vcp_name, vioblk->idx);
-	log_procinit("vm/%s/vioblk%d", vcp->vcp_name, vioblk->idx);
+	setproctitle("%s/vioblk%d", vm.vm_params.vmc_name, vioblk->idx);
+	log_procinit("vm/%s/vioblk%d", vm.vm_params.vmc_name, vioblk->idx);
 
 	/* Now that we have our vm information, we can remap memory. */
 	ret = remap_guest_mem(&vm, fd_vmm);
@@ -179,7 +176,8 @@ vioblk_main(int fd, int fd_vmm)
 	imsg_event_add(&dev.sync_iev);
 
 	/* Send a ready message over the sync channel. */
-	log_debug("%s: telling vm %s device is ready", __func__, vcp->vcp_name);
+	log_debug("%s: telling vm %s device is ready", __func__,
+	    vm.vm_params.vmc_name);
 	memset(&msg, 0, sizeof(msg));
 	msg.type = VIODEV_MSG_READY;
 	imsg_compose_event(&dev.sync_iev, IMSG_DEVOP_MSG, 0, 0, -1, &msg,

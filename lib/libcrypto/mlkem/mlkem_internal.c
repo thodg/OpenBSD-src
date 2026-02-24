@@ -1,4 +1,4 @@
-/* $OpenBSD: mlkem_internal.c,v 1.3 2025/09/16 06:12:04 tb Exp $ */
+/* $OpenBSD: mlkem_internal.c,v 1.6 2026/01/18 08:49:42 tb Exp $ */
 /*
  * Copyright (c) 2024, Google Inc.
  * Copyright (c) 2024, 2025 Bob Beck <beck@obtuse.com>
@@ -103,7 +103,7 @@ encoded_vector_size(uint16_t rank)
 static inline size_t
 compressed_vector_size(uint16_t rank)
 {
-	return ((rank == RANK768) ? kDU768 : kDU1024) * rank * DEGREE / 8;
+	return ((rank == MLKEM768_RANK) ? kDU768 : kDU1024) * rank * DEGREE / 8;
 }
 
 typedef struct scalar {
@@ -615,7 +615,7 @@ scalar_encode_1(uint8_t out[32], const scalar *s)
 }
 
 /*
- * Encodes an entire vector into 32*|RANK768|*|bits| bytes. Note that since 256
+ * Encodes an entire vector into 32*|MLKEM768_RANK|*|bits| bytes. Since 256
  * (DEGREE) is divisible by 8, the individual vector entries will always fill a
  * whole number of bytes, so we do not need to worry about bit packing here.
  */
@@ -707,7 +707,7 @@ scalar_decode_1(scalar *out, const uint8_t in[32])
 }
 
 /*
- * Decodes 32*|RANK768|*|bits| bytes from |in| into |out|. It returns one on
+ * Decodes 32*|MLKEM768_RANK|*|bits| bytes from |in| into |out|. It returns one on
  * success or zero if any parsed value is >= |kPrime|.
  */
 static int
@@ -831,7 +831,7 @@ public_key_from_external(const MLKEM_public_key *external,
 	uint8_t *bytes = external->key_768->bytes;
 	size_t offset = 0;
 
-	if (external->rank == RANK1024)
+	if (external->rank == MLKEM1024_RANK)
 		bytes = external->key_1024->bytes;
 
 	pub->t = (struct scalar *)bytes + offset;
@@ -858,7 +858,7 @@ private_key_from_external(const MLKEM_private_key *external,
 	size_t offset = 0;
 	uint8_t *bytes = external->key_768->bytes;
 
-	if (external->rank == RANK1024)
+	if (external->rank == MLKEM1024_RANK)
 		bytes = external->key_1024->bytes;
 
 	priv->pub.t = (struct scalar *)(bytes + offset);
@@ -875,30 +875,12 @@ private_key_from_external(const MLKEM_private_key *external,
 	offset += 32;
 }
 
-/*
- * Calls |mlkem_generate_key_external_entropy| with random bytes from
- * |RAND_bytes|.
- */
-int
-mlkem_generate_key(uint8_t *out_encoded_public_key,
-    uint8_t optional_out_seed[MLKEM_SEED_LENGTH],
-    MLKEM_private_key *out_private_key)
-{
-	uint8_t entropy_buf[MLKEM_SEED_LENGTH];
-	uint8_t *entropy = optional_out_seed != NULL ? optional_out_seed :
-	    entropy_buf;
-
-	arc4random_buf(entropy, MLKEM_SEED_LENGTH);
-	return mlkem_generate_key_external_entropy(out_encoded_public_key,
-	    out_private_key, entropy);
-}
-
 int
 mlkem_private_key_from_seed(const uint8_t *seed, size_t seed_len,
     MLKEM_private_key *out_private_key)
 {
 	uint8_t *public_key_buf = NULL;
-	size_t public_key_buf_len = out_private_key->rank == RANK768 ?
+	size_t public_key_buf_len = out_private_key->rank == MLKEM768_RANK ?
 	    MLKEM768_PUBLIC_KEY_BYTES : MLKEM1024_PUBLIC_KEY_BYTES;
 	int ret = 0;
 
@@ -937,7 +919,7 @@ mlkem_generate_key_external_entropy(uint8_t *out_encoded_public_key,
 	uint8_t *rho, *sigma;
 	uint8_t counter = 0;
 	uint8_t hashed[64];
-	scalar error[RANK1024];
+	scalar error[MLKEM1024_RANK];
 	CBB cbb;
 	int ret = 0;
 
@@ -961,7 +943,7 @@ mlkem_generate_key_external_entropy(uint8_t *out_encoded_public_key,
 	vector_add(priv.pub.t, &error[0], out_private_key->rank);
 
 	if (!CBB_init_fixed(&cbb, out_encoded_public_key,
-	    out_private_key->rank == RANK768 ? MLKEM768_PUBLIC_KEY_BYTES :
+	    out_private_key->rank == MLKEM768_RANK ? MLKEM768_PUBLIC_KEY_BYTES :
 	    MLKEM1024_PUBLIC_KEY_BYTES))
 		goto err;
 
@@ -970,7 +952,7 @@ mlkem_generate_key_external_entropy(uint8_t *out_encoded_public_key,
 		goto err;
 
 	hash_h(priv.pub.public_key_hash, out_encoded_public_key,
-	    out_private_key->rank == RANK768 ? MLKEM768_PUBLIC_KEY_BYTES :
+	    out_private_key->rank == MLKEM768_RANK ? MLKEM768_PUBLIC_KEY_BYTES :
 	    MLKEM1024_PUBLIC_KEY_BYTES);
 	memcpy(priv.fo_failure_secret, entropy + 32, 32);
 
@@ -978,6 +960,10 @@ mlkem_generate_key_external_entropy(uint8_t *out_encoded_public_key,
 
  err:
 	CBB_cleanup(&cbb);
+	explicit_bzero(&priv, sizeof(priv));
+	explicit_bzero(augmented_seed, sizeof(augmented_seed));
+	explicit_bzero(error, sizeof(error));
+	explicit_bzero(hashed, sizeof(hashed));
 
 	return ret;
 }
@@ -987,12 +973,12 @@ mlkem_public_from_private(const MLKEM_private_key *private_key,
     MLKEM_public_key *out_public_key)
 {
 	switch (private_key->rank) {
-	case RANK768:
+	case MLKEM768_RANK:
 		memcpy(out_public_key->key_768->bytes,
 		    private_key->key_768->bytes,
 		    sizeof(out_public_key->key_768->bytes));
 		break;
-	case RANK1024:
+	case MLKEM1024_RANK:
 		memcpy(out_public_key->key_1024->bytes,
 		    private_key->key_1024->bytes,
 		    sizeof(out_public_key->key_1024->bytes));
@@ -1010,7 +996,7 @@ encrypt_cpa(uint8_t *out, const struct public_key *pub,
     const uint8_t message[32], const uint8_t randomness[32],
     size_t rank)
 {
-	scalar secret[RANK1024], error[RANK1024], u[RANK1024];
+	scalar secret[MLKEM1024_RANK], error[MLKEM1024_RANK], u[MLKEM1024_RANK];
 	scalar expanded_message, scalar_error;
 	uint8_t counter = 0;
 	uint8_t input[33];
@@ -1018,7 +1004,7 @@ encrypt_cpa(uint8_t *out, const struct public_key *pub,
 	int u_bits = kDU768;
 	int v_bits = kDV768;
 
-	if (rank == RANK1024) {
+	if (rank == MLKEM1024_RANK) {
 		u_bits = kDU1024;
 		v_bits = kDV1024;
 	}
@@ -1042,19 +1028,11 @@ encrypt_cpa(uint8_t *out, const struct public_key *pub,
 	vector_encode(out, &u[0], u_bits, rank);
 	scalar_compress(&v, v_bits);
 	scalar_encode(out + compressed_vector_size(rank), &v, v_bits);
-}
 
-/* Calls mlkem_encap_external_entropy| with random bytes */
-void
-mlkem_encap(const MLKEM_public_key *public_key,
-    uint8_t *out_ciphertext,
-    uint8_t out_shared_secret[MLKEM_SHARED_SECRET_LENGTH])
-{
-	uint8_t entropy[MLKEM_ENCAP_ENTROPY];
-
-	arc4random_buf(entropy, MLKEM_ENCAP_ENTROPY);
-	mlkem_encap_external_entropy(out_ciphertext,
-	    out_shared_secret, public_key, entropy);
+	explicit_bzero(secret, sizeof(secret));
+	explicit_bzero(error, sizeof(error));
+	explicit_bzero(u, sizeof(u));
+	explicit_bzero(input, sizeof(input));
 }
 
 /* See section 6.2 of the spec. */
@@ -1076,18 +1054,21 @@ mlkem_encap_external_entropy(uint8_t *out_ciphertext,
 	encrypt_cpa(out_ciphertext, &pub, entropy, key_and_randomness + 32,
 	    public_key->rank);
 	memcpy(out_shared_secret, key_and_randomness, 32);
+
+	explicit_bzero(key_and_randomness, sizeof(key_and_randomness));
+	explicit_bzero(input, sizeof(input));
 }
 
 static void
 decrypt_cpa(uint8_t out[32], const struct private_key *priv,
     const uint8_t *ciphertext, size_t rank)
 {
-	scalar u[RANK1024];
+	scalar u[MLKEM1024_RANK];
 	scalar mask, v;
 	int u_bits = kDU768;
 	int v_bits = kDV768;
 
-	if (rank == RANK1024) {
+	if (rank == MLKEM1024_RANK) {
 		u_bits = kDU1024;
 		v_bits = kDV1024;
 	}
@@ -1101,6 +1082,8 @@ decrypt_cpa(uint8_t out[32], const struct private_key *priv,
 	scalar_sub(&v, &mask);
 	scalar_compress(&v, 1);
 	scalar_encode_1(out, &v);
+
+	explicit_bzero(u, sizeof(u));
 }
 
 /* See section 6.3 */
@@ -1109,7 +1092,7 @@ mlkem_decap(const MLKEM_private_key *private_key, const uint8_t *ciphertext,
     size_t ciphertext_len, uint8_t out_shared_secret[MLKEM_SHARED_SECRET_LENGTH])
 {
 	struct private_key priv;
-	size_t expected_ciphertext_length = private_key->rank == RANK768 ?
+	size_t expected_ciphertext_length = private_key->rank == MLKEM768_RANK ?
 	    MLKEM768_CIPHERTEXT_BYTES : MLKEM1024_CIPHERTEXT_BYTES;
 	uint8_t *expected_ciphertext = NULL;
 	uint8_t key_and_randomness[64];
@@ -1149,6 +1132,8 @@ mlkem_decap(const MLKEM_private_key *private_key, const uint8_t *ciphertext,
 
  err:
 	freezero(expected_ciphertext, expected_ciphertext_length);
+	explicit_bzero(key_and_randomness, sizeof(key_and_randomness));
+	explicit_bzero(decrypted, sizeof(decrypted));
 
 	return ret;
 }
@@ -1161,7 +1146,7 @@ mlkem_marshal_public_key(const MLKEM_public_key *public_key,
 	int ret = 0;
 	CBB cbb;
 
-	if (!CBB_init(&cbb, public_key->rank == RANK768 ?
+	if (!CBB_init(&cbb, public_key->rank == MLKEM768_RANK ?
 	    MLKEM768_PUBLIC_KEY_BYTES : MLKEM1024_PUBLIC_KEY_BYTES))
 		goto err;
 	public_key_from_external(public_key, &pub);
@@ -1223,7 +1208,7 @@ mlkem_marshal_private_key(const MLKEM_private_key *private_key,
     uint8_t **out_private_key, size_t *out_private_key_len)
 {
 	struct private_key priv;
-	size_t key_length = private_key->rank == RANK768 ?
+	size_t key_length = private_key->rank == MLKEM768_RANK ?
 	    MLKEM768_PRIVATE_KEY_BYTES : MLKEM1024_PRIVATE_KEY_BYTES;
 	CBB cbb;
 	int ret = 0;
@@ -1249,6 +1234,7 @@ mlkem_marshal_private_key(const MLKEM_private_key *private_key,
 
  err:
 	CBB_cleanup(&cbb);
+	explicit_bzero(&priv, sizeof(priv));
 
 	return ret;
 }
@@ -1259,28 +1245,34 @@ mlkem_parse_private_key(const uint8_t *input, size_t input_len,
 {
 	struct private_key priv;
 	CBS cbs, s_bytes;
+	int ret = 0;
 
 	private_key_from_external(out_private_key, &priv);
 	CBS_init(&cbs, input, input_len);
 
 	if (!CBS_get_bytes(&cbs, &s_bytes,
 	    encoded_vector_size(out_private_key->rank)))
-		return 0;
+		goto err;
 	if (!vector_decode(priv.s, CBS_data(&s_bytes), kLog2Prime,
 	    out_private_key->rank))
-		return 0;
+		goto err;
 	if (!mlkem_parse_public_key_no_hash(&priv.pub, &cbs,
 	    out_private_key->rank))
-		return 0;
+		goto err;
 
 	memcpy(priv.pub.public_key_hash, CBS_data(&cbs), 32);
 	if (!CBS_skip(&cbs, 32))
-		return 0;
+		goto err;
 	memcpy(priv.fo_failure_secret, CBS_data(&cbs), 32);
 	if (!CBS_skip(&cbs, 32))
-		return 0;
+		goto err;
 	if (CBS_len(&cbs) != 0)
-		return 0;
+		goto err;
 
-	return 1;
+	ret = 1;
+
+ err:
+	explicit_bzero(&priv, sizeof(priv));
+
+	return ret;
 }

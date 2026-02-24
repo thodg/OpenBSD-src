@@ -1,4 +1,4 @@
-/*	$OpenBSD: output_ometric.c,v 1.14 2025/02/20 19:48:14 claudio Exp $ */
+/*	$OpenBSD: output_ometric.c,v 1.24 2026/02/13 18:27:40 claudio Exp $ */
 
 /*
  * Copyright (c) 2022 Claudio Jeker <claudio@openbsd.org>
@@ -49,6 +49,7 @@ struct ometric *peer_rr_borr_transmit, *peer_rr_borr_receive;
 struct ometric *peer_rr_eorr_transmit, *peer_rr_eorr_receive;
 struct ometric *rde_mem_size, *rde_mem_count, *rde_mem_ref_count;
 struct ometric *rde_set_size, *rde_set_count, *rde_table_count;
+struct ometric *rde_evloop_count, *rde_evloop_time;
 
 struct timespec start_time, end_time;
 
@@ -87,9 +88,8 @@ ometric_head(struct parse_result *arg)
 	 */
 	peer_info = ometric_new(OMT_INFO, "bgpd_peer",
 	    "peer information");
-	peer_state = ometric_new_state(statenames,
-	    sizeof(statenames) / sizeof(statenames[0]), "bgpd_peer_state",
-	    "peer session state");
+	peer_state = ometric_new_state(statenames, nitems(statenames),
+	    "bgpd_peer_state", "peer session state");
 	peer_state_raw = ometric_new(OMT_GAUGE, "bgpd_peer_state_raw",
 	    "peer session state raw int value");
 	peer_last_change = ometric_new(OMT_GAUGE,
@@ -167,6 +167,11 @@ ometric_head(struct parse_result *arg)
 	    "bgpd_rde_set_usage_objects", "number of object in set");
 	rde_table_count = ometric_new(OMT_GAUGE,
 	    "bgpd_rde_set_usage_tables", "number of as_set tables");
+
+	rde_evloop_count = ometric_new(OMT_COUNTER,
+	    "bgpd_rde_evloop", "number of times the evloop ran");
+	rde_evloop_time = ometric_new(OMT_COUNTER,
+	    "bgpd_rde_evloop_seconds", "RDE evloop time usage");
 }
 
 static void
@@ -176,14 +181,18 @@ ometric_neighbor_stats(struct peer *p, struct parse_result *arg)
 	const char *keys[5] = {
 	    "remote_addr", "remote_as", "description", "group", NULL };
 	const char *values[5];
+	char *descr;
 
 	/* skip neighbor templates */
 	if (p->conf.template)
 		return;
 
+	descr = fmt_peer(p->conf.descr, &p->conf.remote_addr,
+	    p->conf.remote_masklen);
+
 	values[0] = log_addr(&p->conf.remote_addr);
 	values[1] = log_as(p->conf.remote_as);
-	values[2] = p->conf.descr;
+	values[2] = descr;
 	values[3] = p->conf.group;
 	values[4] = NULL;
 
@@ -249,6 +258,7 @@ ometric_neighbor_stats(struct peer *p, struct parse_result *arg)
 	ometric_set_int(peer_rr_eorr_receive, p->stats.refresh_rcvd_eorr, ol);
 
 	olabels_free(ol);
+	free(descr);
 }
 
 static void
@@ -283,6 +293,15 @@ ometric_rib_mem(struct rde_memstats *stats)
 	    stats->rib_cnt * sizeof(struct rib_entry), UINT64_MAX);
 	ometric_rib_mem_element("prefix", stats->prefix_cnt,
 	    stats->prefix_cnt * sizeof(struct prefix), UINT64_MAX);
+	ometric_rib_mem_element("adjout_prefix", stats->adjout_prefix_cnt,
+	    stats->adjout_prefix_size, UINT64_MAX);
+	ometric_rib_mem_element("pend_attr", stats->pend_attr_cnt,
+	    stats->pend_attr_cnt * sizeof(struct pend_attr), UINT64_MAX);
+	ometric_rib_mem_element("pend_prefix", stats->pend_prefix_cnt,
+	    stats->pend_prefix_cnt * sizeof(struct pend_prefix), UINT64_MAX);
+	ometric_rib_mem_element("adjout_attr", stats->adjout_attr_cnt,
+	    stats->adjout_attr_cnt * sizeof(struct adjout_attr),
+	    stats->adjout_attr_refs);
 	ometric_rib_mem_element("rde_aspath", stats->path_cnt,
 	    stats->path_cnt * sizeof(struct rde_aspath),
 	    stats->path_refs);
@@ -299,10 +318,21 @@ ometric_rib_mem(struct rde_memstats *stats)
 
 	ometric_rib_mem_element("total", UINT64_MAX,
 	    pts + stats->prefix_cnt * sizeof(struct prefix) +
+	    stats->adjout_prefix_cnt * sizeof(struct adjout_prefix) +
+	    stats->adjout_attr_cnt * sizeof(struct adjout_attr) +
+	    stats->pend_prefix_cnt * sizeof(struct pend_prefix) +
+	    stats->pend_attr_cnt * sizeof(struct pend_attr) +
 	    stats->rib_cnt * sizeof(struct rib_entry) +
 	    stats->path_cnt * sizeof(struct rde_aspath) +
 	    stats->aspath_size + stats->attr_cnt * sizeof(struct attr) +
 	    stats->attr_data, UINT64_MAX);
+
+	ometric_rib_mem_element("filter", stats->filter_cnt,
+	    stats->filter_size, stats->filter_refs);
+	ometric_rib_mem_element("filter_set", stats->filter_set_cnt,
+	    stats->filter_set_size, stats->filter_set_refs);
+	ometric_rib_mem_element("filter_total", UINT64_MAX,
+	    stats->filter_size + stats->filter_set_size, UINT64_MAX);
 
 	ometric_set_int(rde_table_count, stats->aset_cnt, NULL);
 
@@ -316,6 +346,29 @@ ometric_rib_mem(struct rde_memstats *stats)
 	    OKV("type"), OKV("prefix_set"), NULL);
 	ometric_rib_mem_element("set_total", UINT64_MAX,
 	    stats->aset_size + stats->pset_size, UINT64_MAX);
+
+	ometric_set_int(rde_evloop_count, stats->rde_event_loop_count, NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_loop_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("main"), NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_io_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("io"), NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_peer_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("peer"), NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_adjout_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("adjout"), NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_ribdump_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("ribdumps"), NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_nexthop_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("nexthop"), NULL);
+	ometric_set_float_with_labels(rde_evloop_time,
+	    (double)stats->rde_event_update_usec / (1000.0 * 1000.0) ,
+	    OKV("stage"), OKV("update"), NULL);
 }
 
 static void

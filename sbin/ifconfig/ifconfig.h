@@ -1,4 +1,4 @@
-/*	$OpenBSD: ifconfig.h,v 1.7 2025/10/21 05:14:22 dlg Exp $	*/
+/*	$OpenBSD: ifconfig.h,v 1.9 2025/11/21 04:44:26 dlg Exp $	*/
 
 /*
  * Copyright (c) 2009 Claudio Jeker <claudio@openbsd.org>
@@ -31,6 +31,8 @@ void setlearn(const char *, int);
 void unsetlearn(const char *, int);
 void setlocked(const char *, int);
 void unsetlocked(const char *, int);
+void setpvptags(const char *, int);
+void unsetpvptags(const char *, int);
 void setstp(const char *, int);
 void unsetstp(const char *, int);
 void setedge(const char *, int);
@@ -55,11 +57,22 @@ void bridge_delendpoint(const char *, int);
 void bridge_deladdr(const char *, int);
 void bridge_maxaddr(const char *, int);
 void bridge_addrs(const char *, int);
+void bridge_vaddrs(const char *, int);
 void bridge_hellotime(const char *, int);
 void bridge_fwddelay(const char *, int);
 void bridge_maxage(const char *, int);
 void bridge_protect(const char *, const char *);
 void bridge_unprotect(const char *, int);
+void bridge_pvid(const char *, const char *);
+void bridge_unpvid(const char *, int);
+void bridge_set_vidmap(const char *, const char *);
+void bridge_unset_vidmap(const char *, int);
+void bridge_pvlan_primary(const char *, int);
+void bridge_unpvlan_primary(const char *, int);
+void bridge_pvlan_isolated(const char *, const char *);
+void bridge_unpvlan_isolated(const char *, const char *);
+void bridge_pvlan_community(const char *, const char *);
+void bridge_unpvlan_community(const char *, const char *);
 void bridge_proto(const char *, int);
 void bridge_ifprio(const char *, const char *);
 void bridge_ifcost(const char *, const char *);

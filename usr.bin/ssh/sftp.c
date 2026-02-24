@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp.c,v 1.247 2025/10/13 00:54:29 djm Exp $ */
+/* $OpenBSD: sftp.c,v 1.250 2026/02/11 17:01:34 dtucker Exp $ */
 /*
  * Copyright (c) 2001-2004 Damien Miller <djm@openbsd.org>
  *
@@ -17,10 +17,10 @@
 
 #include <sys/types.h>
 #include <sys/ioctl.h>
-#include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/statvfs.h>
+#include <sys/wait.h>
 
 #include <ctype.h>
 #include <errno.h>
@@ -28,6 +28,7 @@
 #include <histedit.h>
 #include <paths.h>
 #include <libgen.h>
+#include <limits.h>
 #include <locale.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -35,7 +36,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
-#include <limits.h>
 #include <util.h>
 
 #include "xmalloc.h"
@@ -2204,6 +2204,7 @@ interactive_loop(struct sftp_conn *conn, char *file1, char *file2)
 	char *remote_path;
 	char *dir = NULL, *startdir = NULL;
 	char cmd[2048];
+	const char *editor;
 	int err, interactive;
 	EditLine *el = NULL;
 	History *hl = NULL;
@@ -2239,6 +2240,10 @@ interactive_loop(struct sftp_conn *conn, char *file1, char *file2)
 		el_set(el, EL_BIND, "\\e\\e[D", "ed-prev-word", NULL);
 		/* make ^w match ksh behaviour */
 		el_set(el, EL_BIND, "^w", "ed-delete-prev-word", NULL);
+
+		/* el_source() may have changed EL_EDITOR to vi */
+		if (el_get(el, EL_EDITOR, &editor) == 0 && editor[0] == 'v')
+			el_set(el, EL_BIND, "^[", "vi-command-mode", NULL);
 	}
 
 	if ((remote_path = sftp_realpath(conn, ".")) == NULL)

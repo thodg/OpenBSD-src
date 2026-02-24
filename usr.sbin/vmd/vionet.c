@@ -1,4 +1,4 @@
-/*	$OpenBSD: vionet.c,v 1.27 2025/10/20 19:22:00 dv Exp $	*/
+/*	$OpenBSD: vionet.c,v 1.29 2026/01/14 03:09:05 dv Exp $	*/
 
 /*
  * Copyright (c) 2023 Dave Voutila <dv@openbsd.org>
@@ -54,7 +54,6 @@
 #define RXQ	0
 #define TXQ	1
 
-extern char *__progname;
 extern struct vmd_vm *current_vm;
 
 struct packet {
@@ -113,7 +112,6 @@ vionet_main(int fd, int fd_vmm)
 	struct vionet_dev	*vionet = NULL;
 	struct viodev_msg 	 msg;
 	struct vmd_vm	 	 vm;
-	struct vm_create_params	*vcp;
 	ssize_t			 sz;
 	int			 ret;
 
@@ -155,10 +153,9 @@ vionet_main(int fd, int fd_vmm)
 		log_warnx("failed to receive vm details");
 		goto fail;
 	}
-	vcp = &vm.vm_params.vmc_params;
 	current_vm = &vm;
-	setproctitle("%s/vionet%d", vcp->vcp_name, vionet->idx);
-	log_procinit("vm/%s/vionet%d", vcp->vcp_name, vionet->idx);
+	setproctitle("%s/vionet%d", vm.vm_params.vmc_name, vionet->idx);
+	log_procinit("vm/%s/vionet%d", vm.vm_params.vmc_name, vionet->idx);
 
 	/* Now that we have our vm information, we can remap memory. */
 	ret = remap_guest_mem(&vm, fd_vmm);
@@ -239,7 +236,8 @@ vionet_main(int fd, int fd_vmm)
 	imsg_event_add2(&dev.sync_iev, ev_base_main);
 
 	/* Send a ready message over the sync channel. */
-	log_debug("%s: telling vm %s device is ready", __func__, vcp->vcp_name);
+	log_debug("%s: telling vm %s device is ready", __func__,
+	    vm.vm_params.vmc_name);
 	memset(&msg, 0, sizeof(msg));
 	msg.type = VIODEV_MSG_READY;
 	imsg_compose_event2(&dev.sync_iev, IMSG_DEVOP_MSG, 0, 0, -1, &msg,
@@ -1085,8 +1083,7 @@ vionet_cfg_write(struct virtio_dev *dev, struct viodev_msg *msg)
 			pci_cfg->device_feature_select = data;
 		break;
 	case VIO1_PCI_DEVICE_FEATURE:
-		log_warnx("%s: illegal write to device feature "
-		    "register", __progname);
+		log_warnx("illegal write to device feature register");
 		break;
 	case VIO1_PCI_DRIVER_FEATURE_SELECT:
 		if (sz != 4)
@@ -1122,8 +1119,7 @@ vionet_cfg_write(struct virtio_dev *dev, struct viodev_msg *msg)
 		/* Ignore until we support MSIX. */
 		break;
 	case VIO1_PCI_NUM_QUEUES:
-		log_warnx("%s: illegal write to num queues register",
-		    __progname);
+		log_warnx("illegal write to num queues register");
 		break;
 	case VIO1_PCI_DEVICE_STATUS:
 		if (sz != 1) {
@@ -1169,8 +1165,7 @@ vionet_cfg_write(struct virtio_dev *dev, struct viodev_msg *msg)
 		    "[failed]" : "");
 		break;
 	case VIO1_PCI_CONFIG_GENERATION:
-		log_warnx("%s: illegal write to config generation "
-		    "register", __progname);
+		log_warnx("illegal write to config generation register");
 		break;
 	case VIO1_PCI_QUEUE_SELECT:
 		pci_cfg->queue_select = data;
@@ -1193,8 +1188,7 @@ vionet_cfg_write(struct virtio_dev *dev, struct viodev_msg *msg)
 		virtio_update_qa(dev);
 		break;
 	case VIO1_PCI_QUEUE_NOTIFY_OFF:
-		log_warnx("%s: illegal write to queue notify offset "
-		    "register", __progname);
+		log_warnx("illegal write to queue notify offset register");
 		break;
 	case VIO1_PCI_QUEUE_DESC:
 		if (sz != 4) {

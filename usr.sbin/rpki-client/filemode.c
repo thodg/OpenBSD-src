@@ -1,4 +1,4 @@
-/*	$OpenBSD: filemode.c,v 1.71 2025/10/23 05:16:55 tb Exp $ */
+/*	$OpenBSD: filemode.c,v 1.82 2026/02/15 17:55:14 job Exp $ */
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -152,7 +152,7 @@ parse_load_cert(char *uri)
 		goto done;
 	}
 
-	cert = cert_parse(uri, f, flen);
+	cert = cert_parse_filemode(uri, f, flen);
 	free(f);
 
 	if (cert == NULL)
@@ -261,8 +261,7 @@ parse_load_ta(struct tal *tal)
 	}
 
 	/* Extract certificate data. */
-	cert = cert_parse(file, f, flen);
-	cert = ta_parse(file, cert, tal->pkey, tal->pkeysz);
+	cert = cert_parse_ta(file, f, flen, tal->spki, tal->spkisz);
 	if (cert == NULL)
 		goto out;
 
@@ -283,28 +282,28 @@ out:
 static struct tal *
 find_tal(struct cert *cert)
 {
-	EVP_PKEY	*pk, *opk;
+	EVP_PKEY	*cert_pkey, *tal_pkey;
 	struct tal	*tal;
 	int		 i;
 
-	if ((opk = X509_get0_pubkey(cert->x509)) == NULL)
+	if ((cert_pkey = X509_get0_pubkey(cert->x509)) == NULL)
 		return NULL;
 
 	for (i = 0; i < TALSZ_MAX; i++) {
-		const unsigned char *pkey;
+		const unsigned char *spki;
 
 		if (talobj[i] == NULL)
 			break;
 		tal = talobj[i];
-		pkey = tal->pkey;
-		pk = d2i_PUBKEY(NULL, &pkey, tal->pkeysz);
-		if (pk == NULL)
+		spki = tal->spki;
+		tal_pkey = d2i_PUBKEY(NULL, &spki, tal->spkisz);
+		if (tal_pkey == NULL)
 			continue;
-		if (EVP_PKEY_cmp(pk, opk) == 1) {
-			EVP_PKEY_free(pk);
+		if (EVP_PKEY_cmp(cert_pkey, tal_pkey) == 1) {
+			EVP_PKEY_free(tal_pkey);
 			return tal;
 		}
-		EVP_PKEY_free(pk);
+		EVP_PKEY_free(tal_pkey);
 	}
 	return NULL;
 }
@@ -342,7 +341,7 @@ rtype_from_der(const char *fn, const unsigned char *der, size_t len)
 	const unsigned char	*p;
 	enum rtype		 rtype = RTYPE_INVALID;
 
-	/* Does der parse as a CMS signed object? */
+	/* Does der parse as a CMS ContentInfo? Is it a known signed object? */
 	p = der;
 	if ((cms = d2i_CMS_ContentInfo(NULL, &p, len)) != NULL) {
 		const ASN1_OBJECT *obj;
@@ -369,8 +368,6 @@ rtype_from_der(const char *fn, const unsigned char *der, size_t len)
 			rtype = RTYPE_ASPA;
 		else if (OBJ_cmp(obj, mft_oid) == 0)
 			rtype = RTYPE_MFT;
-		else if (OBJ_cmp(obj, gbr_oid) == 0)
-			rtype = RTYPE_GBR;
 		else if (OBJ_cmp(obj, roa_oid) == 0)
 			rtype = RTYPE_ROA;
 		else if (OBJ_cmp(obj, rsc_oid) == 0)
@@ -398,9 +395,9 @@ rtype_from_der(const char *fn, const unsigned char *der, size_t len)
 	}
 
 	/*
-	 * We could add some heuristics for recognizing TALs and geofeed by
-	 * looking for things like "rsync://" and "MII" or "RPKI Signature"
-	 * using memmem(3). If we do this, we should also rename the function.
+	 * We could add some heuristics for recognizing TALs by looking for
+	 * things like "rsync://" and "MII" or "RPKI Signature" using memmem(3).
+	 * If we do this, we should also rename the function.
 	 */
 
  out:
@@ -415,15 +412,14 @@ rtype_from_der(const char *fn, const unsigned char *der, size_t len)
  * Parse file passed with -f option.
  */
 static void
-proc_parser_file(char *file, unsigned char *buf, size_t len)
+proc_parser_file(char *file, unsigned char *in_buf, size_t len)
 {
+	unsigned char *buf = in_buf;
 	static int num;
 	struct aspa *aspa = NULL;
 	struct cert *cert = NULL;
 	struct ccr *ccr = NULL;
 	struct crl *crl = NULL;
-	struct gbr *gbr = NULL;
-	struct geofeed *geofeed = NULL;
 	struct mft *mft = NULL;
 	struct roa *roa = NULL;
 	struct rsc *rsc = NULL;
@@ -458,6 +454,28 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 			warn("parse file %s", file);
 			return;
 		}
+	}
+
+	if (rtype_from_file_extension(file) == RTYPE_GZ) {
+		unsigned char *full_buf = NULL;
+		size_t full_len;
+		char *gz_ext;
+
+		if ((full_buf = inflate_buffer(buf, len, &full_len)) == NULL) {
+			warnx("%s: gzip decompression failed", file);
+			goto out;
+		}
+		if (buf != in_buf)
+			free(buf);
+		buf = full_buf;
+		len = full_len;
+
+		/* zap trailing .gz */
+		if ((gz_ext = strrchr(file, '.')) == NULL) {
+			warnx("%s: unreachable: missing . in filename?", file);
+			goto out;
+		}
+		*gz_ext = '\0';
 	}
 
 	if (!EVP_Digest(buf, len, filehash, NULL, EVP_sha256(), NULL))
@@ -497,7 +515,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		ccr_print(ccr);
 		break;
 	case RTYPE_CER:
-		cert = cert_parse(file, buf, len);
+		cert = cert_parse_filemode(file, buf, len);
 		if (cert == NULL)
 			break;
 		is_ta = (cert->purpose == CERT_PURPOSE_TA);
@@ -520,24 +538,6 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		expires = &mft->expires;
 		notbefore = &mft->thisupdate;
 		notafter = &mft->nextupdate;
-		break;
-	case RTYPE_GBR:
-		gbr = gbr_parse(&cert, file, -1, buf, len);
-		if (gbr == NULL)
-			break;
-		aia = cert->aia;
-		expires = &gbr->expires;
-		notbefore = &cert->notbefore;
-		notafter = &cert->notafter;
-		break;
-	case RTYPE_GEOFEED:
-		geofeed = geofeed_parse(&cert, file, -1, buf, len);
-		if (geofeed == NULL)
-			break;
-		aia = cert->aia;
-		expires = &geofeed->expires;
-		notbefore = &cert->notbefore;
-		notafter = &cert->notafter;
 		break;
 	case RTYPE_ROA:
 		roa = roa_parse(&cert, file, -1, buf, len);
@@ -596,9 +596,6 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 			case RTYPE_ASPA:
 				status = aspa->valid;
 				break;
-			case RTYPE_GEOFEED:
-				status = geofeed->valid;
-				break;
 			case RTYPE_ROA:
 				status = roa->valid;
 				break;
@@ -619,7 +616,7 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 		expires = NULL;
 		notafter = NULL;
 		if ((tal = find_tal(cert)) != NULL) {
-			cert = ta_parse(file, cert, tal->pkey, tal->pkeysz);
+			cert = ta_validate(file, cert, tal->spki, tal->spkisz);
 			status = (cert != NULL);
 			if (status) {
 				expires = &cert->expires;
@@ -648,12 +645,6 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 			break;
 		case RTYPE_CER:
 			cert_print(cert);
-			break;
-		case RTYPE_GBR:
-			gbr_print(cert, gbr);
-			break;
-		case RTYPE_GEOFEED:
-			geofeed_print(cert, geofeed);
 			break;
 		case RTYPE_MFT:
 			mft_print(cert, mft);
@@ -729,12 +720,12 @@ proc_parser_file(char *file, unsigned char *buf, size_t len)
 	}
 
  out:
+	if (buf != in_buf)
+		free(buf);
 	aspa_free(aspa);
 	cert_free(cert);
 	ccr_free(ccr);
 	crl_free(crl);
-	gbr_free(gbr);
-	geofeed_free(geofeed);
 	mft_free(mft);
 	roa_free(roa);
 	rsc_free(rsc);

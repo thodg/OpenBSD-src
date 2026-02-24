@@ -1,4 +1,4 @@
-/*	$OpenBSD: pf.c,v 1.1218 2025/07/07 02:28:50 jsg Exp $ */
+/*	$OpenBSD: pf.c,v 1.1236 2026/02/05 03:26:00 dlg Exp $ */
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -49,6 +49,7 @@
 #include <sys/pool.h>
 #include <sys/proc.h>
 #include <sys/rwlock.h>
+#include <sys/percpu.h>
 #include <sys/syslog.h>
 
 #include <crypto/sha2.h>
@@ -101,6 +102,7 @@ struct pf_queuehead	*pf_queues_active;
 struct pf_queuehead	*pf_queues_inactive;
 
 struct pf_status	 pf_status;
+static struct cpumem	*pf_status_fcounters;
 
 struct mutex		 pf_inp_mtx = MUTEX_INITIALIZER(IPL_SOFTNET);
 
@@ -125,6 +127,7 @@ struct pf_test_ctx {
 	int			  icmp_dir;
 	int			  state_icmp;
 	int			  tag;
+	int			  limiter_drop;
 	u_short			  reason;
 	struct pf_rule_item	 *ri;
 	struct pf_src_node	 *sns[PF_SN_MAX];
@@ -137,11 +140,16 @@ struct pf_test_ctx {
 	struct pf_ruleset	 *arsm;
 	struct pf_ruleset	 *aruleset;
 	struct tcphdr		 *th;
+	struct pf_statelim	 *statelim;
+	struct pf_sourcelim	 *sourcelim;
+	struct pf_source	 *source;
 };
 
 struct pool		 pf_src_tree_pl, pf_rule_pl, pf_queue_pl;
 struct pool		 pf_state_pl, pf_state_key_pl, pf_state_item_pl;
 struct pool		 pf_rule_item_pl, pf_sn_item_pl, pf_pktdelay_pl;
+struct pool		 pf_statelim_pl, pf_sourcelim_pl, pf_source_pl;
+struct pool		 pf_state_link_pl;
 
 void			 pf_add_threshold(struct pf_threshold *);
 int			 pf_check_threshold(struct pf_threshold *);
@@ -182,7 +190,7 @@ static __inline int	 pf_create_state(struct pf_pdesc *, struct pf_rule *,
 			    struct pf_state_key **, struct pf_state_key **,
 			    int *, struct pf_state **, int,
 			    struct pf_rule_slist *, struct pf_rule_actions *,
-			    struct pf_src_node **);
+			    struct pf_src_node **, struct pf_test_ctx *);
 static __inline int	 pf_state_key_addr_setup(struct pf_pdesc *, void *,
 			    int, struct pf_addr *, int, struct pf_addr *,
 			    int, int);
@@ -192,6 +200,8 @@ int			 pf_tcp_track_full(struct pf_pdesc *,
 			    struct pf_state **, u_short *, int *, int);
 int			 pf_tcp_track_sloppy(struct pf_pdesc *,
 			    struct pf_state **, u_short *);
+static __inline int	 pf_synproxy_ack(struct pf_rule *, struct pf_pdesc *,
+			    struct pf_state **, struct pf_rule_actions *);
 static __inline int	 pf_synproxy(struct pf_pdesc *, struct pf_state **,
 			    u_short *);
 int			 pf_test_state(struct pf_pdesc *, struct pf_state **,
@@ -294,6 +304,280 @@ static __inline void pf_cksum_uncover(u_int16_t *, u_int16_t, u_int8_t);
 static __inline void pf_cksum_cover(u_int16_t *, u_int16_t, u_int8_t);
 #endif /* INET6 */
 static __inline void pf_set_protostate(struct pf_state *, int, u_int8_t);
+
+static inline int
+pf_statelim_id_cmp(const struct pf_statelim *a, const struct pf_statelim *b)
+{
+	if (a->pfstlim_id > b->pfstlim_id)
+		return (1);
+	if (a->pfstlim_id < b->pfstlim_id)
+		return (-1);
+
+	return (0);
+}
+
+RBT_GENERATE(pf_statelim_id_tree, pf_statelim, pfstlim_id_tree,
+    pf_statelim_id_cmp);
+
+static inline int
+pf_statelim_nm_cmp(const struct pf_statelim *a, const struct pf_statelim *b)
+{
+	return (strncmp(a->pfstlim_nm, b->pfstlim_nm, sizeof(a->pfstlim_nm)));
+}
+
+RBT_GENERATE(pf_statelim_nm_tree, pf_statelim, pfstlim_nm_tree,
+    pf_statelim_nm_cmp);
+
+struct pf_statelim_id_tree pf_statelim_id_tree_active =
+    RBT_INITIALIZER(pf_statelim_id_tree_active);
+struct pf_statelim_list pf_statelim_list_active =
+    TAILQ_HEAD_INITIALIZER(pf_statelim_list_active);
+
+struct pf_statelim_id_tree pf_statelim_id_tree_inactive =
+    RBT_INITIALIZER(pf_statelim_id_tree_inactive);
+struct pf_statelim_nm_tree pf_statelim_nm_tree_inactive =
+    RBT_INITIALIZER(pf_statelim_nm_tree_inactive);
+struct pf_statelim_list pf_statelim_list_inactive =
+    TAILQ_HEAD_INITIALIZER(pf_statelim_list_inactive);
+
+static inline int
+pf_sourcelim_id_cmp(const struct pf_sourcelim *a, const struct pf_sourcelim *b)
+{
+	if (a->pfsrlim_id > b->pfsrlim_id)
+		return (1);
+	if (a->pfsrlim_id < b->pfsrlim_id)
+		return (-1);
+
+	return (0);
+}
+
+RBT_GENERATE(pf_sourcelim_id_tree, pf_sourcelim, pfsrlim_id_tree,
+    pf_sourcelim_id_cmp);
+
+static inline int
+pf_sourcelim_nm_cmp(const struct pf_sourcelim *a, const struct pf_sourcelim *b)
+{
+	return (strncmp(a->pfsrlim_nm, b->pfsrlim_nm, sizeof(a->pfsrlim_nm)));
+}
+
+RBT_GENERATE(pf_sourcelim_nm_tree, pf_sourcelim, pfsrlim_nm_tree,
+    pf_sourcelim_nm_cmp);
+
+static inline int
+pf_source_cmp(const struct pf_source *a, const struct pf_source *b)
+{
+	if (a->pfsr_af > b->pfsr_af)
+		return (1);
+	if (a->pfsr_af < b->pfsr_af)
+		return (-1);
+	if (a->pfsr_rdomain > b->pfsr_rdomain)
+		return (1);
+	if (a->pfsr_rdomain < b->pfsr_rdomain)
+		return (-1);
+
+	return (pf_addr_compare(&a->pfsr_addr, &b->pfsr_addr, a->pfsr_af));
+}
+
+RBT_GENERATE(pf_source_tree, pf_source, pfsr_tree, pf_source_cmp);
+
+static inline int
+pf_source_ioc_cmp(const struct pf_source *a, const struct pf_source *b)
+{
+	size_t i;
+
+	if (a->pfsr_af > b->pfsr_af)
+		return (1);
+	if (a->pfsr_af < b->pfsr_af)
+		return (-1);
+	if (a->pfsr_rdomain > b->pfsr_rdomain)
+		return (1);
+	if (a->pfsr_rdomain < b->pfsr_rdomain)
+		return (-1);
+
+	for (i = 0; i < nitems(a->pfsr_addr.addr32); i++) {
+		uint32_t wa = ntohl(a->pfsr_addr.addr32[i]);
+		uint32_t wb = ntohl(b->pfsr_addr.addr32[i]);
+
+		if (wa > wb)
+			return (1);
+		if (wa < wb)
+			return (-1);
+	}
+
+	return (0);
+}
+
+RBT_GENERATE(pf_source_ioc_tree, pf_source, pfsr_ioc_tree, pf_source_ioc_cmp);
+
+struct pf_sourcelim_id_tree pf_sourcelim_id_tree_active =
+    RBT_INITIALIZER(pf_sourcelim_id_tree_active);
+struct pf_sourcelim_list pf_sourcelim_list_active =
+    TAILQ_HEAD_INITIALIZER(pf_sourcelim_list_active);
+
+struct pf_sourcelim_id_tree pf_sourcelim_id_tree_inactive =
+    RBT_INITIALIZER(pf_sourcelim_id_tree_inactive);
+struct pf_sourcelim_nm_tree pf_sourcelim_nm_tree_inactive =
+    RBT_INITIALIZER(pf_sourcelim_nm_tree_inactive);
+struct pf_sourcelim_list pf_sourcelim_list_inactive =
+    TAILQ_HEAD_INITIALIZER(pf_sourcelim_list_inactive);
+
+static inline struct pf_statelim *
+pf_statelim_find(uint32_t id)
+{
+	struct pf_statelim key;
+
+	/* only the id is used in cmp, so don't have to zero all the things */
+	key.pfstlim_id = id;
+
+	return (RBT_FIND(pf_statelim_id_tree,
+	    &pf_statelim_id_tree_active, &key));
+}
+
+static inline struct pf_sourcelim *
+pf_sourcelim_find(uint32_t id)
+{
+	struct pf_sourcelim key;
+
+	/* only the id is used in cmp, so don't have to zero all the things */
+	key.pfsrlim_id = id;
+
+	return (RBT_FIND(pf_sourcelim_id_tree,
+	    &pf_sourcelim_id_tree_active, &key));
+}
+
+struct pf_source_list pf_source_gc = TAILQ_HEAD_INITIALIZER(pf_source_gc);
+
+static void
+pf_source_purge(void)
+{
+	struct pf_source *sr, *nsr;
+	time_t now = getuptime();
+
+	TAILQ_FOREACH_SAFE(sr, &pf_source_gc, pfsr_empty_gc, nsr) {
+		struct pf_sourcelim *srlim = sr->pfsr_parent;
+
+		if (now <= sr->pfsr_empty_ts + srlim->pfsrlim_rate.seconds + 1)
+			continue;
+
+		TAILQ_REMOVE(&pf_source_gc, sr, pfsr_empty_gc);
+
+		RBT_REMOVE(pf_source_tree, &srlim->pfsrlim_sources, sr);
+		RBT_REMOVE(pf_source_ioc_tree, &srlim->pfsrlim_ioc_sources, sr);
+		srlim->pfsrlim_nsources--;
+
+		pool_put(&pf_source_pl, sr);
+	}
+}
+
+static void
+pf_source_pfr_addr(struct pfr_addr *p, const struct pf_source *sr)
+{
+	struct pf_sourcelim *srlim = sr->pfsr_parent;
+
+	memset(p, 0, sizeof(*p));
+
+	p->pfra_af = sr->pfsr_af;
+	switch (sr->pfsr_af) {
+	case AF_INET:
+		p->pfra_net = srlim->pfsrlim_ipv4_prefix;
+		p->pfra_ip4addr = sr->pfsr_addr.v4;
+		break;
+#ifdef INET6
+	case AF_INET6:
+		p->pfra_net = srlim->pfsrlim_ipv6_prefix;
+		p->pfra_ip6addr = sr->pfsr_addr.v6;
+		break;
+#endif /* INET6 */
+	}
+}
+
+static void
+pf_source_used(struct pf_source *sr)
+{
+	struct pf_sourcelim *srlim = sr->pfsr_parent;
+	struct pfr_ktable *t;
+	unsigned int used;
+
+	used = sr->pfsr_inuse++;
+	sr->pfsr_rate_ts += srlim->pfsrlim_rate_token;
+
+	if (used == 0)
+		TAILQ_REMOVE(&pf_source_gc, sr, pfsr_empty_gc);
+	else if ((t = srlim->pfsrlim_overload.table) != NULL &&
+	    used >= srlim->pfsrlim_overload.hwm && !sr->pfsr_intable) {
+		struct pfr_addr p;
+
+		pf_source_pfr_addr(&p, sr);
+		
+		pfr_insert_kentry(t, &p, gettime());
+		sr->pfsr_intable = 1;
+	}
+}
+
+static void
+pf_source_rele(struct pf_source *sr)
+{
+	struct pf_sourcelim *srlim = sr->pfsr_parent;
+	struct pfr_ktable *t;
+	unsigned int used;
+
+	used = --sr->pfsr_inuse;
+
+	t = srlim->pfsrlim_overload.table;
+	if (t != NULL && sr->pfsr_intable &&
+	    used < srlim->pfsrlim_overload.lwm) {
+		struct pfr_addr p;
+
+		pf_source_pfr_addr(&p, sr);
+
+		pfr_remove_kentry(t, &p);
+		sr->pfsr_intable = 0;
+	}
+
+	if (used == 0) {
+		TAILQ_INSERT_TAIL(&pf_source_gc, sr, pfsr_empty_gc);
+		sr->pfsr_empty_ts = getuptime() + srlim->pfsrlim_rate.seconds;
+	}
+}
+
+static inline void
+pf_source_key(struct pf_sourcelim *srlim, struct pf_source *key,
+    sa_family_t af, unsigned int rdomain, const struct pf_addr *addr)
+{
+	size_t i;
+
+	/* only af+addr is used for lookup. */
+	key->pfsr_af = af;
+	key->pfsr_rdomain = rdomain;
+	switch (af) {
+	case AF_INET:
+		key->pfsr_addr.addr32[0] =
+		    srlim->pfsrlim_ipv4_mask.v4.s_addr &
+		    addr->v4.s_addr;
+
+		for (i = 1; i < nitems(key->pfsr_addr.addr32); i++)
+			key->pfsr_addr.addr32[i] = htonl(0);
+		break;
+#ifdef INET6
+	case AF_INET6:
+		for (i = 0; i < nitems(key->pfsr_addr.addr32); i++) {
+			key->pfsr_addr.addr32[i] =
+			    srlim->pfsrlim_ipv6_mask.addr32[i] & 
+			    addr->addr32[i];
+		}
+		break;
+#endif
+	default:
+		unhandled_af(af);
+		/* NOTREACHED */
+	}
+}
+
+static inline struct pf_source *
+pf_source_find(struct pf_sourcelim *srlim, const struct pf_source *key)
+{
+	return (RBT_FIND(pf_source_tree, &srlim->pfsrlim_sources, key));
+}
 
 struct pf_src_tree tree_src_tracking;
 
@@ -1032,8 +1316,11 @@ pf_state_insert(struct pfi_kif *kif, struct pf_state_key **skwp,
 
 	if (same) {
 		/* pf_state_key_attach might have swapped skw */
-		pf_state_key_unref(sks);
-		st->key[PF_SK_STACK] = sks = pf_state_key_ref(skw);
+		if (skw != sks) {
+			pf_state_key_unref(sks);
+			sks = pf_state_key_ref(skw);
+		}
+		st->key[PF_SK_STACK] = sks;
 	} else if (pf_state_key_attach(sks, st, PF_SK_STACK) == NULL) {
 		pf_state_key_detach(st, PF_SK_WIRE);
 		PF_STATE_EXIT_WRITE();
@@ -1056,7 +1343,7 @@ pf_state_insert(struct pfi_kif *kif, struct pf_state_key **skwp,
 		return (-1);
 	}
 	pf_state_list_insert(&pf_state_list, st);
-	pf_status.fcounters[FCNT_STATE_INSERT]++;
+	counters_inc(pf_status_fcounters, FCNT_STATE_INSERT);
 	pf_status.states++;
 	pfi_kif_ref(kif, PFI_KIF_REF_STATE);
 	PF_STATE_EXIT_WRITE();
@@ -1074,7 +1361,7 @@ pf_state_insert(struct pfi_kif *kif, struct pf_state_key **skwp,
 struct pf_state *
 pf_find_state_byid(struct pf_state_cmp *key)
 {
-	pf_status.fcounters[FCNT_STATE_SEARCH]++;
+	counters_inc(pf_status_fcounters, FCNT_STATE_SEARCH);
 
 	return (RBT_FIND(pf_state_tree_id, &tree_id, (struct pf_state *)key));
 }
@@ -1120,8 +1407,9 @@ pf_find_state(struct pf_pdesc *pd, struct pf_state_key_cmp *key,
 	struct pf_state_key	*sk, *pkt_sk;
 	struct pf_state_item	*si;
 	struct pf_state		*st = NULL;
+	int			 didx;
 
-	pf_status.fcounters[FCNT_STATE_SEARCH]++;
+	counters_inc(pf_status_fcounters, FCNT_STATE_SEARCH);
 	if (pf_status.debug >= LOG_DEBUG) {
 		log(LOG_DEBUG, "pf: key search, %s on %s: ",
 		    pd->dir == PF_OUT ? "out" : "in", pd->kif->pfik_name);
@@ -1184,20 +1472,38 @@ pf_find_state(struct pf_pdesc *pd, struct pf_state_key_cmp *key,
 	if (pd->dir == PF_OUT)
 		pf_pkt_addr_changed(pd->m);
 
+	didx = (pd->dir == PF_IN) ? PF_SK_WIRE : PF_SK_STACK;
+
 	/* list is sorted, if-bound states before floating ones */
 	TAILQ_FOREACH(si, &sk->sk_states, si_entry) {
 		struct pf_state *sist = si->si_st;
-		if (sist->timeout != PFTM_PURGE &&
-		    (sist->kif == pfi_all || sist->kif == pd->kif) &&
-		    ((sist->key[PF_SK_WIRE]->af == sist->key[PF_SK_STACK]->af &&
-		      sk == (pd->dir == PF_IN ? sist->key[PF_SK_WIRE] :
-		    sist->key[PF_SK_STACK])) ||
-		    (sist->key[PF_SK_WIRE]->af != sist->key[PF_SK_STACK]->af
-		    && pd->dir == PF_IN && (sk == sist->key[PF_SK_STACK] ||
-		    sk == sist->key[PF_SK_WIRE])))) {
-			st = sist;
-			break;
+		if (sist->timeout == PFTM_PURGE)
+			continue;
+		if (sist->kif != pfi_all && sist->kif != pd->kif)
+			continue;
+
+		/* af-to needs to handled specially */
+		if (sist->key[PF_SK_WIRE]->af == sist->key[PF_SK_STACK]->af) {
+			if (sk != sist->key[didx])
+				continue;
+
+		/* af-to case */
+		} else {
+			/*
+			 * af-to creates state for incoming (PF_IN)
+			 * connections, and then forces forwarding without
+			 * creating an outgoing state. this means the one
+			 * state covers both sides of the stack, so should
+			 * only match when pd dir is PF_IN.
+			 */
+			if (pd->dir != PF_IN)
+				continue;
+
+			/* one of the st keys has to be sk */
 		}
+
+		st = sist;
+		break;
 	}
 
 	if (st == NULL)
@@ -1222,7 +1528,7 @@ pf_find_state_all(struct pf_state_key_cmp *key, u_int dir, int *more)
 	struct pf_state_key	*sk;
 	struct pf_state_item	*si, *ret = NULL;
 
-	pf_status.fcounters[FCNT_STATE_SEARCH]++;
+	counters_inc(pf_status_fcounters, FCNT_STATE_SEARCH);
 
 	sk = RBT_FIND(pf_state_tree, &pf_statetbl, (struct pf_state_key *)key);
 
@@ -1660,6 +1966,7 @@ pf_purge(void *null)
 	PF_LOCK();
 
 	pf_purge_expired_src_nodes();
+	pf_source_purge();
 
 	PF_UNLOCK();
 
@@ -1762,6 +2069,8 @@ pf_src_tree_remove_state(struct pf_state *st)
 void
 pf_remove_state(struct pf_state *st)
 {
+	struct pf_state_link *pfl;
+
 	PF_ASSERT_LOCKED();
 
 	mtx_enter(&st->mtx);
@@ -1787,6 +2096,65 @@ pf_remove_state(struct pf_state *st)
 	}
 	if (st->key[PF_SK_STACK]->proto == IPPROTO_TCP)
 		pf_set_protostate(st, PF_PEER_BOTH, TCPS_CLOSED);
+
+	while ((pfl = SLIST_FIRST(&st->linkage)) != NULL) {
+		struct pf_state_link_list *list;
+		unsigned int gen;
+
+		SLIST_REMOVE_HEAD(&st->linkage, pfl_linkage);
+
+		switch (pfl->pfl_type) {
+		case PF_STATE_LINK_TYPE_STATELIM: {
+			struct pf_statelim *stlim;
+
+			stlim = pf_statelim_find(st->statelim);
+			KASSERTMSG(stlim != NULL,
+			    "pf_state %p pfl %p cannot find statelim %u",
+			    st, pfl, st->statelim);
+
+			gen = pf_statelim_enter(stlim);
+			stlim->pfstlim_inuse--;
+			pf_statelim_leave(stlim, gen);
+
+			list = &stlim->pfstlim_states;
+			break;
+		}
+		case PF_STATE_LINK_TYPE_SOURCELIM: {
+			struct pf_sourcelim *srlim;
+			struct pf_source key, *sr;
+
+			srlim = pf_sourcelim_find(st->sourcelim);
+			KASSERTMSG(srlim != NULL,
+			    "pf_state %p pfl %p cannot find sourcelim %u",
+			    st, pfl, st->sourcelim);
+
+			pf_source_key(srlim, &key,
+			    st->key[PF_SK_WIRE]->af,
+			    st->key[PF_SK_WIRE]->rdomain,
+			    &st->key[PF_SK_WIRE]->addr[0 /* XXX or 1? */]);
+
+			sr = pf_source_find(srlim, &key);
+			KASSERTMSG(sr != NULL,
+			    "pf_state %p pfl %p cannot find source in %u",
+			    st, pfl, st->sourcelim);
+
+			gen = pf_sourcelim_enter(srlim);
+			srlim->pfsrlim_counters.inuse--;
+			pf_sourcelim_leave(srlim, gen);
+			pf_source_rele(sr);
+
+			list = &sr->pfsr_states;
+			break;
+		}
+		default:
+			panic("%s: unexpected link type on pfl %p",
+			    __func__, pfl);
+		}
+
+		PF_STATE_ASSERT_LOCKED();
+		TAILQ_REMOVE(list, pfl, pfl_link);
+		pool_put(&pf_state_link_pl, pfl);
+	}
 
 	RBT_REMOVE(pf_state_tree_id, &tree_id, st);
 #if NPFLOW > 0
@@ -1883,7 +2251,7 @@ pf_free_state(struct pf_state *st)
 	if (st->tag)
 		pf_tag_unref(st->tag);
 	pf_state_unref(st);
-	pf_status.fcounters[FCNT_STATE_REMOVALS]++;
+	counters_inc(pf_status_fcounters, FCNT_STATE_REMOVALS);
 	pf_status.states--;
 }
 
@@ -3569,25 +3937,24 @@ int
 pf_match_rcvif(struct mbuf *m, struct pf_rule *r)
 {
 	struct ifnet *ifp;
-#if NCARP > 0
-	struct ifnet *ifp0;
-#endif
-	struct pfi_kif *kif;
+	struct pfi_kif *kif = NULL;
 
-	ifp = if_get(m->m_pkthdr.ph_ifidx);
-	if (ifp == NULL)
+	if (m->m_pkthdr.ph_ifidx == 0)
 		return (0);
 
-#if NCARP > 0
-	if (ifp->if_type == IFT_CARP &&
-	    (ifp0 = if_get(ifp->if_carpdevidx)) != NULL) {
-		kif = (struct pfi_kif *)ifp0->if_pf_kif;
-		if_put(ifp0);
-	} else
-#endif /* NCARP */
+	smr_read_enter();
+	ifp = if_get_smr(m->m_pkthdr.ph_ifidx);
+	if (ifp != NULL) {
 		kif = (struct pfi_kif *)ifp->if_pf_kif;
-
-	if_put(ifp);
+#if NCARP > 0
+		if (ifp->if_type == IFT_CARP) {
+			struct ifnet *ifp0 = if_get_smr(ifp->if_carpdevidx);
+			if (ifp0 != NULL)
+				kif = (struct pfi_kif *)ifp0->if_pf_kif;
+		}
+#endif /* NCARP */
+	}
+	smr_read_leave();
 
 	if (kif == NULL) {
 		DPFPRINTF(LOG_ERR,
@@ -4091,6 +4458,11 @@ pf_match_rule(struct pf_test_ctx *ctx, struct pf_ruleset *ruleset)
 enter_ruleset:
 	r = TAILQ_FIRST(ruleset->rules.active.ptr);
 	while (r != NULL) {
+		struct pf_statelim *stlim = NULL;
+		struct pf_sourcelim *srlim = NULL;
+		struct pf_source *sr = NULL;
+		unsigned int gen;
+
 		PF_TEST_ATTRIB(r->rule_flag & PFRULE_EXPIRED,
 		    TAILQ_NEXT(r, entries));
 		r->evaluations++;
@@ -4222,6 +4594,157 @@ enter_ruleset:
 		    ctx->pd->m->m_pkthdr.pf.prio),
 			TAILQ_NEXT(r, entries));
 
+		if (r->statelim.id != PF_STATELIM_ID_NONE) {
+			stlim = pf_statelim_find(r->statelim.id);
+
+			/*
+			 * Treat a missing limiter like an exhausted limiter.
+			 * There is no "backend" to get a resource out of
+			 * so the rule can't create state.
+			 */
+			PF_TEST_ATTRIB(stlim == NULL,
+				TAILQ_NEXT(r, entries));
+
+			/*
+			 * An overcommitted pool means this rule
+			 * can't create state.
+			 */
+			if (stlim->pfstlim_inuse >= stlim->pfstlim_limit) {
+				gen = pf_statelim_enter(stlim);
+				stlim->pfstlim_counters.hardlimited++;
+				pf_statelim_leave(stlim, gen);
+				if (r->statelim.limiter_action == PF_LIMITER_BLOCK) {
+					ctx->limiter_drop = 1;
+					REASON_SET(&ctx->reason, PFRES_MAXSTATES);
+					break;	/* stop rule processing */
+				}
+
+				r = TAILQ_NEXT(r, entries);
+				continue;
+			}
+
+			/*
+			 * Is access to the pool rate limited?
+			 */
+			if (stlim->pfstlim_rate.limit != 0) {
+				uint64_t ts = getnsecuptime();
+				uint64_t diff = ts - stlim->pfstlim_rate_ts;
+
+				if (diff < stlim->pfstlim_rate_token) {
+					gen = pf_statelim_enter(stlim);
+					stlim->pfstlim_counters.ratelimited++;
+					pf_statelim_leave(stlim, gen);
+					if (r->statelim.limiter_action ==
+					    PF_LIMITER_BLOCK) {
+						ctx->limiter_drop = 1;
+						REASON_SET(&ctx->reason,
+						    PFRES_MAXSTATES);
+						/* stop rule processing */
+						break;
+					}
+					r = TAILQ_NEXT(r, entries);
+					continue;
+				}
+
+				if (diff > stlim->pfstlim_rate_bucket) {
+					stlim->pfstlim_rate_ts =
+					    ts - stlim->pfstlim_rate_bucket;
+				}
+			}
+		}
+
+		if (r->sourcelim.id != PF_SOURCELIM_ID_NONE) {
+			struct pf_source key;
+
+			srlim = pf_sourcelim_find(r->sourcelim.id);
+
+			/*
+			 * Treat a missing pool like an overcommitted pool.
+			 * There is no "backend" to get a resource out of
+			 * so the rule can't create state.
+			 */
+			PF_TEST_ATTRIB(srlim == NULL,
+				TAILQ_NEXT(r, entries));
+
+			pf_source_key(srlim, &key,
+			    ctx->pd->af, ctx->pd->rdomain, ctx->pd->src);
+			sr = pf_source_find(srlim, &key);
+			if (sr != NULL) {
+				/*
+				 * An overcommitted limiter means this rule
+				 * can't create state.
+				 */
+				if (sr->pfsr_inuse >= srlim->pfsrlim_limit) {
+					sr->pfsr_counters.hardlimited++;
+					gen = pf_sourcelim_enter(srlim);
+					srlim->pfsrlim_counters.hardlimited++;
+					pf_sourcelim_leave(srlim, gen);
+					if (r->sourcelim.limiter_action ==
+					    PF_LIMITER_BLOCK) {
+						ctx->limiter_drop = 1;
+						REASON_SET(&ctx->reason,
+						    PFRES_SRCLIMIT);
+						/* stop rule processing */
+						break;
+					}
+					r = TAILQ_NEXT(r, entries);
+					continue;
+				}
+
+				/*
+				 * Is access to the pool rate limited?
+				 */
+				if (srlim->pfsrlim_rate.limit != 0) {
+					uint64_t ts = getnsecuptime();
+					uint64_t diff = ts - sr->pfsr_rate_ts;
+
+					if (diff < srlim->pfsrlim_rate_token) {
+						sr->pfsr_counters.ratelimited++;
+						gen = pf_sourcelim_enter(srlim);
+						srlim->pfsrlim_counters.ratelimited++;
+						pf_sourcelim_leave(srlim, gen);
+						if (r->sourcelim.limiter_action ==
+						    PF_LIMITER_BLOCK) {
+							ctx->limiter_drop = 1;
+							REASON_SET(&ctx->reason,
+							    PFRES_SRCLIMIT);
+							/* stop rules */
+							break;
+						}
+						r = TAILQ_NEXT(r, entries);
+						continue;
+					}
+
+					if (diff > srlim->pfsrlim_rate_bucket) {
+						sr->pfsr_rate_ts = ts -
+						    srlim->pfsrlim_rate_bucket;
+					}
+				}
+			} else {
+				/*
+				 * a new source entry will (should)
+				 * admit a state.
+				 */
+
+				if (srlim->pfsrlim_nsources >=
+				    srlim->pfsrlim_entries) {
+					gen = pf_sourcelim_enter(srlim);
+					srlim->pfsrlim_counters.addrlimited++;
+					pf_sourcelim_leave(srlim, gen);
+					if (r->sourcelim.limiter_action ==
+					    PF_LIMITER_BLOCK) {
+						ctx->limiter_drop = 1;
+						REASON_SET(&ctx->reason,
+							    PFRES_SRCLIMIT);
+						/* stop rules processing */
+						break;
+					}
+					r = TAILQ_NEXT(r, entries);
+					continue;
+				}
+			}
+		}
+
 		/* must be last! */
 		if (r->pktrate.limit) {
 			pf_add_threshold(&r->pktrate);
@@ -4291,6 +4814,13 @@ enter_ruleset:
 				 * ruleset, where anchor belongs to.
 				 */
 				ctx->arsm = ctx->aruleset;
+				/*
+				 * state/source pools
+				 */
+
+				ctx->statelim = stlim;
+				ctx->sourcelim = srlim;
+				ctx->source = sr;
 			}
 
 #if NPFLOG > 0
@@ -4337,7 +4867,7 @@ next_rule:
 	    &target) == 0) {
 
 		/* stop if any rule matched within quick anchors. */
-		if (r->quick == PF_TEST_QUICK && *ctx->am == r)
+		if (r->quick && *ctx->am == r)
 			return (PF_TEST_QUICK);
 
 		switch (target) {
@@ -4417,10 +4947,8 @@ pf_test_rule(struct pf_pdesc *pd, struct pf_rule **rm, struct pf_state **sm,
 
 	ruleset = &pf_main_ruleset;
 	rv = pf_match_rule(&ctx, ruleset);
-	if (rv == PF_TEST_FAIL) {
-		/*
-		 * Reason has been set in pf_match_rule() already.
-		 */
+	if (rv == PF_TEST_FAIL || ctx.limiter_drop == 1) {
+		REASON_SET(reason, ctx.reason);
 		goto cleanup;
 	}
 
@@ -4520,10 +5048,19 @@ pf_test_rule(struct pf_pdesc *pd, struct pf_rule **rm, struct pf_state **sm,
 		}
 
 		action = pf_create_state(pd, r, a, ctx.nr, &skw, &sks,
-		    &rewrite, sm, ctx.tag, &ctx.rules, &ctx.act, ctx.sns);
+		    &rewrite, sm, ctx.tag, &ctx.rules, &ctx.act, ctx.sns,
+		    &ctx);
 
 		if (action != PF_PASS)
 			goto cleanup;
+
+		if (pd->proto == IPPROTO_TCP &&
+		    r->keep_state == PF_STATE_SYNPROXY && pd->dir == PF_IN) {
+			action = pf_synproxy_ack(r, pd, sm, &ctx.act);
+			if (action != PF_PASS)
+				return (action); /* PF_SYNPROXY_DROP */
+		}
+
 		if (sks != skw) {
 			struct pf_state_key	*sk;
 
@@ -4587,9 +5124,14 @@ static __inline int
 pf_create_state(struct pf_pdesc *pd, struct pf_rule *r, struct pf_rule *a,
     struct pf_rule *nr, struct pf_state_key **skw, struct pf_state_key **sks,
     int *rewrite, struct pf_state **sm, int tag, struct pf_rule_slist *rules,
-    struct pf_rule_actions *act, struct pf_src_node *sns[PF_SN_MAX])
+    struct pf_rule_actions *act, struct pf_src_node *sns[PF_SN_MAX],
+    struct pf_test_ctx *ctx)
 {
 	struct pf_state		*st = NULL;
+	struct pf_statelim	*stlim = NULL;
+	struct pf_sourcelim	*srlim = NULL;
+	struct pf_source	*sr = NULL;
+	struct pf_state_link	*pfl;
 	struct tcphdr		*th = &pd->hdr.tcp;
 	u_short			 reason;
 	u_int			 i;
@@ -4628,6 +5170,7 @@ pf_create_state(struct pf_pdesc *pd, struct pf_rule *r, struct pf_rule *a,
 	st->set_prio[1] = act->set_prio[1];
 	st->delay = act->delay;
 	SLIST_INIT(&st->src_nodes);
+	SLIST_INIT(&st->linkage);
 
 	/*
 	 * must initialize refcnt, before pf_state_insert() gets called.
@@ -4689,8 +5232,7 @@ pf_create_state(struct pf_pdesc *pd, struct pf_rule *r, struct pf_rule *a,
 		st->timeout = PFTM_OTHER_FIRST_PACKET;
 	}
 
-	st->creation = getuptime();
-	st->expire = getuptime();
+	st->creation = st->expire = getuptime();
 
 	if (pd->proto == IPPROTO_TCP) {
 		if (st->state_flags & PFSTATE_SCRUB_TCP &&
@@ -4732,6 +5274,102 @@ pf_create_state(struct pf_pdesc *pd, struct pf_rule *r, struct pf_rule *a,
 			SLIST_INSERT_HEAD(&st->src_nodes, sni, next);
 			sni->sn->states++;
 		}
+
+	stlim = ctx->statelim;
+	if (stlim != NULL) {
+		unsigned int gen;
+
+		PF_ASSERT_LOCKED();
+		pfl = pool_get(&pf_state_link_pl, PR_NOWAIT);
+		if (pfl == NULL) {
+			REASON_SET(&reason, PFRES_MEMORY);
+			goto csfailed;
+		}
+
+		gen = pf_statelim_enter(stlim);
+		stlim->pfstlim_counters.admitted++;
+		stlim->pfstlim_inuse++;
+		pf_statelim_leave(stlim, gen);
+
+		stlim->pfstlim_rate_ts += stlim->pfstlim_rate_token;
+
+		st->statelim = stlim->pfstlim_id;
+		pfl->pfl_state = st;
+		pfl->pfl_type = PF_STATE_LINK_TYPE_STATELIM;
+
+		TAILQ_INSERT_TAIL(&stlim->pfstlim_states, pfl, pfl_link);
+		SLIST_INSERT_HEAD(&st->linkage, pfl, pfl_linkage);
+	}
+
+	srlim = ctx->sourcelim;
+	if (srlim != NULL) {
+		unsigned int gen;
+
+		sr = ctx->source;
+		if (sr == NULL) {
+			sr = pool_get(&pf_source_pl, PR_NOWAIT|PR_ZERO);
+			if (sr == NULL) {
+				gen = pf_sourcelim_enter(srlim);
+				srlim->pfsrlim_counters.addrnomem++;
+				pf_sourcelim_leave(srlim, gen);
+				REASON_SET(&reason, PFRES_MEMORY);
+				goto csfailed;
+			}
+
+			sr->pfsr_parent = srlim;
+			pf_source_key(srlim, sr,
+			    ctx->pd->af, ctx->pd->rdomain, ctx->pd->src);
+			TAILQ_INIT(&sr->pfsr_states);
+
+			if (RBT_INSERT(pf_source_tree,
+			    &srlim->pfsrlim_sources, sr) != NULL) {
+				panic("%s: source pool %u (%p) "
+				    "insert collision %p?!", __func__,
+				    srlim->pfsrlim_id, srlim, sr);
+			}
+
+			if (RBT_INSERT(pf_source_ioc_tree,
+			    &srlim->pfsrlim_ioc_sources, sr) != NULL) {
+				panic("%s: source pool %u (%p) ioc "
+				    "insert collision (%p)?!", __func__,
+				    srlim->pfsrlim_id, srlim, sr);
+			}
+
+			sr->pfsr_empty_ts = getuptime();
+			TAILQ_INSERT_TAIL(&pf_source_gc, sr,
+			    pfsr_empty_gc);
+
+			gen = pf_sourcelim_enter(srlim);
+			srlim->pfsrlim_nsources++;
+			srlim->pfsrlim_counters.addrallocs++;
+			pf_sourcelim_leave(srlim, gen);
+		} else {
+			KASSERT(sr->pfsr_parent == srlim);
+		}
+
+		PF_ASSERT_LOCKED();
+		pfl = pool_get(&pf_state_link_pl, PR_NOWAIT);
+		if (pfl == NULL) {
+			REASON_SET(&reason, PFRES_MEMORY);
+			goto csfailed;
+		}
+
+		pf_source_used(sr);
+
+		sr->pfsr_counters.admitted++;
+
+		gen = pf_sourcelim_enter(srlim);
+		srlim->pfsrlim_counters.inuse++;
+		srlim->pfsrlim_counters.admitted++;
+		pf_sourcelim_leave(srlim, gen);
+
+		st->sourcelim = srlim->pfsrlim_id;
+		pfl->pfl_state = st;
+		pfl->pfl_type = PF_STATE_LINK_TYPE_SOURCELIM;
+
+		TAILQ_INSERT_TAIL(&sr->pfsr_states, pfl, pfl_link);
+		SLIST_INSERT_HEAD(&st->linkage, pfl, pfl_linkage);
+	}
 
 #if NPFSYNC > 0
 	pfsync_init_state(st, *skw, *sks, 0);
@@ -4781,6 +5419,45 @@ pf_create_state(struct pf_pdesc *pd, struct pf_rule *r, struct pf_rule *a,
 
 csfailed:
 	if (st) {
+		struct pf_state_link *npfl;
+
+		SLIST_FOREACH_SAFE(pfl, &st->linkage, pfl_linkage, npfl) {
+			struct pf_state_link_list *list;
+			unsigned int gen;
+
+			/* who needs KASSERTS when we have NULL derefs */
+
+			switch (pfl->pfl_type) {
+			case PF_STATE_LINK_TYPE_STATELIM:
+				gen = pf_statelim_enter(stlim);
+				stlim->pfstlim_inuse--;
+				pf_statelim_leave(stlim, gen);
+
+				stlim->pfstlim_rate_ts -=
+				    stlim->pfstlim_rate_token;
+				list = &stlim->pfstlim_states;
+				break;
+			case PF_STATE_LINK_TYPE_SOURCELIM:
+				gen = pf_sourcelim_enter(srlim);
+				srlim->pfsrlim_counters.inuse--;
+				pf_sourcelim_leave(srlim, gen);
+
+				sr->pfsr_rate_ts -=
+				    srlim->pfsrlim_rate_token;
+				pf_source_rele(sr);
+
+				list = &sr->pfsr_states;
+				break;
+			default:
+				panic("%s: unexpected link type on pfl %p",
+				    __func__, pfl);
+			}
+
+			TAILQ_REMOVE(list, pfl, pfl_link);
+			PF_ASSERT_LOCKED();
+			pool_put(&pf_state_link_pl, pfl);
+		}
+
 		pf_normalize_tcp_cleanup(st);	/* safe even w/o init */
 		pf_src_tree_remove_state(st);
 		pool_put(&pf_state_pl, st);
@@ -5382,13 +6059,45 @@ pf_synproxy(struct pf_pdesc *pd, struct pf_state **stp, u_short *reason)
 	return (PF_PASS);
 }
 
+static __inline int
+pf_synproxy_ack(struct pf_rule *r, struct pf_pdesc *pd, struct pf_state **sm,
+    struct pf_rule_actions *act)
+{
+	struct tcphdr		*th = &pd->hdr.tcp;
+	struct pf_state		*s;
+	u_int16_t		 mss, mssdflt;
+	int			 rtid;
+	u_short			 reason;
+
+	if ((th->th_flags & (TH_SYN|TH_ACK)) != TH_SYN)
+		return (PF_PASS);
+
+	s = *sm;
+	rtid = (act->rtableid >= 0) ? act->rtableid : pd->rdomain;
+
+	pf_set_protostate(s, PF_PEER_SRC, PF_TCPS_PROXY_SRC);
+	s->src.seqhi = arc4random();
+	/* Find mss option */
+	mssdflt = atomic_load_int(&tcp_mssdflt);
+	mss = pf_get_mss(pd, mssdflt);
+	mss = pf_calc_mss(pd->src, pd->af, rtid, mss, mssdflt);
+	mss = pf_calc_mss(pd->dst, pd->af, rtid, mss, mssdflt);
+	s->src.mss = mss;
+
+	pf_send_tcp(r, pd->af, pd->dst, pd->src, th->th_dport,
+	    th->th_sport, s->src.seqhi, ntohl(th->th_seq) + 1,
+	    TH_SYN|TH_ACK, 0, s->src.mss, 0, 1, 0, pd->rdomain, NULL);
+
+	REASON_SET(&reason, PFRES_SYNPROXY);
+	return (PF_SYNPROXY_DROP);
+}
+
 int
 pf_test_state(struct pf_pdesc *pd, struct pf_state **stp, u_short *reason)
 {
 	int			 copyback = 0;
 	struct pf_state_peer	*src, *dst;
 	int			 action;
-	struct inpcb		*inp = pd->m->m_pkthdr.pf.inp;
 	u_int8_t		 psrc, pdst;
 
 	action = PF_PASS;
@@ -5422,7 +6131,6 @@ pf_test_state(struct pf_pdesc *pd, struct pf_state **stp, u_short *reason)
 				pf_update_state_timeout(*stp, PFTM_PURGE);
 				pf_state_unref(*stp);
 				*stp = NULL;
-				pf_mbuf_link_inpcb(pd->m, inp);
 				return (PF_DROP);
 			} else if (dst->state >= TCPS_ESTABLISHED &&
 			    src->state >= TCPS_ESTABLISHED) {
@@ -6534,14 +7242,15 @@ pf_routable(struct pf_addr *addr, sa_family_t af, struct pfi_kif *kif,
 				ret = 1;
 #if NCARP > 0
 			} else {
-				struct ifnet	*ifp;
+				struct ifnet *ifp;
 
-				ifp = if_get(rt->rt_ifidx);
+				smr_read_enter();
+				ifp = if_get_smr(rt->rt_ifidx);
 				if (ifp != NULL && ifp->if_type == IFT_CARP &&
 				    ifp->if_carpdevidx ==
 				    kif->pfik_ifp->if_index)
 					ret = 1;
-				if_put(ifp);
+				smr_read_leave();
 #endif /* NCARP */
 			}
 
@@ -7566,10 +8275,7 @@ pf_counters_inc(int action, struct pf_pdesc *pd, struct pf_state *st,
 int
 pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 {
-#if NCARP > 0
-	struct ifnet		*ifp0;
-#endif
-	struct pfi_kif		*kif;
+	struct pfi_kif		*kif = NULL;
 	u_short			 action, reason = 0;
 	struct pf_rule		*a = NULL, *r = &pf_default_rule;
 	struct pf_state		*st = NULL;
@@ -7584,10 +8290,14 @@ pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 		return (PF_PASS);
 
 #if NCARP > 0
-	if (ifp->if_type == IFT_CARP &&
-		(ifp0 = if_get(ifp->if_carpdevidx)) != NULL) {
-		kif = (struct pfi_kif *)ifp0->if_pf_kif;
-		if_put(ifp0);
+	if (ifp->if_type == IFT_CARP) {
+		struct ifnet *ifp0;
+
+		smr_read_enter();
+		ifp0 = if_get_smr(ifp->if_carpdevidx);
+		if (ifp0 != NULL)
+			kif = (struct pfi_kif *)ifp0->if_pf_kif;
+		smr_read_leave();
 	} else
 #endif /* NCARP */
 		kif = (struct pfi_kif *)ifp->if_pf_kif;
@@ -7752,24 +8462,24 @@ pf_test(sa_family_t af, int fwdir, struct ifnet *ifp, struct mbuf **m0)
 	}
 #endif /* INET6 */
 
-	default:
-		if (pd.virtual_proto == IPPROTO_TCP) {
-			if (pd.dir == PF_IN && (pd.hdr.tcp.th_flags &
-			    (TH_SYN|TH_ACK)) == TH_SYN &&
-			    pf_synflood_check(&pd)) {
-				PF_LOCK();
-				have_pf_lock = 1;
-				pf_syncookie_send(&pd, &reason);
-				action = PF_DROP;
-				break;
-			}
-			if ((pd.hdr.tcp.th_flags & TH_ACK) && pd.p_len == 0)
-				pqid = 1;
-			action = pf_normalize_tcp(&pd);
-			if (action == PF_DROP)
-				break;
+	case IPPROTO_TCP:
+		if (pd.dir == PF_IN &&
+		    (pd.hdr.tcp.th_flags & (TH_SYN|TH_ACK)) == TH_SYN &&
+		    pf_synflood_check(&pd)) {
+			PF_LOCK();
+			have_pf_lock = 1;
+			pf_syncookie_send(&pd, &reason);
+			action = PF_DROP;
+			break;
 		}
+		if ((pd.hdr.tcp.th_flags & TH_ACK) && pd.p_len == 0)
+			pqid = 1;
+		action = pf_normalize_tcp(&pd);
+		if (action == PF_DROP)
+			break;
 
+		/* FALLTHROUGH */
+	default:
 		key.af = pd.af;
 		key.proto = pd.virtual_proto;
 		key.rdomain = pd.rdomain;
@@ -8367,6 +9077,8 @@ pf_state_unref(struct pf_state *st)
 		pf_state_key_unref(st->key[PF_SK_WIRE]);
 		pf_state_key_unref(st->key[PF_SK_STACK]);
 
+		KASSERT(SLIST_EMPTY(&st->linkage));
+
 		pool_put(&pf_state_pl, st);
 	}
 }
@@ -8402,4 +9114,41 @@ pf_pktenqueue_delayed(void *arg)
 		m_freem(pdy->m);
 
 	pool_put(&pf_pktdelay_pl, pdy);
+}
+
+void
+pf_status_init(void)
+{
+	memset(&pf_status, 0, sizeof(pf_status));
+	pf_status.debug = LOG_ERR;
+	pf_status.reass = PF_REASS_ENABLED;
+
+	/* XXX do our best to avoid a conflict */
+	pf_status.hostid = arc4random();
+
+	pf_status_fcounters = counters_alloc(FCNT_MAX);
+}
+
+void
+pf_status_clear(void)
+{
+	PF_ASSERT_LOCKED();
+	counters_zero(pf_status_fcounters, FCNT_MAX);
+}
+
+void
+pf_status_read(struct pf_status *pfs)
+{
+	uint64_t scratch[FCNT_MAX];
+
+	NET_LOCK();
+	PF_LOCK();
+	PF_FRAG_LOCK();
+	memcpy(pfs, &pf_status, sizeof(struct pf_status));
+	PF_FRAG_UNLOCK();
+	pfi_update_status(pfs->ifname, pfs);
+	PF_UNLOCK();
+	NET_UNLOCK();
+
+	counters_read(pf_status_fcounters, pfs->fcounters, FCNT_MAX, scratch);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: vector.S,v 1.103 2025/07/11 20:04:20 bluhm Exp $	*/
+/*	$OpenBSD: vector.S,v 1.107 2026/01/14 20:43:56 deraadt Exp $	*/
 /*	$NetBSD: vector.S,v 1.5 2004/06/28 09:13:11 fvdl Exp $	*/
 
 /*
@@ -84,6 +84,7 @@
 #include "xen.h"
 #include "hyperv.h"
 #include "vmm.h"
+#include "xcall.h"
 
 /*****************************************************************************/
 
@@ -636,8 +637,13 @@ IDTVEC(ipi_invltlb)
 	movq	%cr3, %rax
 	movq	%rax, %cr3
 
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	popq	%rax
 	iretq
@@ -655,8 +661,13 @@ IDTVEC(ipi_invept)
 	movq	ept_shoot_mode, %rdx
 	invept	(%rax), %rdx
 
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	popq	%rdx
 	popq	%rax
@@ -673,8 +684,13 @@ IDTVEC(ipi_invlpg)
 	movq	tlb_shoot_addr1, %rax
 	invlpg	(%rax)
 
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	popq	%rax
 	iretq
@@ -694,8 +710,13 @@ IDTVEC(ipi_invlrange)
 	cmpq	%rdx, %rax
 	jb	1b
 
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	popq	%rdx
 	popq	%rax
@@ -726,8 +747,13 @@ IDTVEC(ipi_invltlb_pcid)
 	movl	$PCID_PROC_INTEL,(%rsp)
 	invpcid	(%rsp),%rax
 
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	/* restore the stack */
 	popq	%rax
@@ -763,8 +789,20 @@ IDTVEC(ipi_invlpg_pcid)
 	addl	$1,(%rsp)
 	invpcid	(%rsp),%rax
 
+	/* Kernel VAs are also cached under PCID_TEMP */
+	cmpl	$PCID_PROC,(%rsp)
+	jne	.Lskip_temp_invlpg_pcid
+	movl	$PCID_TEMP,(%rsp)
+	invpcid	(%rsp),%rax
+.Lskip_temp_invlpg_pcid:
+
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	/* restore the stack */
 	addq	$16,%rsp
@@ -800,13 +838,26 @@ IDTVEC(ipi_invlrange_pcid)
 	invpcid	(%rsp),%rcx
 	addl	$1,(%rsp)
 	invpcid	(%rsp),%rcx
+
+	/* Kernel VAs are also cached under PCID_TEMP */
+	cmpl	$PCID_PROC,(%rsp)
+	jne	.Lskip_temp_invlrange_pcid
+	movl	$PCID_TEMP,(%rsp)
+	invpcid	(%rsp),%rcx
+	movl	$PCID_PROC,(%rsp)
+.Lskip_temp_invlrange_pcid:
 	subl	$1,(%rsp)
 	addq	$PAGE_SIZE,%rax
 	cmpq	%rdx,%rax
 	jb	1b
 
+	movl	tlb_shoot_cpu, %eax
 	lock
-	decq	tlb_shoot_wait
+	decl	tlb_shoot_counts(,%rax,4)	# decrement outstanding shoots
+	jnz	9f
+	xorl    %eax, %eax
+	movl	%eax, tlb_shoot_lock		# release lock for next shooter
+9:
 
 	/* restore the stack */
 	addq	$16,%rsp
@@ -815,17 +866,6 @@ IDTVEC(ipi_invlrange_pcid)
 	popq	%rax
 	iretq
 END(Xipi_invlrange_pcid)
-
-IDTVEC(ipi_wbinvd)
-	ioapic_asm_ack()
-
-	wbinvd
-
-	lock
-	decq	wbinvd_wait
-
-	iretq
-END(Xipi_wbinvd)
 
 #endif /* MULTIPROCESSOR */
 
@@ -1408,3 +1448,21 @@ KIDTVEC(softclock)
 	jmp	retpoline_r13
 	CODEPATCH_END(CPTAG_RETPOLINE_R13)
 END(Xsoftclock)
+
+#if NXCALL > 0
+#ifdef MULTIPROCESSOR
+KIDTVEC(xcallintr)
+	endbr64
+	movl	$IPL_SOFTCLOCK, CPUVAR(ILEVEL)
+	sti
+	incl	CPUVAR(IDEPTH)
+	movq	CPUVAR(SELF),%rdi
+	call	cpu_xcall_dispatch
+	movq	$0,-8(%rsp)
+	decl	CPUVAR(IDEPTH)
+	CODEPATCH_START
+	jmp	retpoline_r13
+	CODEPATCH_END(CPTAG_RETPOLINE_R13)
+END(Xxcallintr)
+#endif /* MULTIPROCESSOR */
+#endif /* NXCALL > 0 */

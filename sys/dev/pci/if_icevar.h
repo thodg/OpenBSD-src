@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_icevar.h,v 1.9 2025/09/17 12:54:19 jan Exp $	*/
+/*	$OpenBSD: if_icevar.h,v 1.11 2025/11/18 09:13:55 jan Exp $	*/
 
 /*  Copyright (c) 2024, Intel Corporation
  *  All rights reserved.
@@ -633,7 +633,7 @@ struct ice_dma_mem {
 #define ICE_DMA_KVA(_m)	((void *)(_m)->va)
 #define ICE_DMA_LEN(_m)	((_m)->size)
 
-#define ICE_STR_BUF_LEN 32
+#define ICE_STR_BUF_LEN 64
 
 /**
  * @struct ice_lock
@@ -764,7 +764,7 @@ enum ice_fw_modes {
 #define ICE_MIN_TSO_MSS		64
 
 #define ICE_MAX_TX_SEGS		8
-#define ICE_MAX_TSO_SEGS	128
+#define ICE_MAX_TSO_SEGS	8
 
 #define ICE_MAX_DMA_SEG_SIZE	((16*1024) - 1)
 

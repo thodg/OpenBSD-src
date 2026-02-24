@@ -1,4 +1,4 @@
-# $OpenBSD: GENERIC,v 1.308 2025/10/09 11:18:29 claudio Exp $
+# $OpenBSD: GENERIC,v 1.313 2026/01/29 23:02:35 kettenis Exp $
 #
 # GENERIC machine description file
 #
@@ -64,6 +64,7 @@ ehci*		at acpi?
 ipmi*		at acpi?
 ohci*		at acpi?
 pluart*		at acpi?
+qcuart*		at acpi?
 sdhc*		at acpi?
 ufshci*		at acpi?
 xhci*		at acpi?
@@ -321,6 +322,7 @@ rkpinctrl*	at fdt? early 1
 rkcomphy*	at fdt? early 1
 rkpciephy*	at fdt? early 1
 rktcphy*	at fdt? early 1
+rkusbdpphy*	at fdt? early 1
 rkusbphy*	at fdt? early 1
 rkanxdp*	at fdt?
 rkdrm*		at fdt?
@@ -358,6 +360,7 @@ qcgpio*		at fdt? early 1
 qciic*		at acpi?
 qciic*		at fdt?
 iic*		at qciic?
+qcuart*		at fdt?
 qcipcc*		at fdt?
 qcmtx*		at fdt? early 1
 qcpas*		at fdt?
@@ -436,6 +439,7 @@ mpi*		at pci?			# LSI Logic Fusion MPT Message Passing Interface
 mpii*		at pci?			# LSI Fusion MPT Message Passing Interface II
 mfi*		at pci?			# LSI MegaRAID SAS controllers
 mfii*		at pci?			# LSI MegaRAID SAS Fusion controller
+sdhc*		at pci?			# SD Host Controller
 
 # PCI Audio
 azalia*		at pci?			# High Definition Audio
@@ -603,6 +607,7 @@ wsmouse*	at ims? mux 0
 imt*		at ihidev?		# HID-over-I2C multitouch trackpad
 wsmouse*	at imt? mux 0
 iasuskbd*	at ihidev?		# HID-over-I2C ASUS keyboard
+wskbd*		at iasuskbd? mux 1
 ipmi*		at iic?			# IPMI (SIIF)
 islrtc*		at iic?			# ISL1208 RTC
 maxrtc*		at iic?			# DS1307 RTC

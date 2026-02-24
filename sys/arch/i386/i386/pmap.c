@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.229 2025/08/15 13:40:43 kettenis Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.233 2026/01/14 20:43:56 deraadt Exp $	*/
 /*	$NetBSD: pmap.c,v 1.91 2000/06/02 17:46:37 thorpej Exp $	*/
 
 /*
@@ -2618,11 +2618,12 @@ out:
 /*
  * Locking for tlb shootdown.
  *
- * We lock by setting tlb_shoot_wait to the number of cpus that will
- * receive our tlb shootdown. After sending the IPIs, we don't need to
- * worry about locking order or interrupts spinning for the lock because
- * the call that grabs the "lock" isn't the one that releases it. And
- * there is nothing that can block the IPI that releases the lock.
+ * We lock by grabbing tlb_shoot_lock.lock, then setting per-cpu
+ * tlb_shoot_counts[] to the number of cpus that will receive our tlb
+ * shootdown. After sending the IPIs, we don't need to worry about
+ * locking order or interrupts spinning for the lock because the call
+ * that grabs the "lock" isn't the one that releases it. And there is
+ * nothing that can block the IPI that releases the lock.
  *
  * The functions are organized so that we first count the number of
  * cpus we need to send the IPI to, then we grab the counter, then
@@ -2637,17 +2638,72 @@ out:
  * release the lock if we get an interrupt in a bad moment.
  */
 
-volatile int tlb_shoot_wait __attribute__((section(".kudata")));
+struct {
+	volatile int lock __attribute__((aligned(64)));
+} tlb_shoot_lock __attribute__((section(".kudata")));
+struct {
+        volatile int cpu __attribute__((aligned(64)));
+} tlb_shoot_cpu __attribute__((section(".kudata")));
+
+volatile u_int tlb_shoot_counts[MAXCPUS] __attribute__((section(".kudata")));
 
 volatile vaddr_t tlb_shoot_addr1 __attribute__((section(".kudata")));
 volatile vaddr_t tlb_shoot_addr2 __attribute__((section(".kudata")));
 
+/* Obtain the "lock" for TLB shooting */
+static inline void
+pmap_start_tlb_shoot(u_int targets, const char *func)
+{
+	u_int cpuid = curcpu()->ci_cpuid;
+
+	while (atomic_cas_uint(&tlb_shoot_lock.lock, 0, 1) != 0) {
+#ifdef MP_LOCKDEBUG
+		long nticks = __mp_lock_spinout;
+#endif
+		while (tlb_shoot_lock.lock != 0) {
+			CPU_BUSY_CYCLE();
+#ifdef MP_LOCKDEBUG
+			if (--nticks <= 0) {
+				db_printf("%s: spun out", func);
+				db_enter();
+				nticks = __mp_lock_spinout;
+			}
+#endif
+		}
+	}
+
+	tlb_shoot_cpu.cpu = cpuid;
+	atomic_swap_uint(&tlb_shoot_counts[cpuid], targets);
+}
+
+void
+pmap_tlb_shootwait(void)
+{
+	u_int cpuid = curcpu()->ci_cpuid;
+
+#ifdef MP_LOCKDEBUG
+	long nticks = __mp_lock_spinout;
+#endif
+	while (tlb_shoot_counts[cpuid] > 0) {
+		CPU_BUSY_CYCLE();
+#ifdef MP_LOCKDEBUG
+		if (--nticks <= 0) {
+			db_printf("%s: spun out", __func__);
+			db_enter();
+			nticks = __mp_lock_spinout;
+		}
+#endif
+	}
+}
+#endif /* MULTIPROCESSOR */
+
 void
 pmap_tlb_shootpage(struct pmap *pm, vaddr_t va)
 {
+#ifdef MULTIPROCESSOR
 	struct cpu_info *ci, *self = curcpu();
 	CPU_INFO_ITERATOR cii;
-	int wait = 0;
+	int targets = 0;
 	u_int64_t mask = 0;
 
 	CPU_INFO_FOREACH(cii, ci) {
@@ -2655,16 +2711,13 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va)
 		    !(ci->ci_flags & CPUF_RUNNING))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
-		wait++;
+		targets++;
 	}
 
-	if (wait > 0) {
+	if (targets) {
 		int s = splvm();
 
-		while (atomic_cas_uint(&tlb_shoot_wait, 0, wait) != 0) {
-			while (tlb_shoot_wait != 0)
-				CPU_BUSY_CYCLE();
-		}
+		pmap_start_tlb_shoot(targets, __func__);
 		tlb_shoot_addr1 = va;
 		CPU_INFO_FOREACH(cii, ci) {
 			if ((mask & (1ULL << ci->ci_cpuid)) == 0)
@@ -2674,6 +2727,7 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va)
 		}
 		splx(s);
 	}
+#endif /* MULTIPROCESSOR */
 
 	if (pmap_is_curpmap(pm))
 		pmap_update_pg(va);
@@ -2682,27 +2736,25 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va)
 void
 pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva)
 {
+	vaddr_t va;
+#ifdef MULTIPROCESSOR
 	struct cpu_info *ci, *self = curcpu();
 	CPU_INFO_ITERATOR cii;
-	int wait = 0;
+	int targets = 0;
 	u_int64_t mask = 0;
-	vaddr_t va;
 
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !pmap_is_active(pm, ci) ||
 		    !(ci->ci_flags & CPUF_RUNNING))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
-		wait++;
+		targets++;
 	}
 
-	if (wait > 0) {
+	if (targets) {
 		int s = splvm();
 
-		while (atomic_cas_uint(&tlb_shoot_wait, 0, wait) != 0) {
-			while (tlb_shoot_wait != 0)
-				CPU_BUSY_CYCLE();
-		}
+		pmap_start_tlb_shoot(targets, __func__);
 		tlb_shoot_addr1 = sva;
 		tlb_shoot_addr2 = eva;
 		CPU_INFO_FOREACH(cii, ci) {
@@ -2713,6 +2765,7 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva)
 		}
 		splx(s);
 	}
+#endif /* MULTIPROCESSOR */
 
 	if (pmap_is_curpmap(pm))
 		for (va = sva; va < eva; va += PAGE_SIZE)
@@ -2722,26 +2775,23 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva)
 void
 pmap_tlb_shoottlb(void)
 {
+#ifdef MULTIPROCESSOR
 	struct cpu_info *ci, *self = curcpu();
 	CPU_INFO_ITERATOR cii;
-	int wait = 0;
+	int targets = 0;
 	u_int64_t mask = 0;
 
 	CPU_INFO_FOREACH(cii, ci) {
 		if (ci == self || !(ci->ci_flags & CPUF_RUNNING))
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
-		wait++;
+		targets++;
 	}
 
-	if (wait) {
+	if (targets) {
 		int s = splvm();
 
-		while (atomic_cas_uint(&tlb_shoot_wait, 0, wait) != 0) {
-			while (tlb_shoot_wait != 0)
-				CPU_BUSY_CYCLE();
-		}
-
+		pmap_start_tlb_shoot(targets, __func__);
 		CPU_INFO_FOREACH(cii, ci) {
 			if ((mask & (1ULL << ci->ci_cpuid)) == 0)
 				continue;
@@ -2750,6 +2800,7 @@ pmap_tlb_shoottlb(void)
 		}
 		splx(s);
 	}
+#endif /* MULTIPROCESSOR */
 
 	tlbflush();
 }
@@ -2757,9 +2808,11 @@ pmap_tlb_shoottlb(void)
 void
 pmap_tlb_droppmap(struct pmap *pm)
 {
-	struct cpu_info *ci, *self = curcpu();
+	struct cpu_info *self = curcpu();
+#ifdef MULTIPROCESSOR
+	struct cpu_info *ci;
 	CPU_INFO_ITERATOR cii;
-	int wait = 0;
+	int targets = 0;
 	u_int64_t mask = 0;
 
 	CPU_INFO_FOREACH(cii, ci) {
@@ -2767,17 +2820,13 @@ pmap_tlb_droppmap(struct pmap *pm)
 		    ci->ci_curpmap != pm)
 			continue;
 		mask |= (1ULL << ci->ci_cpuid);
-		wait++;
+		targets++;
 	}
 
-	if (wait) {
+	if (targets) {
 		int s = splvm();
 
-		while (atomic_cas_uint(&tlb_shoot_wait, 0, wait) != 0) {
-			while (tlb_shoot_wait != 0)
-				CPU_BUSY_CYCLE();
-		}
-
+		pmap_start_tlb_shoot(targets, __func__);
 		CPU_INFO_FOREACH(cii, ci) {
 			if ((mask & (1ULL << ci->ci_cpuid)) == 0)
 				continue;
@@ -2786,45 +2835,13 @@ pmap_tlb_droppmap(struct pmap *pm)
 		}
 		splx(s);
 	}
+#endif /* MULTIPROCESSOR */
 
 	if (self->ci_curpmap == pm)
 		pmap_activate(curproc);
 
 	pmap_tlb_shootwait();
 }
-
-void
-pmap_tlb_shootwait(void)
-{
-	while (tlb_shoot_wait != 0)
-		CPU_BUSY_CYCLE();
-}
-
-#else
-
-void
-pmap_tlb_shootpage(struct pmap *pm, vaddr_t va)
-{
-	if (pmap_is_curpmap(pm))
-		pmap_update_pg(va);
-
-}
-
-void
-pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva)
-{
-	vaddr_t va;
-
-	for (va = sva; va < eva; va += PAGE_SIZE)
-		pmap_update_pg(va);	
-}
-
-void
-pmap_tlb_shoottlb(void)
-{
-	tlbflush();
-}
-#endif /* MULTIPROCESSOR */
 
 u_int32_t	(*pmap_pte_set_p)(vaddr_t, paddr_t, u_int32_t) =
     pmap_pte_set_86;

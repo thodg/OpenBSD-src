@@ -1,4 +1,4 @@
-/*	$OpenBSD: config.c,v 1.65 2024/01/17 08:22:40 claudio Exp $	*/
+/*	$OpenBSD: config.c,v 1.68 2026/01/04 06:43:34 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2011 - 2015 Reyk Floeter <reyk@openbsd.org>
@@ -158,6 +158,49 @@ config_getcfg(struct httpd *env, struct imsg *imsg)
 	return (0);
 }
 
+/*
+ * struct server_config is an internal data structure
+ * in privileged compartment containing both data and
+ * pointers, which is dangerously copied as a whole.
+ *
+ * This helper function clears all the pointer
+ * fields in struct server_config while preserving
+ * other data, avoiding pointers being accidentally
+ * send to unprivileged compartments, breaking
+ * inter-compartment ASLR.
+ */
+static void
+clear_config_server_ptrs(struct server_config *cfg)
+{
+	cfg->default_type.media_encoding = NULL;
+
+	/* clear all fields expanded from RB_ENTRY */
+	memset(&cfg->default_type.media_entry, 0,
+	    sizeof(cfg->default_type.media_entry));
+
+	cfg->tls_ca = NULL;
+	cfg->tls_ca_file = NULL;
+	cfg->tls_cert = NULL;
+	cfg->tls_cert_file = NULL;
+	cfg->tls_crl = NULL;
+	cfg->tls_crl_file = NULL;
+	cfg->tls_key = NULL;
+	cfg->tls_key_file = NULL;
+	cfg->tls_ocsp_staple = NULL;
+	cfg->tls_ocsp_staple_file = NULL;
+
+	cfg->logaccess = NULL;
+	cfg->logerror = NULL;
+	cfg->auth = NULL;
+	cfg->return_uri = NULL;
+
+	/* clear TAILQ_HEAD */
+	memset(&cfg->fcgiparams, 0, sizeof(cfg->fcgiparams));
+
+	/* clear TAILQ_ENTRY */
+	memset(&cfg->entry, 0, sizeof(cfg->entry));
+}
+
 int
 config_setserver(struct httpd *env, struct server *srv)
 {
@@ -186,6 +229,9 @@ config_setserver(struct httpd *env, struct server *srv)
 		    ps->ps_title[id], srv->srv_s);
 
 		memcpy(&s, &srv->srv_conf, sizeof(s));
+
+		/* since s is a local, it is safe to clear its pointers directly */
+		clear_config_server_ptrs(&s); 
 
 		c = 0;
 		iov[c].iov_base = &s;
@@ -467,6 +513,11 @@ config_getserver_config(struct httpd *env, struct server *srv,
 	/* Reset these variables to avoid free'ing invalid pointers */
 	serverconfig_reset(srv_conf);
 
+	if ((IMSG_DATA_SIZE(imsg) - s) < (size_t)srv_conf->return_uri_len) {
+		log_debug("%s: invalid message length", __func__);
+		goto fail;
+	}
+
 	TAILQ_FOREACH(parent, &srv->srv_hosts, entry) {
 		if (strcmp(parent->name, srv_conf->name) == 0)
 			break;
@@ -485,7 +536,6 @@ config_getserver_config(struct httpd *env, struct server *srv,
 		if ((srv_conf->return_uri = get_data(p + s,
 		    srv_conf->return_uri_len)) == NULL)
 			goto fail;
-		s += srv_conf->return_uri_len;
 	}
 
 	if (srv_conf->flags & SRVFLAG_LOCATION) {
@@ -591,6 +641,8 @@ config_getserver_config(struct httpd *env, struct server *srv,
 		srv_conf->flags |= parent->flags & SRVFLAG_ERRDOCS;
 		(void)strlcpy(srv_conf->errdocroot, parent->errdocroot,
 		    sizeof(srv_conf->errdocroot));
+
+		srv_conf->flags |= parent->flags & SRVFLAG_NO_BANNER;
 
 		DPRINTF("%s: %s %d location \"%s\", "
 		    "parent \"%s[%u]\", flags: %s",
@@ -821,6 +873,7 @@ config_setmedia(struct httpd *env, struct media_type *media)
 	struct privsep		*ps = env->sc_ps;
 	int			 id;
 	unsigned int		 what;
+	struct media_type	 mt;
 
 	for (id = 0; id < PROC_MAX; id++) {
 		what = ps->ps_what[id];
@@ -831,7 +884,12 @@ config_setmedia(struct httpd *env, struct media_type *media)
 		DPRINTF("%s: sending media \"%s\" to %s", __func__,
 		    media->media_name, ps->ps_title[id]);
 
-		proc_compose(ps, id, IMSG_CFG_MEDIA, media, sizeof(*media));
+		/* Send a cleaned-up copy */
+		memcpy(&mt, media, sizeof(*media)); 
+		mt.media_encoding = NULL;
+		memset(&mt.media_entry, 0, sizeof(mt.media_entry));
+
+		proc_compose(ps, id, IMSG_CFG_MEDIA, &mt, sizeof(mt));
 	}
 
 	return (0);
@@ -866,6 +924,7 @@ int
 config_setauth(struct httpd *env, struct auth *auth)
 {
 	struct privsep		*ps = env->sc_ps;
+	struct auth		 auth_payload;	/* pointer-free payload */
 	int			 id;
 	unsigned int		 what;
 
@@ -878,7 +937,14 @@ config_setauth(struct httpd *env, struct auth *auth)
 		DPRINTF("%s: sending auth \"%s[%u]\" to %s", __func__,
 		    auth->auth_htpasswd, auth->auth_id, ps->ps_title[id]);
 
-		proc_compose(ps, id, IMSG_CFG_AUTH, auth, sizeof(*auth));
+
+		/* memcpy to avoid modifying auth directly */
+		memcpy(&auth_payload, auth, sizeof(*auth)); 
+
+		/* clear pointers */
+		memset(&auth_payload.auth_entry, 0, sizeof(auth_payload.auth_entry)); 
+
+		proc_compose(ps, id, IMSG_CFG_AUTH, &auth_payload, sizeof(auth_payload));
 	}
 
 	return (0);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: relay_http.c,v 1.90 2024/07/20 06:54:15 anton Exp $	*/
+/*	$OpenBSD: relay_http.c,v 1.92 2026/01/01 14:32:41 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2006 - 2016 Reyk Floeter <reyk@openbsd.org>
@@ -195,7 +195,7 @@ relay_read_http(struct bufferevent *bev, void *arg)
 	int			 ws_response = 0;
 	struct http_method_node	*hmn;
 	struct http_session	*hs;
-	enum httpmethod		 request_method;
+	enum httpmethod		 request_method = HTTP_METHOD_NONE;
 
 	getmonotime(&con->se_tv_last);
 	cre->timedout = 0;
@@ -1171,7 +1171,7 @@ relay_http_time(time_t t, char *tmbuf, size_t len)
 	if (t == -1 || gmtime_r(&t, &tm) == NULL)
 		return (-1);
 	else
-		return (strftime(tmbuf, len, "%a, %d %h %Y %T %Z", &tm));
+		return (strftime(tmbuf, len, "%a, %d %h %Y %T GMT", &tm));
 }
 
 void

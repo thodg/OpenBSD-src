@@ -1,4 +1,4 @@
-/*	$OpenBSD: print.c,v 1.70 2025/10/16 06:46:31 job Exp $ */
+/*	$OpenBSD: print.c,v 1.74 2026/01/20 16:49:03 tb Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -106,8 +106,8 @@ tal_print(const struct tal *p)
 	X509_PUBKEY		*pubkey;
 	size_t			 i;
 
-	der = p->pkey;
-	if ((pubkey = d2i_X509_PUBKEY(NULL, &der, p->pkeysz)) == NULL)
+	der = p->spki;
+	if ((pubkey = d2i_X509_PUBKEY(NULL, &der, p->spkisz)) == NULL)
 		errx(1, "d2i_X509_PUBKEY failed");
 
 	if ((ski = x509_pubkey_get_ski(pubkey, p->descr)) == NULL)
@@ -611,36 +611,6 @@ spl_print(const struct cert *c, const struct spl *s)
 }
 
 void
-gbr_print(const struct cert *c, const struct gbr *p)
-{
-	if (outformats & FORMAT_JSON) {
-		json_do_string("type", "gbr");
-		json_do_string("ski", c->ski);
-		x509_print(c->x509);
-		json_do_string("aki", c->aki);
-		json_do_string("aia", c->aia);
-		json_do_string("sia", c->signedobj);
-		json_do_int("signing_time", p->signtime);
-		json_do_int("valid_since", c->notbefore);
-		json_do_int("valid_until", c->notafter);
-		if (p->expires)
-			json_do_int("expires", p->expires);
-		json_do_string("vcard", p->vcard);
-	} else {
-		printf("Subject key identifier:   %s\n", pretty_key_id(c->ski));
-		x509_print(c->x509);
-		printf("Authority key identifier: %s\n", pretty_key_id(c->aki));
-		printf("Authority info access:    %s\n", c->aia);
-		printf("Subject info access:      %s\n", c->signedobj);
-		printf("Signing time:             %s\n", time2str(p->signtime));
-		printf("GBR not before:           %s\n",
-		    time2str(c->notbefore));
-		printf("GBR not after:            %s\n", time2str(c->notafter));
-		printf("vcard:\n%s", p->vcard);
-	}
-}
-
-void
 rsc_print(const struct cert *c, const struct rsc *p)
 {
 	char	*hash;
@@ -832,58 +802,6 @@ tak_print(const struct cert *c, const struct tak *p)
 		json_do_end();
 }
 
-void
-geofeed_print(const struct cert *c, const struct geofeed *p)
-{
-	char	 buf[128];
-	size_t	 i;
-
-	if (outformats & FORMAT_JSON) {
-		json_do_string("type", "geofeed");
-		json_do_string("ski", c->ski);
-		x509_print(c->x509);
-		json_do_string("aki", c->aki);
-		json_do_string("aia", c->aia);
-		json_do_int("signing_time", p->signtime);
-		json_do_int("valid_since", c->notbefore);
-		json_do_int("valid_until", c->notafter);
-		if (p->expires)
-			json_do_int("expires", p->expires);
-		json_do_array("records");
-	} else {
-		printf("Subject key identifier:   %s\n", pretty_key_id(c->ski));
-		x509_print(c->x509);
-		printf("Authority key identifier: %s\n", pretty_key_id(c->aki));
-		printf("Authority info access:    %s\n", c->aia);
-		printf("Signing time:             %s\n", time2str(p->signtime));
-		printf("Geofeed not before:       %s\n",
-		    time2str(c->notbefore));
-		printf("Geofeed not after:        %s\n", time2str(c->notafter));
-		printf("Geofeed CSV records:      ");
-	}
-
-	for (i = 0; i < p->num_geoips; i++) {
-		if (p->geoips[i].ip->type != CERT_IP_ADDR)
-			continue;
-
-		ip_addr_print(&p->geoips[i].ip->ip, p->geoips[i].ip->afi, buf,
-		    sizeof(buf));
-		if (outformats & FORMAT_JSON) {
-			json_do_object("geoip", 1);
-			json_do_string("prefix", buf);
-			json_do_string("location", p->geoips[i].loc);
-			json_do_end();
-		} else {
-			if (i > 0)
-				printf("%26s", "");
-			printf("IP: %s (%s)\n", buf, p->geoips[i].loc);
-		}
-	}
-
-	if (outformats & FORMAT_JSON)
-		json_do_end();
-}
-
 static void
 print_ccr_mftstate(struct ccr *ccr)
 {
@@ -891,21 +809,17 @@ print_ccr_mftstate(struct ccr *ccr)
 	struct ccr_mft *ccr_mft;
 	struct ccr_mft_sub_ski *sub;
 
-	if (base64_encode(ccr->mfts_hash, SHA256_DIGEST_LENGTH, &hash) == -1)
-		errx(1, "base64_encode");
-
 	if (outformats & FORMAT_JSON) {
 		json_do_object("manifest_state", 0);
 		json_do_int("most_recent_update", ccr->most_recent_update);
-		json_do_string("hash", hash);
+		json_do_string("hash", ccr->mfts_hash);
 		json_do_array("mft_instances");
 	} else {
-		printf("Manifest state hash:      %s\n", hash);
+		printf("Manifest state hash:      %s\n", ccr->mfts_hash);
 		printf("Manifest last update:     %s\n",
 		    time2str(ccr->most_recent_update));
 		printf("Manifest instances:\n");
 	}
-	free(hash);
 
 	RB_FOREACH(ccr_mft, ccr_mft_tree, &ccr->mfts) {
 		if (base64_encode(ccr_mft->hash, SHA256_DIGEST_LENGTH, &hash)
@@ -969,21 +883,17 @@ print_ccr_mftstate(struct ccr *ccr)
 static void
 print_ccr_roastate(struct ccr *ccr)
 {
-	char buf[64], *hash;
+	char buf[64];
 	struct vrp *vrp;
-
-	if (base64_encode(ccr->vrps_hash, SHA256_DIGEST_LENGTH, &hash) == -1)
-		errx(1, "base64_encode");
 
 	if (outformats & FORMAT_JSON) {
 		json_do_object("roapayload_state", 0);
-		json_do_string("hash", hash);
+		json_do_string("hash", ccr->vrps_hash);
 		json_do_array("vrps");
 	} else {
-		printf("ROA payload state hash:   %s\n", hash);
+		printf("ROA payload state hash:   %s\n", ccr->vrps_hash);
 		printf("ROA payload entries:\n");
 	}
-	free(hash);
 
 	RB_FOREACH(vrp, ccr_vrp_tree, &ccr->vrps) {
 		ip_addr_print(&vrp->addr, vrp->afi, buf, sizeof(buf));
@@ -1012,22 +922,17 @@ print_ccr_roastate(struct ccr *ccr)
 static void
 print_ccr_aspastate(struct ccr *ccr)
 {
-	char *hash;
 	struct vap *vap;
 	size_t i;
 
-	if (base64_encode(ccr->vaps_hash, SHA256_DIGEST_LENGTH, &hash) == -1)
-		errx(1, "base64_encode");
-
 	if (outformats & FORMAT_JSON) {
 		json_do_object("aspapayload_state", 0);
-		json_do_string("hash", hash);
+		json_do_string("hash", ccr->vaps_hash);
 		json_do_array("vaps");
 	} else {
-		printf("ASPA payload state hash:  %s\n", hash);
+		printf("ASPA payload state hash:  %s\n", ccr->vaps_hash);
 		printf("ASPA payload entries:\n");
 	}
-	free(hash);
 
 	RB_FOREACH(vap, vap_tree, &ccr->vaps) {
 		if (outformats & FORMAT_JSON) {
@@ -1064,23 +969,18 @@ print_ccr_aspastate(struct ccr *ccr)
 static void
 print_ccr_tastate(struct ccr *ccr)
 {
-	char *hash, *ski;
+	char *ski;
 	struct ccr_tas_ski *cts;
 	int i = 0;
 
-	if (base64_encode(ccr->tas_hash, SHA256_DIGEST_LENGTH, &hash) == -1)
-		errx(1, "base64_encode");
-
 	if (outformats & FORMAT_JSON) {
 		json_do_object("trustanchor_state", 0);
-		json_do_string("hash", hash);
+		json_do_string("hash", ccr->tas_hash);
 		json_do_array("skis");
 	} else {
-		printf("Trust anchor state hash:  %s\n", hash);
+		printf("Trust anchor state hash:  %s\n", ccr->tas_hash);
 		printf("Trust anchor keyids:      ");
 	}
-
-	free(hash);
 
 	RB_FOREACH(cts, ccr_tas_tree, &ccr->tas) {
 		ski = hex_encode(cts->keyid, sizeof(cts->keyid));
@@ -1107,15 +1007,11 @@ print_ccr_tastate(struct ccr *ccr)
 static void
 print_ccr_rkstate(struct ccr *ccr)
 {
-	char *hash;
 	struct brk *brk;
-
-	if (base64_encode(ccr->brks_hash, SHA256_DIGEST_LENGTH, &hash) == -1)
-		errx(1, "base64_encode");
 
 	if (outformats & FORMAT_JSON) {
 		json_do_object("routerkey_state", 0);
-		json_do_string("hash", hash);
+		json_do_string("hash", ccr->brks_hash);
 		json_do_array("routerkeys");
 		RB_FOREACH(brk, brk_tree, &ccr->brks) {
 			json_do_object("brk", 0);
@@ -1127,7 +1023,7 @@ print_ccr_rkstate(struct ccr *ccr)
 		json_do_end(); /* routerkeys */
 		json_do_end(); /* routerkey_state */
 	} else {
-		printf("Router key state hash:    %s\n", hash);
+		printf("Router key state hash:    %s\n", ccr->brks_hash);
 		printf("Router keys:\n");
 		RB_FOREACH(brk, brk_tree, &ccr->brks) {
 			printf("%26s", "");
@@ -1136,8 +1032,6 @@ print_ccr_rkstate(struct ccr *ccr)
 			printf("pubkey:%s\n", brk->pubkey);
 		}
 	}
-
-	free(hash);
 }
 
 void

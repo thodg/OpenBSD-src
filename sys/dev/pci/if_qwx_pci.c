@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_qwx_pci.c,v 1.29 2025/09/17 07:41:45 stsp Exp $	*/
+/*	$OpenBSD: if_qwx_pci.c,v 1.31 2026/01/20 11:19:50 stsp Exp $	*/
 
 /*
  * Copyright 2023 Stefan Sperling <stsp@openbsd.org>
@@ -1084,7 +1084,8 @@ unsupported_wcn6855_soc:
 	    IEEE80211_C_MONITOR |	/* monitor mode supported */
 #endif
 	    IEEE80211_C_SHSLOT |	/* short slot time supported */
-	    IEEE80211_C_SHPREAMBLE;	/* short preamble supported */
+	    IEEE80211_C_SHPREAMBLE |	/* short preamble supported */
+	    IEEE80211_C_MFP;		/* management frame protection */
 
 	ic->ic_sup_rates[IEEE80211_MODE_11A] = ieee80211_std_rateset_11a;
 	ic->ic_sup_rates[IEEE80211_MODE_11B] = ieee80211_std_rateset_11b;
@@ -3423,6 +3424,9 @@ qwx_rddm_prepare(struct qwx_pci_softc *psc)
 	const size_t chunk_size = MHI_DMA_VEC_CHUNK_SIZE;
 	size_t nseg, remain, vec_size;
 	int i;
+
+	if (psc->rddm_data != NULL)
+		return; /* already allocated */
 
 	nseg = howmany(len, chunk_size);
 	if (nseg == 0) {

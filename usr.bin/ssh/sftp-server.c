@@ -1,4 +1,4 @@
-/* $OpenBSD: sftp-server.c,v 1.149 2025/09/02 09:26:21 djm Exp $ */
+/* $OpenBSD: sftp-server.c,v 1.152 2026/02/13 19:06:18 dtucker Exp $ */
 /*
  * Copyright (c) 2000-2004 Markus Friedl.  All rights reserved.
  *
@@ -19,18 +19,18 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/mount.h>
 #include <sys/statvfs.h>
 
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
+#include <pwd.h>
+#include <grp.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <pwd.h>
-#include <grp.h>
 #include <time.h>
 #include <unistd.h>
 #include <stdarg.h>
@@ -1725,7 +1725,7 @@ process_extended_get_users_groups_by_id(u_int32_t id)
 		debug3_f("gid %u => \"%s\"", n, name);
 		if ((r = sshbuf_put_cstring(groupnames, name)) != 0)
 			fatal_fr(r, "assemble gid reply");
-		nusers++;
+		ngroups++;
 	}
 	verbose("users-groups-by-id: %u users, %u groups", nusers, ngroups);
 

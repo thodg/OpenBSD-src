@@ -1,4 +1,4 @@
-/*	$OpenBSD: qwx.c,v 1.93 2025/09/11 11:18:29 stsp Exp $	*/
+/*	$OpenBSD: qwx.c,v 1.102 2026/02/22 21:38:03 kettenis Exp $	*/
 
 /*
  * Copyright 2023 Stefan Sperling <stsp@openbsd.org>
@@ -178,6 +178,7 @@ int qwx_scan(struct qwx_softc *, int);
 void qwx_scan_abort(struct qwx_softc *);
 int qwx_auth(struct qwx_softc *);
 int qwx_deauth(struct qwx_softc *);
+int qwx_assoc(struct qwx_softc *);
 int qwx_run(struct qwx_softc *);
 int qwx_run_stop(struct qwx_softc *);
 
@@ -350,6 +351,49 @@ qwx_del_task(struct qwx_softc *sc, struct taskq *taskq, struct task *task)
 }
 
 void
+qwx_mfp_leave_done(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+	struct qwx_softc *sc = ic->ic_softc;
+	struct ifnet *ifp = &ic->ic_if;
+
+	if ((ifp->if_flags & IFF_RUNNING) &&
+	    ic->ic_state == IEEE80211_S_RUN &&
+	    (ni->ni_flags & IEEE80211_NODE_MFP)) {
+		sc->deauth_sent = 1;
+		wakeup(&sc->deauth_sent);
+	}
+}
+
+void
+qwx_mfp_leave(struct qwx_softc *sc)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_node *ni = (void *)ic->ic_bss;
+
+	ic->ic_xflags |= IEEE80211_F_TX_MGMT_ONLY;
+	sc->deauth_sent = 0;
+
+	ni->ni_unref_cb = qwx_mfp_leave_done;
+	ni->ni_unref_arg = NULL;
+	ni->ni_unref_arg_size = 0;
+
+	/*
+	 * Send an authenticated deauth frame in order to let our AP know we
+	 * are leaving. This allows our AP to tear down MFP state cleanly.
+	 * Otherwise we would remain locked out of this AP until a timeout
+	 * of stale MFP state occurs at the AP, which might take a while.
+	 */
+	if (IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_DEAUTH,
+	    IEEE80211_REASON_AUTH_LEAVE) != 0) {
+		ni->ni_unref_cb = NULL;
+		return;
+	}
+
+	if (tsleep_nsec(&sc->deauth_sent, 0, "qwxlv", MSEC_TO_NSEC(500)) != 0)
+		ni->ni_unref_cb = NULL;
+}
+
+void
 qwx_stop(struct ifnet *ifp)
 {
 	struct qwx_softc *sc = ifp->if_softc;
@@ -373,14 +417,19 @@ qwx_stop(struct ifnet *ifp)
 	qwx_del_task(sc, systq, &sc->bgscan_task);
 	refcnt_finalize(&sc->task_refs, "qwxstop");
 
+	clear_bit(ATH11K_FLAG_CRASH_FLUSH, sc->sc_flags);
+
+	if (ic->ic_opmode == IEEE80211_M_STA &&
+	    ic->ic_state == IEEE80211_S_RUN &&
+	    (ic->ic_bss->ni_flags & IEEE80211_NODE_MFP))
+		qwx_mfp_leave(sc);
+
 	qwx_setkey_clear(sc);
 
 	ifp->if_timer = sc->sc_tx_timer = 0;
 
 	ifp->if_flags &= ~IFF_RUNNING;
 	ifq_clr_oactive(&ifp->if_snd);
-
-	clear_bit(ATH11K_FLAG_CRASH_FLUSH, sc->sc_flags);
 
 	/*
 	 * Manually run the newstate task's code for switching to INIT state.
@@ -661,7 +710,8 @@ qwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 
 	if (test_bit(ATH11K_FLAG_HW_CRYPTO_DISABLED, sc->sc_flags) ||
 	    k->k_cipher == IEEE80211_CIPHER_WEP40 ||
-	    k->k_cipher == IEEE80211_CIPHER_WEP104)
+	    k->k_cipher == IEEE80211_CIPHER_WEP104 ||
+	    k->k_cipher == IEEE80211_CIPHER_BIP)
 		return ieee80211_set_key(ic, ni, k);
 
 	return qwx_queue_setkey_cmd(ic, ni, k, QWX_ADD_KEY);
@@ -675,7 +725,8 @@ qwx_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
 
 	if (test_bit(ATH11K_FLAG_HW_CRYPTO_DISABLED, sc->sc_flags) ||
 	    k->k_cipher == IEEE80211_CIPHER_WEP40 ||
-	    k->k_cipher == IEEE80211_CIPHER_WEP104) {
+	    k->k_cipher == IEEE80211_CIPHER_WEP104 ||
+	    k->k_cipher == IEEE80211_CIPHER_BIP) {
 		ieee80211_delete_key(ic, ni, k);
 		return;
 	}
@@ -1148,6 +1199,7 @@ next_scan:
 		break;
 
 	case IEEE80211_S_ASSOC:
+		err = qwx_assoc(sc);
 		break;
 
 	case IEEE80211_S_RUN:
@@ -8398,7 +8450,6 @@ qwx_qmi_mem_seg_send(struct qwx_softc *sc)
 	struct qmi_wlanfw_respond_mem_req_msg_v01 *req;
 	struct qmi_wlanfw_request_mem_ind_msg_v01 *ind;
 	uint32_t mem_seg_len;
-	const uint32_t mem_seg_len_max = 64; /* bump if needed by future fw */
 	uint16_t expected_result;
 	size_t total_size;
 	int i, ret;
@@ -8419,7 +8470,7 @@ qwx_qmi_mem_seg_send(struct qwx_softc *sc)
 
 	ind = sc->sc_req_mem_ind;
 	mem_seg_len = le32toh(ind->mem_seg_len);
-	if (mem_seg_len > mem_seg_len_max) {
+	if (mem_seg_len > nitems(ind->mem_seg)) {
 		printf("%s: firmware requested too many memory segments: %u\n",
 		    sc->sc_dev.dv_xname, mem_seg_len);
 		free(sc->sc_req_mem_ind, M_DEVBUF, sizeof(*sc->sc_req_mem_ind));
@@ -13513,23 +13564,25 @@ qwx_mgmt_rx_event(struct qwx_softc *sc, struct mbuf *m)
 
 	wh = mtod(m, struct ieee80211_frame *);
 	ni = ieee80211_find_rxnode(ic, wh);
-#if 0
+
 	/* In case of PMF, FW delivers decrypted frames with Protected Bit set.
 	 * Don't clear that. Also, FW delivers broadcast management frames
 	 * (ex: group privacy action frames in mesh) as encrypted payload.
 	 */
-	if (ieee80211_has_protected(hdr->frame_control) &&
-	    !is_multicast_ether_addr(ieee80211_get_DA(hdr))) {
-		status->flag |= RX_FLAG_DECRYPTED;
-
+	if ((wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
+	    !IEEE80211_IS_MULTICAST(wh->i_addr1)) {
+		rxi.rxi_flags |= IEEE80211_RXI_HWDEC;
+#if 0
 		if (!ieee80211_is_robust_mgmt_frame(skb)) {
 			status->flag |= RX_FLAG_IV_STRIPPED |
 					RX_FLAG_MMIC_STRIPPED;
 			hdr->frame_control = __cpu_to_le16(fc &
 					     ~IEEE80211_FCTL_PROTECTED);
 		}
+#endif
 	}
 
+#if 0
 	if (ieee80211_is_beacon(hdr->frame_control))
 		ath11k_mac_handle_beacon(ar, skb);
 #endif
@@ -16031,6 +16084,21 @@ qwx_dp_tx_complete_msdu(struct qwx_softc *sc, struct dp_tx_ring *tx_ring,
 	} else if (pkt_type == HAL_TX_RATE_STATS_PKT_TYPE_11N)
 		tx_data->ni->ni_txmcs = mcs;
 
+	/*
+	 * Update RSSI from ACK frames. The ack_rssi field contains
+	 * the signal strength of received ACK frames. If hardware
+	 * supports dB to dBm conversion, the value is already in dBm.
+	 * Otherwise, add the noise floor to convert from dB to dBm.
+	 */
+	if (ts->status == HAL_WBM_TQM_REL_REASON_FRAME_ACKED &&
+	    ts->ack_rssi != 0) {
+		int8_t rssi_dbm = (int8_t)ts->ack_rssi;
+		if (!isset(sc->wmi.svc_map,
+		    WMI_TLV_SERVICE_HW_DB2DBM_CONVERSION_SUPPORT))
+			rssi_dbm += ATH11K_DEFAULT_NOISE_FLOOR;
+		tx_data->ni->ni_rssi = rssi_dbm;
+	}
+
 	ieee80211_release_node(ic, tx_data->ni);
 	tx_data->ni = NULL;
 }
@@ -16564,6 +16632,8 @@ void
 qwx_dp_rx_wbm_err(struct qwx_softc *sc, struct qwx_rx_msdu *msdu,
     struct qwx_rx_msdu_list *msdu_list)
 {
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ifnet *ifp = &ic->ic_if;
 	int drop = 1;
 
 	switch (msdu->err_rel_src) {
@@ -16581,6 +16651,7 @@ qwx_dp_rx_wbm_err(struct qwx_softc *sc, struct qwx_rx_msdu *msdu,
 	if (drop) {
 		m_freem(msdu->m);
 		msdu->m = NULL;
+		ifp->if_ierrors++;
 		return;
 	}
 
@@ -19827,7 +19898,7 @@ qwx_wmi_mgmt_send(struct qwx_softc *sc, struct qwx_vif *arvif, uint8_t pdev_id,
 	frame_tlv->header = FIELD_PREP(WMI_TLV_TAG, WMI_TAG_ARRAY_BYTE) |
 	    FIELD_PREP(WMI_TLV_LEN, buf_len);
 
-	memcpy(frame_tlv->value, mtod(frame, void *), buf_len);
+	m_copydata(frame, 0, buf_len, frame_tlv->value);
 #if 0 /* Not needed on OpenBSD? */
 	ath11k_ce_byte_swap(frame_tlv->value, buf_len);
 #endif
@@ -21136,7 +21207,8 @@ qwx_hal_alloc_cont_rdp(struct qwx_softc *sc)
 			return ENOMEM;
 
 		}
-	}
+	} else
+		memset(QWX_DMA_KVA(hal->rdpmem), 0, size);
 
 	hal->rdp.vaddr = QWX_DMA_KVA(hal->rdpmem);
 	hal->rdp.paddr = QWX_DMA_DVA(hal->rdpmem);
@@ -21171,7 +21243,8 @@ qwx_hal_alloc_cont_wrp(struct qwx_softc *sc)
 			return ENOMEM;
 
 		}
-	}
+	} else
+		memset(QWX_DMA_KVA(hal->wrpmem), 0, size);
 
 	hal->wrp.vaddr = QWX_DMA_KVA(hal->wrpmem);
 	hal->wrp.paddr = QWX_DMA_DVA(hal->wrpmem);
@@ -22145,8 +22218,8 @@ qwx_ce_alloc_ring(struct qwx_softc *sc, int nentries, size_t desc_sz)
 		return NULL;
 	}
 
-	if (bus_dmamap_load(sc->sc_dmat, ce_ring->dmap, ce_ring->base_addr,
-	    dsize, NULL, BUS_DMA_NOWAIT)) {
+	if (bus_dmamap_load_raw(sc->sc_dmat, ce_ring->dmap, &ce_ring->dsegs,
+	    ce_ring->nsegs, dsize, BUS_DMA_NOWAIT)) {
 		qwx_ce_free_ring(sc, ce_ring);
 		return NULL;
 	}
@@ -25147,6 +25220,7 @@ qwx_dp_tx(struct qwx_softc *sc, struct qwx_vif *arvif, uint8_t pdev_id,
 					return ENOSPC;
 				}
 				break;
+			case IEEE80211_CIPHER_BIP:
 			default:
 				ti.encrypt_type = HAL_ENCRYPT_TYPE_OPEN;
 				break;
@@ -25340,34 +25414,65 @@ int
 qwx_mac_mgmt_tx_wmi(struct qwx_softc *sc, struct qwx_vif *arvif,
     uint8_t pdev_id, struct ieee80211_node *ni, struct mbuf *m)
 {
+	struct ieee80211com *ic = &sc->sc_ic;
 	struct qwx_txmgmt_queue *txmgmt = &arvif->txmgmt;
 	struct qwx_tx_data *tx_data;
+	struct ieee80211_frame *wh;
 	int buf_id;
 	int ret;
+	uint8_t subtype;
 
 	buf_id = txmgmt->cur;
 
 	DNPRINTF(QWX_D_MAC, "%s: tx mgmt frame, buf id %d\n", __func__, buf_id);
 
-	if (txmgmt->queued >= nitems(txmgmt->data))
+	if (txmgmt->queued >= nitems(txmgmt->data)) {
+		m_freem(m);
 		return ENOSPC;
+	}
 
 	tx_data = &txmgmt->data[buf_id];
-#if 0
-	if (!(info->flags & IEEE80211_TX_CTL_HW_80211_ENCAP)) {
-		if ((ieee80211_is_action(hdr->frame_control) ||
-		     ieee80211_is_deauth(hdr->frame_control) ||
-		     ieee80211_is_disassoc(hdr->frame_control)) &&
-		     ieee80211_has_protected(hdr->frame_control)) {
-			skb_put(skb, IEEE80211_CCMP_MIC_LEN);
+
+	wh = mtod(m, struct ieee80211_frame *);
+	subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
+
+	if ((ni->ni_flags & IEEE80211_NODE_MFP) &&
+	    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
+	    (subtype == IEEE80211_FC0_SUBTYPE_DISASSOC ||
+	     subtype == IEEE80211_FC0_SUBTYPE_DEAUTH ||
+	     subtype == IEEE80211_FC0_SUBTYPE_ACTION)) {
+		if (IEEE80211_IS_MULTICAST(wh->i_addr1)) {
+			struct ieee80211_key *k;
+
+			/* BIP needs to be done in software crypto. */
+			k = ieee80211_get_txkey(ic, wh, ni);
+			if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
+				return ENOBUFS;
+		} else {
+			int off;
+
+			/* Make space for CCMP header. */
+			if (m_makespace(m, ieee80211_get_hdrlen(wh),
+			    IEEE80211_CCMP_HDRLEN, &off) == NULL) {
+				m_freem(m);
+				return ENOMEM;
+			}
+
+			/* Add trailing space for CCMP MIC. */
+			if (m_makespace(m, m->m_pkthdr.len,
+			    IEEE80211_CCMP_MICLEN, &off) == NULL) {
+				m_freem(m);
+				return ENOMEM;
+			}
 		}
 	}
-#endif
+
 	ret = bus_dmamap_load_mbuf(sc->sc_dmat, tx_data->map,
 	    m, BUS_DMA_WRITE | BUS_DMA_NOWAIT);
 	if (ret && ret != EFBIG) {
 		printf("%s: failed to map mgmt Tx buffer: %d\n",
 		    sc->sc_dev.dv_xname, ret);
+		m_freem(m);
 		return ret;
 	}
 	if (ret) {
@@ -25390,6 +25495,7 @@ qwx_mac_mgmt_tx_wmi(struct qwx_softc *sc, struct qwx_vif *arvif,
 	if (ret) {
 		printf("%s: failed to send mgmt frame: %d\n",
 		    sc->sc_dev.dv_xname, ret);
+		m_freem(m);
 		goto err_unmap_buf;
 	}
 	tx_data->ni = ni;
@@ -26057,15 +26163,6 @@ qwx_deauth(struct qwx_softc *sc)
 		return ret;
 	}
 
-
-	ret = qwx_wmi_set_peer_param(sc, peer->addr, arvif->vdev_id,
-	    pdev_id, WMI_PEER_AUTHORIZE, 0);
-	if (ret) {
-		printf("%s: unable to deauthorize BSS peer: %d\n",
-		   sc->sc_dev.dv_xname, ret);
-		return ret;
-	}
-
 	qwx_clear_pn_replay_config(sc, peer);
 	qwx_clear_hwkeys(sc, peer);
 
@@ -26110,12 +26207,11 @@ qwx_peer_assoc_h_crypto(struct qwx_softc *sc, struct qwx_vif *arvif,
 		if (ni->ni_rsnprotos == IEEE80211_PROTO_WPA)
 			arg->need_gtk_2_way = 1;
 	}
-#if 0
-	if (sta->mfp) {
+
+	if (ni->ni_flags & IEEE80211_NODE_MFP) {
 		/* TODO: Need to check if FW supports PMF? */
 		arg->is_pmf_enabled = true;
 	}
-#endif
 }
 
 int
@@ -26472,7 +26568,7 @@ qwx_setup_peer_smps(struct qwx_softc *sc, uint8_t pdev_id, struct qwx_vif *arvif
 }
 
 int
-qwx_run(struct qwx_softc *sc)
+qwx_assoc(struct qwx_softc *sc)
 {
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct ieee80211_node *ni = ic->ic_bss;
@@ -26535,6 +26631,25 @@ qwx_run(struct qwx_softc *sc)
 	IEEE80211_ADDR_COPY(arvif->bssid, ni->ni_bssid);
 	sc->bss_peer_id = nq->peer_id;
 
+	/*
+	 * Enable reception of data frames now, if not already enabled.
+	 * We may need to receive EAPOL data frames very soon after the
+	 * AP sends a response to our assoc request.
+	 */
+	sc->ops.irq_enable(sc);
+
+	return 0;
+}
+
+int
+qwx_run(struct qwx_softc *sc)
+{
+	struct ieee80211com *ic = &sc->sc_ic;
+	struct ieee80211_node *ni = ic->ic_bss;
+	struct qwx_vif *arvif = TAILQ_FIRST(&sc->vif_list); /* XXX */
+	uint8_t pdev_id = 0; /* TODO: derive pdev ID somehow? */
+	int ret;
+
 	ret = qwx_wmi_vdev_up(sc, arvif->vdev_id, pdev_id, arvif->aid,
 	    arvif->bssid, NULL, 0, 0);
 	if (ret) {
@@ -26559,7 +26674,6 @@ qwx_run(struct qwx_softc *sc)
 		return ret;
 	}
 
-	sc->ops.irq_enable(sc);
 	return 0;
 }
 
@@ -26569,10 +26683,19 @@ qwx_run_stop(struct qwx_softc *sc)
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct qwx_vif *arvif = TAILQ_FIRST(&sc->vif_list); /* XXX */
 	uint8_t pdev_id = 0; /* TODO: derive pdev ID somehow? */
-	struct qwx_node *nq = (void *)ic->ic_bss;
+	struct ieee80211_node *ni = ic->ic_bss;
+	struct qwx_node *nq = (void *)ni;
 	int ret;
 
 	sc->ops.irq_disable(sc);
+
+	ret = qwx_wmi_set_peer_param(sc, ni->ni_macaddr, arvif->vdev_id,
+	    pdev_id, WMI_PEER_AUTHORIZE, 0);
+	if (ret) {
+		printf("%s: unable to deauthorize BSS peer: %d\n",
+		   sc->sc_dev.dv_xname, ret);
+		return ret;
+	}
 
 	if (ic->ic_opmode == IEEE80211_M_STA) {
 		ic->ic_bss->ni_txrate = 0;
@@ -26663,25 +26786,23 @@ qwx_dmamem_alloc(bus_dma_tag_t dmat, bus_size_t size, bus_size_t align)
 	struct qwx_dmamem *adm;
 	int nsegs;
 
-	adm = malloc(sizeof(*adm), M_DEVBUF, M_NOWAIT | M_ZERO);
-	if (adm == NULL)
-		return NULL;
+	adm = malloc(sizeof(*adm), M_DEVBUF, M_WAITOK | M_ZERO);
 	adm->size = size;
 
 	if (bus_dmamap_create(dmat, size, 1, size, 0,
-	    BUS_DMA_NOWAIT | BUS_DMA_ALLOCNOW, &adm->map) != 0)
+	    BUS_DMA_WAITOK | BUS_DMA_ALLOCNOW, &adm->map) != 0)
 		goto admfree;
 
 	if (bus_dmamem_alloc_range(dmat, size, align, 0, &adm->seg, 1,
-	    &nsegs, BUS_DMA_NOWAIT | BUS_DMA_ZERO, 0, 0xffffffff) != 0)
+	    &nsegs, BUS_DMA_WAITOK | BUS_DMA_ZERO, 0, 0xffffffff) != 0)
 		goto destroy;
 
 	if (bus_dmamem_map(dmat, &adm->seg, nsegs, size,
-	    &adm->kva, BUS_DMA_NOWAIT | BUS_DMA_COHERENT) != 0)
+	    &adm->kva, BUS_DMA_WAITOK | BUS_DMA_COHERENT) != 0)
 		goto free;
 
 	if (bus_dmamap_load_raw(dmat, adm->map, &adm->seg, nsegs, size,
-	    BUS_DMA_NOWAIT) != 0)
+	    BUS_DMA_WAITOK) != 0)
 		goto unmap;
 
 	bzero(adm->kva, size);
@@ -26703,6 +26824,7 @@ admfree:
 void
 qwx_dmamem_free(bus_dma_tag_t dmat, struct qwx_dmamem *adm)
 {
+	bus_dmamap_unload(dmat, adm->map);
 	bus_dmamem_unmap(dmat, adm->kva, adm->size);
 	bus_dmamem_free(dmat, &adm->seg, 1);
 	bus_dmamap_destroy(dmat, adm->map);
@@ -26725,6 +26847,10 @@ qwx_activate(struct device *self, int act)
 		}
 		break;
 	case DVACT_RESUME:
+		err = qwx_hal_srng_init(sc);
+		if (err)
+			printf("%s: could not initialize hal\n",
+			    sc->sc_dev.dv_xname);
 		break;
 	case DVACT_WAKEUP:
 		if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP) {

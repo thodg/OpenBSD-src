@@ -1,4 +1,4 @@
-/*	$OpenBSD: igmp.c,v 1.88 2025/07/08 00:47:41 jsg Exp $	*/
+/*	$OpenBSD: igmp.c,v 1.95 2026/01/03 14:10:04 bluhm Exp $	*/
 /*	$NetBSD: igmp.c,v 1.15 1996/02/13 23:41:25 christos Exp $	*/
 
 /*
@@ -77,6 +77,7 @@
 
 #include <sys/param.h>
 #include <sys/mbuf.h>
+#include <sys/mutex.h>
 #include <sys/systm.h>
 #include <sys/socket.h>
 #include <sys/protosw.h>
@@ -94,15 +95,33 @@
 
 #define IP_MULTICASTOPTS	0
 
+/*
+ * Locks used to protect global data and struct members:
+ *	I	immutable after creation
+ *	a	atomic
+ *	G	global igmp mutex igmp_mtx
+ */
+
+/*
+ * Per-interface router version information.
+ */
+struct router_info {
+	LIST_ENTRY(router_info)	rti_list;	/* [G] */
+	unsigned int	rti_ifidx;	/* [I] */
+	int		rti_type;	/* [G] type of router on interface */
+	int		rti_age;	/* [G] time since last v1 query */
+};
+
 int	igmp_timers_are_running;	/* [a] shortcut for fast timer */
-static LIST_HEAD(, router_info) rti_head;
+struct mutex igmp_mtx = MUTEX_INITIALIZER(IPL_SOFTNET);
+static LIST_HEAD(, router_info) rti_head;	/* [G] */
 static struct mbuf *router_alert;
 struct cpumem *igmpcounters;
 
 int igmp_checktimer(struct ifnet *);
 void igmp_sendpkt(struct ifnet *, struct in_multi *, int, in_addr_t);
 int rti_fill(struct in_multi *);
-struct router_info * rti_find(struct ifnet *);
+int rti_reset(struct ifnet *);
 int igmp_input_if(struct ifnet *, struct mbuf **, int *, int, int,
     struct netstack *);
 int igmp_sysctl_igmpstat(void *, size_t *, void *);
@@ -137,61 +156,95 @@ igmp_init(void)
 	router_alert->m_len = sizeof(ra->ipopt_dst) + ra->ipopt_list[1];
 }
 
-int
-rti_fill(struct in_multi *inm)
+static struct router_info *
+rti_find(unsigned int ifidx)
 {
 	struct router_info *rti;
 
-	LIST_FOREACH(rti, &rti_head, rti_list) {
-		if (rti->rti_ifidx == inm->inm_ifidx) {
-			inm->inm_rti = rti;
-			if (rti->rti_type == IGMP_v1_ROUTER)
-				return (IGMP_v1_HOST_MEMBERSHIP_REPORT);
-			else
-				return (IGMP_v2_HOST_MEMBERSHIP_REPORT);
-		}
-	}
+	MUTEX_ASSERT_LOCKED(&igmp_mtx);
 
-	rti = malloc(sizeof(*rti), M_MRTABLE, M_WAITOK);
+	LIST_FOREACH(rti, &rti_head, rti_list) {
+		if (rti->rti_ifidx == ifidx)
+			return (rti);
+	}
+	return (NULL);
+}
+
+int
+rti_fill(struct in_multi *inm)
+{
+	struct router_info *rti, *new_rti = NULL;
+	int type;
+
+	mtx_enter(&igmp_mtx);
+	rti = rti_find(inm->inm_ifidx);
+	if (rti != NULL)
+		goto found;
+	mtx_leave(&igmp_mtx);
+
+	new_rti = malloc(sizeof(*rti), M_MRTABLE, M_WAITOK);
+
+	mtx_enter(&igmp_mtx);
+	/* check again after unlock and lock */
+	rti = rti_find(inm->inm_ifidx);
+	if (rti != NULL)
+		goto found;
+	rti = new_rti;
 	rti->rti_ifidx = inm->inm_ifidx;
 	rti->rti_type = IGMP_v2_ROUTER;
 	LIST_INSERT_HEAD(&rti_head, rti, rti_list);
 	inm->inm_rti = rti;
+	mtx_leave(&igmp_mtx);
+
 	return (IGMP_v2_HOST_MEMBERSHIP_REPORT);
+
+ found:
+	inm->inm_rti = rti;
+	type = rti->rti_type;
+	mtx_leave(&igmp_mtx);
+
+	free(new_rti, M_MRTABLE, sizeof(*rti));
+	return (type == IGMP_v1_ROUTER ?
+	    IGMP_v1_HOST_MEMBERSHIP_REPORT : IGMP_v2_HOST_MEMBERSHIP_REPORT);
 }
 
-struct router_info *
-rti_find(struct ifnet *ifp)
+int
+rti_reset(struct ifnet *ifp)
 {
 	struct router_info *rti;
 
-	KERNEL_ASSERT_LOCKED();
-	LIST_FOREACH(rti, &rti_head, rti_list) {
-		if (rti->rti_ifidx == ifp->if_index)
-			return (rti);
-	}
+	mtx_enter(&igmp_mtx);
+	rti = rti_find(ifp->if_index);
+	if (rti != NULL)
+		goto found;
 
 	rti = malloc(sizeof(*rti), M_MRTABLE, M_NOWAIT);
-	if (rti == NULL)
-		return (NULL);
+	if (rti == NULL) {
+		mtx_leave(&igmp_mtx);
+		return (ENOBUFS);
+	}
 	rti->rti_ifidx = ifp->if_index;
-	rti->rti_type = IGMP_v2_ROUTER;
 	LIST_INSERT_HEAD(&rti_head, rti, rti_list);
-	return (rti);
+ found:
+	rti->rti_type = IGMP_v1_ROUTER;
+	rti->rti_age = 0;
+	mtx_leave(&igmp_mtx);
+
+	return (0);
 }
 
 void
 rti_delete(struct ifnet *ifp)
 {
-	struct router_info *rti, *trti;
+	struct router_info *rti;
 
-	LIST_FOREACH_SAFE(rti, &rti_head, rti_list, trti) {
-		if (rti->rti_ifidx == ifp->if_index) {
-			LIST_REMOVE(rti, rti_list);
-			free(rti, M_MRTABLE, sizeof(*rti));
-			break;
-		}
-	}
+	mtx_enter(&igmp_mtx);
+	rti = rti_find(ifp->if_index);
+	if (rti != NULL)
+		LIST_REMOVE(rti, rti_list);
+	mtx_leave(&igmp_mtx);
+
+	free(rti, M_MRTABLE, sizeof(*rti));
 }
 
 int
@@ -226,9 +279,8 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 	int minlen;
 	struct ifmaddr *ifma;
 	struct in_multi *inm;
-	struct router_info *rti;
 	struct in_ifaddr *ia;
-	int timer, running = 0;
+	int error, timer, running = 0;
 
 	igmplen = ntohs(ip->ip_len) - iphlen;
 
@@ -271,13 +323,11 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 			break;
 
 		if (igmp->igmp_code == 0) {
-			rti = rti_find(ifp);
-			if (rti == NULL) {
+			error = rti_reset(ifp);
+			if (error) {
 				m_freem(m);
 				return IPPROTO_DONE;
 			}
-			rti->rti_type = IGMP_v1_ROUTER;
-			rti->rti_age = 0;
 
 			if (ip->ip_dst.s_addr != INADDR_ALLHOSTS_GROUP) {
 				igmpstat_inc(igps_rcv_badqueries);
@@ -377,7 +427,7 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 		 * determine the arrival interface of an incoming packet.
 		 */
 		if ((ip->ip_src.s_addr & IN_CLASSA_NET) == 0) {
-			IFP_TO_IA(ifp, ia);
+			ia = in_ifp2ia(ifp);
 			if (ia)
 				ip->ip_src.s_addr = ia->ia_net;
 		}
@@ -386,7 +436,7 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 		 * If we belong to the group being reported, stop
 		 * our timer for that group.
 		 */
-		IN_LOOKUP_MULTI(igmp->igmp_group, ifp, inm);
+		inm = in_lookupmulti(&igmp->igmp_group, ifp);
 		if (inm != NULL) {
 			inm->inm_timer = 0;
 			igmpstat_inc(igps_rcv_ourreports);
@@ -416,7 +466,7 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 		 * leave requires knowing that we are the only member of a
 		 * group.
 		 */
-		IFP_TO_IA(ifp, ia);
+		ia = in_ifp2ia(ifp);
 		if (ia && ip->ip_src.s_addr == ia->ia_addr.sin_addr.s_addr)
 			break;
 #endif
@@ -444,7 +494,7 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 		 */
 		if ((ip->ip_src.s_addr & IN_CLASSA_NET) == 0) {
 #ifndef MROUTING
-			IFP_TO_IA(ifp, ia);
+			ia = in_ifp2ia(ifp);
 #endif
 			if (ia)
 				ip->ip_src.s_addr = ia->ia_net;
@@ -454,7 +504,7 @@ igmp_input_if(struct ifnet *ifp, struct mbuf **mp, int *offp, int proto,
 		 * If we belong to the group being reported, stop
 		 * our timer for that group.
 		 */
-		IN_LOOKUP_MULTI(igmp->igmp_group, ifp, inm);
+		inm = in_lookupmulti(&igmp->igmp_group, ifp);
 		if (inm != NULL) {
 			inm->inm_timer = 0;
 			igmpstat_inc(igps_rcv_ourreports);
@@ -599,16 +649,14 @@ igmp_slowtimo(void)
 {
 	struct router_info *rti;
 
-	NET_LOCK();
-
+	mtx_enter(&igmp_mtx);
 	LIST_FOREACH(rti, &rti_head, rti_list) {
 		if (rti->rti_type == IGMP_v1_ROUTER &&
 		    ++rti->rti_age >= IGMP_AGE_THRESHOLD) {
 			rti->rti_type = IGMP_v2_ROUTER;
 		}
 	}
-
-	NET_UNLOCK();
+	mtx_leave(&igmp_mtx);
 }
 
 void

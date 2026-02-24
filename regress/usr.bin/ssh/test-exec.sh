@@ -1,4 +1,4 @@
-#	$OpenBSD: test-exec.sh,v 1.133 2025/10/21 07:18:27 dtucker Exp $
+#	$OpenBSD: test-exec.sh,v 1.139 2025/12/22 01:31:07 djm Exp $
 #	Placed in the Public Domain.
 
 #SUDO=sudo
@@ -520,9 +520,9 @@ export EXTRA_AGENT_ARGS
 
 maybe_filter_sk() {
 	if test -z "$SSH_SK_PROVIDER" ; then
-		grep -v ^sk
+		grep -v ^sk | grep -v ^webauthn
 	else
-		cat
+		grep -v ^webauthn
 	fi
 }
 
@@ -709,6 +709,12 @@ start_sshd ()
 	test -f $PIDFILE || fatal "no sshd running on port $PORT"
 }
 
+enable_all_kexes_in_sshd ()
+{
+	kexs=`$SSH -Q KexAlgorithms | (tr '\n' ,; echo) | sed 's/,$//'`
+	echo KexAlgorithms $kexs >>$OBJ/sshd_config
+}
+
 # Find a PKCS#11 library.
 p11_find_lib() {
 	TEST_SSH_PKCS11=""
@@ -816,6 +822,9 @@ p11_ssh_add() {
 
 start_ssh_agent() {
 	EXTRA_AGENT_ARGS="$1"
+	if [ "$PKCS11_OK" = "yes" ]; then
+		EXTRA_AGENT_ARGS="${EXTRA_AGENT_ARGS} -P${TEST_SSH_PKCS11}"
+	fi
 	SSH_AUTH_SOCK="$OBJ/agent.sock"
 	export SSH_AUTH_SOCK
 	rm -f $SSH_AUTH_SOCK $OBJ/agent.log
@@ -824,7 +833,7 @@ start_ssh_agent() {
 	    > $OBJ/agent.log 2>&1 &
 	AGENT_PID=$!
 	trap "kill $AGENT_PID" EXIT
-	for x in 0 1 2 3 4 ; do
+	for x in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 ; do
 		# Give it a chance to start
 		${SSHADD} -l > /dev/null 2>&1
 		r=$?

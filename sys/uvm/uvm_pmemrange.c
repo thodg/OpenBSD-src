@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_pmemrange.c,v 1.77 2025/02/19 11:10:54 mpi Exp $	*/
+/*	$OpenBSD: uvm_pmemrange.c,v 1.82 2026/02/11 22:34:41 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2024 Martin Pieuchot <mpi@openbsd.org>
@@ -952,9 +952,11 @@ retry:		/* Return point after sleeping. */
 	 * check to see if we need to generate some free pages waking
 	 * the pagedaemon.
 	 */
-	if ((uvmexp.free - BUFPAGES_DEFICIT) < uvmexp.freemin ||
-	    ((uvmexp.free - BUFPAGES_DEFICIT) < uvmexp.freetarg &&
-	    (uvmexp.inactive + BUFPAGES_INACT) < uvmexp.inactarg))
+	if ((atomic_load_sint(&uvmexp.free) - BUFPAGES_DEFICIT) < uvmexp.freemin ||
+	    ((atomic_load_sint(&uvmexp.free) - BUFPAGES_DEFICIT) <
+	    atomic_load_sint(&uvmexp.freetarg) &&
+	    (atomic_load_sint(&uvmexp.inactive) + BUFPAGES_INACT) <
+	    atomic_load_sint(&uvmexp.inactarg)))
 		wakeup(&uvm.pagedaemon);
 
 	/*
@@ -965,13 +967,13 @@ retry:		/* Return point after sleeping. */
 	 * [3]  only pagedaemon "reserved" pages remain and
 	 *        the requestor isn't the pagedaemon nor the syncer.
 	 */
-	if ((uvmexp.free <= (uvmexp.reserve_kernel + count)) &&
+	if ((atomic_load_sint(&uvmexp.free) <= uvmexp.reserve_kernel + count) &&
 	    !(flags & UVM_PLA_USERESERVE)) {
 		uvm_unlock_fpageq();
 		return ENOMEM;
 	}
 
-	if ((uvmexp.free <= (uvmexp.reserve_pagedaemon + count)) &&
+	if ((atomic_load_sint(&uvmexp.free) <= uvmexp.reserve_pagedaemon + count) &&
 	    !in_pagedaemon(1)) {
 	    	uvm_unlock_fpageq();
 		if (flags & UVM_PLA_WAITOK) {
@@ -1186,7 +1188,11 @@ fail:
 
 		if (!(nowait_pma.pm_flags & UVM_PMA_LINKED)) {
 			nowait_pma.pm_flags = UVM_PMA_LINKED;
-			TAILQ_INSERT_TAIL(&uvm.pmr_control.allocs, pma, pmq);
+			/*
+			 * Ensure this is processed first by the page daemon
+			 * to avoid starvation behind non-constrained requests.
+			 */
+			TAILQ_INSERT_HEAD(&uvm.pmr_control.allocs, pma, pmq);
 			wakeup(&uvm.pagedaemon);
 		}
 	}
@@ -1196,7 +1202,7 @@ fail:
 
 out:
 	/* Allocation successful. */
-	uvmexp.free -= fcount;
+	atomic_sub_int(&uvmexp.free, fcount);
 
 	uvm_unlock_fpageq();
 
@@ -1211,16 +1217,16 @@ out:
 
 		if (found->pg_flags & PG_ZERO) {
 			uvm_lock_fpageq();
-			uvmexp.zeropages--;
-			if (uvmexp.zeropages < UVM_PAGEZERO_TARGET)
+			atomic_dec_int(&uvmexp.zeropages);
+			if (atomic_load_sint(&uvmexp.zeropages) < UVM_PAGEZERO_TARGET)
 				wakeup(&uvmexp.zeropages);
 			uvm_unlock_fpageq();
 		}
 		if (flags & UVM_PLA_ZERO) {
 			if (found->pg_flags & PG_ZERO)
-				uvmexp.pga_zerohit++;
+				atomic_inc_int(&uvmexp.pga_zerohit);
 			else {
-				uvmexp.pga_zeromiss++;
+				atomic_inc_int(&uvmexp.pga_zeromiss);
 				uvm_pagezero(found);
 			}
 		}
@@ -1330,11 +1336,11 @@ uvm_pmr_freepages(struct vm_page *pg, psize_t count)
 		pg->fpgsz = pmr_count;
 		uvm_pmr_insert(pmr, pg, 0);
 
-		uvmexp.free += pmr_count;
+		atomic_add_int(&uvmexp.free, pmr_count);
 		pg += pmr_count;
 	}
 	wakeup(&uvmexp.free);
-	if (uvmexp.zeropages < UVM_PAGEZERO_TARGET)
+	if (atomic_load_sint(&uvmexp.zeropages) < UVM_PAGEZERO_TARGET)
 		wakeup(&uvmexp.zeropages);
 
 	uvm_wakeup_pla(VM_PAGE_TO_PHYS(firstpg), ptoa(count));
@@ -1381,12 +1387,12 @@ uvm_pmr_freepageq(struct pglist *pgl)
 			pstart = VM_PAGE_TO_PHYS(TAILQ_FIRST(pgl));
 			plen = uvm_pmr_remove_1strange(pgl, 0, NULL, 0);
 		}
-		uvmexp.free += plen;
+		atomic_add_int(&uvmexp.free, plen);
 
 		uvm_wakeup_pla(pstart, ptoa(plen));
 	}
 	wakeup(&uvmexp.free);
-	if (uvmexp.zeropages < UVM_PAGEZERO_TARGET)
+	if (atomic_load_sint(&uvmexp.zeropages) < UVM_PAGEZERO_TARGET)
 		wakeup(&uvmexp.zeropages);
 	uvm_unlock_fpageq();
 
@@ -2148,7 +2154,7 @@ uvm_wait_pla(paddr_t low, paddr_t high, paddr_t size, int failok)
 		TAILQ_INSERT_TAIL(&uvm.pmr_control.allocs, &pma, pmq);
 
 		wakeup(&uvm.pagedaemon);		/* wake the daemon! */
-		while (pma.pm_flags & (UVM_PMA_LINKED | UVM_PMA_BUSY))
+		while (pma.pm_flags & UVM_PMA_LINKED)
 			msleep_nsec(&pma, &uvm.fpageqlock, PVM, wmsg, INFSLP);
 
 		if (!(pma.pm_flags & UVM_PMA_FREED) &&
@@ -2182,12 +2188,9 @@ uvm_wakeup_pla(paddr_t low, psize_t len)
 		if (low < pma->pm_constraint.ucr_high &&
 		    high > pma->pm_constraint.ucr_low) {
 			pma->pm_flags |= UVM_PMA_FREED;
-			if (!(pma->pm_flags & UVM_PMA_BUSY)) {
-				pma->pm_flags &= ~UVM_PMA_LINKED;
-				TAILQ_REMOVE(&uvm.pmr_control.allocs, pma,
-				    pmq);
-				wakeup(pma);
-			}
+			pma->pm_flags &= ~UVM_PMA_LINKED;
+			TAILQ_REMOVE(&uvm.pmr_control.allocs, pma, pmq);
+			wakeup(pma);
 		}
 	}
 }
@@ -2207,7 +2210,7 @@ uvm_pagezero_thread(void *arg)
 	TAILQ_INIT(&pgl);
 	for (;;) {
 		uvm_lock_fpageq();
-		while (uvmexp.zeropages >= UVM_PAGEZERO_TARGET ||
+		while (atomic_load_sint(&uvmexp.zeropages) >= UVM_PAGEZERO_TARGET ||
 		    (count = uvm_pmr_get1page(16, UVM_PMR_MEMTYPE_DIRTY,
 		     &pgl, 0, 0, 1)) == 0) {
 			msleep_nsec(&uvmexp.zeropages, &uvm.fpageqlock,
@@ -2223,7 +2226,7 @@ uvm_pagezero_thread(void *arg)
 		uvm_lock_fpageq();
 		while (!TAILQ_EMPTY(&pgl))
 			uvm_pmr_remove_1strange(&pgl, 0, NULL, 0);
-		uvmexp.zeropages += count;
+		atomic_add_int(&uvmexp.zeropages, count);
  		uvm_unlock_fpageq();
 
 		yield();
@@ -2239,7 +2242,7 @@ uvm_pmr_cache_alloc(struct uvm_pmr_cache_item *upci)
 	int flags = UVM_PLA_NOWAIT|UVM_PLA_NOWAKE;
 	int npages = UVM_PMR_CACHEMAGSZ;
 
-	splassert(IPL_VM);
+	splassert(IPL_BIO);
 	KASSERT(upci->upci_npages == 0);
 
 	TAILQ_INIT(&pgl);
@@ -2264,7 +2267,11 @@ uvm_pmr_cache_get(int flags)
 	struct vm_page *pg;
 	int s;
 
-	s = splvm();
+	/*
+	 * XXX The buffer flipper (incorrectly?) allocates & frees pages
+	 * (from uvm_pagerealloc_multi()) from interrupt context!
+	 */
+	s = splbio();
 	upci = &upc->upc_magz[upc->upc_actv];
 	if (upci->upci_npages == 0) {
 		unsigned int prev;
@@ -2301,7 +2308,7 @@ uvm_pmr_cache_free(struct uvm_pmr_cache_item *upci)
 	struct pglist pgl;
 	unsigned int i;
 
-	splassert(IPL_VM);
+	splassert(IPL_BIO);
 
 	TAILQ_INIT(&pgl);
 	for (i = 0; i < upci->upci_npages; i++)
@@ -2334,7 +2341,15 @@ uvm_pmr_cache_put(struct vm_page *pg)
 		return;
 	}
 
-	s = splvm();
+	KASSERT(pg->wire_count == 0);
+	KASSERT(pg->uanon == (void*)0xdeadbeef || pg->uanon == NULL);
+	KASSERT(pg->uobject == (void*)0xdeadbeef || pg->uobject == NULL);
+
+	/*
+	 * XXX The buffer flipper (incorrectly?) allocates & frees pages
+	 * (from uvm_pagerealloc_multi()) from interrupt context!
+	 */
+	s = splbio();
 	upci = &upc->upc_magz[upc->upc_actv];
 	if (upci->upci_npages >= UVM_PMR_CACHEMAGSZ) {
 		unsigned int prev;
@@ -2362,7 +2377,11 @@ uvm_pmr_cache_drain(void)
 	unsigned int freed = 0;
 	int s;
 
-	s = splvm();
+	/*
+	 * XXX The buffer flipper (incorrectly?) allocates & frees pages
+	 * (from uvm_pagerealloc_multi()) from interrupt context!
+	 */
+	s = splbio();
 	freed += uvm_pmr_cache_free(&upc->upc_magz[0]);
 	freed += uvm_pmr_cache_free(&upc->upc_magz[1]);
 	splx(s);

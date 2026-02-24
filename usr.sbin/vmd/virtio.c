@@ -1,4 +1,4 @@
-/*	$OpenBSD: virtio.c,v 1.128 2025/10/20 19:22:00 dv Exp $	*/
+/*	$OpenBSD: virtio.c,v 1.135 2026/02/22 22:54:54 dv Exp $	*/
 
 /*
  * Copyright (c) 2015 Mike Larkin <mlarkin@openbsd.org>
@@ -54,7 +54,6 @@
 #endif	/* VIRTIO_DEBUG */
 
 extern struct vmd *env;
-extern char *__progname;
 
 struct virtio_dev viornd;
 struct virtio_dev *vioscsi = NULL;
@@ -74,8 +73,8 @@ SLIST_HEAD(virtio_dev_head, virtio_dev) virtio_devs;
 #define RXQ	0
 #define TXQ	1
 
-static void virtio_dev_init(struct virtio_dev *, uint8_t, uint16_t, uint16_t,
-    uint64_t, uint32_t);
+static void virtio_dev_init(struct vmd_vm *, struct virtio_dev *, uint8_t,
+    uint16_t, uint16_t, uint64_t);
 static int virtio_dev_launch(struct vmd_vm *, struct virtio_dev *);
 static void virtio_dispatch_dev(int, short, void *);
 static int handle_dev_msg(struct viodev_msg *, struct virtio_dev *);
@@ -333,9 +332,7 @@ virtio_io_dispatch(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		*data = virtio_io_cfg(dev, dir, actual, *data, sz);
 		break;
 	case VIO1_DEV_BAR_OFFSET:
-		if (dev->device_id == PCI_PRODUCT_VIRTIO_SCSI)
-			return vioscsi_io(dir, actual, data, intr, arg, sz);
-		else if (dir == VEI_DIR_IN) {
+		if (dir == VEI_DIR_IN) {
 			log_debug("%s: no device specific handler", __func__);
 			*data = (uint32_t)(-1);
 		}
@@ -374,8 +371,7 @@ virtio_io_cfg(struct virtio_dev *dev, int dir, uint8_t reg, uint32_t data,
 				pci_cfg->device_feature_select = data;
 			break;
 		case VIO1_PCI_DEVICE_FEATURE:
-			log_warnx("%s: illegal write to device feature "
-			    "register", __progname);
+			log_warnx("illegal write to device feature register");
 			break;
 		case VIO1_PCI_DRIVER_FEATURE_SELECT:
 			if (sz != 4)
@@ -411,8 +407,7 @@ virtio_io_cfg(struct virtio_dev *dev, int dir, uint8_t reg, uint32_t data,
 			/* Ignore until we support MSIX. */
 			break;
 		case VIO1_PCI_NUM_QUEUES:
-			log_warnx("%s: illegal write to num queues register",
-			    __progname);
+			log_warnx("illegal write to num queues register");
 			break;
 		case VIO1_PCI_DEVICE_STATUS:
 			if (sz != 1) {
@@ -458,8 +453,8 @@ virtio_io_cfg(struct virtio_dev *dev, int dir, uint8_t reg, uint32_t data,
 
 			break;
 		case VIO1_PCI_CONFIG_GENERATION:
-			log_warnx("%s: illegal write to config generation "
-			    "register", __progname);
+			log_warnx("illegal write to config generation "
+			    "register");
 			break;
 		case VIO1_PCI_QUEUE_SELECT:
 			pci_cfg->queue_select = data;
@@ -482,8 +477,8 @@ virtio_io_cfg(struct virtio_dev *dev, int dir, uint8_t reg, uint32_t data,
 			virtio_update_qa(dev);
 			break;
 		case VIO1_PCI_QUEUE_NOTIFY_OFF:
-			log_warnx("%s: illegal write to queue notify offset "
-			    "register", __progname);
+			log_warnx("illegal write to queue notify offset "
+			    "register");
 			break;
 		case VIO1_PCI_QUEUE_DESC:
 			if (sz != 4) {
@@ -646,13 +641,14 @@ virtio_io_isr(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 
 	/* Limit to in-process devices. */
 	if (dev->device_id == PCI_PRODUCT_VIRTIO_BLOCK ||
-	    dev->device_id == PCI_PRODUCT_VIRTIO_NETWORK)
+	    dev->device_id == PCI_PRODUCT_VIRTIO_NETWORK ||
+	    dev->device_id == PCI_PRODUCT_VIRTIO_SCSI)
 		fatalx("%s: cannot use on multi-process virtio dev", __func__);
 
 	if (dir == VEI_DIR_IN) {
 		*data = dev->isr;
 		dev->isr = 0;
-		vcpu_deassert_irq(dev->vm_id, 0, dev->irq);
+		vcpu_deassert_irq(dev->vmm_id, 0, dev->irq);
 	}
 
 	return (0);
@@ -673,7 +669,8 @@ virtio_io_notify(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 
 	/* Limit this handler to in-process devices */
 	if (dev->device_id == PCI_PRODUCT_VIRTIO_BLOCK ||
-	    dev->device_id == PCI_PRODUCT_VIRTIO_NETWORK)
+	    dev->device_id == PCI_PRODUCT_VIRTIO_NETWORK ||
+	    dev->device_id == PCI_PRODUCT_VIRTIO_SCSI)
 		fatalx("%s: cannot use on multi-process virtio dev", __func__);
 
 	if (vq_idx >= dev->num_queues) {
@@ -690,9 +687,6 @@ virtio_io_notify(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 	switch (dev->device_id) {
 	case PCI_PRODUCT_VIRTIO_ENTROPY:
 		raise_intr = viornd_notifyq(dev, vq_idx);
-		break;
-	case PCI_PRODUCT_VIRTIO_SCSI:
-		raise_intr = vioscsi_notifyq(dev, vq_idx);
 		break;
 	case PCI_PRODUCT_VIRTIO_VMMCI:
 		/* Does not use a virtqueue. */
@@ -753,7 +747,7 @@ vmmci_ctl(struct virtio_dev *dev, unsigned int cmd)
 
 		/* Trigger interrupt */
 		dev->isr = VIRTIO_CONFIG_ISR_CONFIG_CHANGE;
-		vcpu_assert_irq(dev->vm_id, 0, dev->irq);
+		vcpu_assert_irq(dev->vmm_id, 0, dev->irq);
 
 		/* Add ACK timeout */
 		tv.tv_sec = VMMCI_TIMEOUT_SHORT;
@@ -765,7 +759,7 @@ vmmci_ctl(struct virtio_dev *dev, unsigned int cmd)
 			v->cmd = cmd;
 
 			dev->isr = VIRTIO_CONFIG_ISR_CONFIG_CHANGE;
-			vcpu_assert_irq(dev->vm_id, 0, dev->irq);
+			vcpu_assert_irq(dev->vmm_id, 0, dev->irq);
 		} else {
 			log_debug("%s: RTC sync skipped (guest does not "
 			    "support RTC sync)\n", __func__);
@@ -809,7 +803,7 @@ vmmci_ack(struct virtio_dev *dev, unsigned int cmd)
 		 */
 		if (v->cmd == 0) {
 			log_debug("%s: vm %u requested shutdown", __func__,
-			    dev->vm_id);
+			    dev->vmm_id);
 			vm_pipe_send(&v->dev_pipe, VMMCI_SET_TIMEOUT_SHORT);
 			return;
 		}
@@ -824,13 +818,13 @@ vmmci_ack(struct virtio_dev *dev, unsigned int cmd)
 		 */
 		if (cmd == v->cmd) {
 			log_debug("%s: vm %u acknowledged shutdown request",
-			    __func__, dev->vm_id);
+			    __func__, dev->vmm_id);
 			vm_pipe_send(&v->dev_pipe, VMMCI_SET_TIMEOUT_LONG);
 		}
 		break;
 	case VMMCI_SYNCRTC:
 		log_debug("%s: vm %u acknowledged RTC sync request",
-		    __func__, dev->vm_id);
+		    __func__, dev->vmm_id);
 		v->cmd = VMMCI_NONE;
 		break;
 	default:
@@ -849,7 +843,7 @@ vmmci_timeout(int fd, short type, void *arg)
 		fatalx("%s: device is not a vmmci device", __func__);
 	v = &dev->vmmci;
 
-	log_debug("%s: vm %u shutdown", __progname, dev->vm_id);
+	log_debug("vm %u shutdown", dev->vmm_id);
 	vm_shutdown(v->cmd == VMMCI_REBOOT ? VMMCI_REBOOT : VMMCI_SHUTDOWN);
 }
 
@@ -873,8 +867,8 @@ vmmci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		case VIRTIO_CONFIG_DEVICE_FEATURES:
 		case VIRTIO_CONFIG_QUEUE_SIZE:
 		case VIRTIO_CONFIG_ISR_STATUS:
-			log_warnx("%s: illegal write %x to %s",
-			    __progname, *data, virtio_reg_name(reg));
+			log_warnx("illegal write %x to %s", *data,
+			    virtio_reg_name(reg));
 			break;
 		case VIRTIO_CONFIG_GUEST_FEATURES:
 			dev->cfg.guest_feature = *data;
@@ -938,7 +932,7 @@ vmmci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 		case VIRTIO_CONFIG_ISR_STATUS:
 			*data = dev->isr;
 			dev->isr = 0;
-			vcpu_deassert_irq(dev->vm_id, 0, dev->irq);
+			vcpu_deassert_irq(dev->vmm_id, 0, dev->irq);
 			break;
 		}
 	}
@@ -983,12 +977,16 @@ vmmci_pipe_dispatch(int fd, short event, void *arg)
 	}
 }
 
-void
+/*
+ * Initialize virtio devices, launching subprocesses if needed.
+ *
+ * Returns 0 on success, 1 on failure.
+ */
+int
 virtio_init(struct vmd_vm *vm, int child_cdrom,
     int child_disks[][VM_MAX_BASE_PER_DISK], int *child_taps)
 {
 	struct vmop_create_params *vmc = &vm->vm_params;
-	struct vm_create_params *vcp = &vmc->vmc_params;
 	struct virtio_dev *dev;
 	uint8_t id, i, j;
 	int bar_id, ret = 0;
@@ -1000,19 +998,17 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 	    PCI_PRODUCT_QUMRANET_VIO1_RNG, PCI_CLASS_SYSTEM,
 	    PCI_SUBCLASS_SYSTEM_MISC, PCI_VENDOR_OPENBSD,
 	    PCI_PRODUCT_VIRTIO_ENTROPY, 1, 1, NULL)) {
-		log_warnx("%s: can't add PCI virtio rng device",
-		    __progname);
-		return;
+		log_warnx("can't add PCI virtio rng device");
+		return (1);
 	}
-	virtio_dev_init(&viornd, id, VIORND_QUEUE_SIZE_DEFAULT,
-	    VIRTIO_RND_QUEUES, VIRTIO_F_VERSION_1, vcp->vcp_id);
+	virtio_dev_init(vm, &viornd, id, VIORND_QUEUE_SIZE_DEFAULT,
+	    VIRTIO_RND_QUEUES, VIRTIO_F_VERSION_1);
 
 	bar_id = pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_io_dispatch,
 	    &viornd);
 	if (bar_id == -1 || bar_id > 0xff) {
-		log_warnx("%s: can't add bar for virtio rng device",
-		    __progname);
-		return;
+		log_warnx("can't add bar for virtio rng device");
+		return (1);
 	}
 	virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG, bar_id, 0);
 	virtio_pci_add_cap(id, VIRTIO_PCI_CAP_ISR_CFG, bar_id, 0);
@@ -1023,28 +1019,25 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 		for (i = 0; i < vmc->vmc_nnics; i++) {
 			dev = malloc(sizeof(struct virtio_dev));
 			if (dev == NULL) {
-				log_warn("%s: calloc failure allocating vionet",
-				    __progname);
-				return;
+				log_warn("calloc failure allocating vionet");
+				return (1);
 			}
 			if (pci_add_device(&id, PCI_VENDOR_QUMRANET,
 				PCI_PRODUCT_QUMRANET_VIO1_NET, PCI_CLASS_SYSTEM,
 				PCI_SUBCLASS_SYSTEM_MISC, PCI_VENDOR_OPENBSD,
 				PCI_PRODUCT_VIRTIO_NETWORK, 1, 1, NULL)) {
-				log_warnx("%s: can't add PCI virtio net device",
-				    __progname);
-				return;
+				log_warnx("can't add PCI virtio net device");
+				return (1);
 			}
-			virtio_dev_init(dev, id, VIONET_QUEUE_SIZE_DEFAULT,
+			virtio_dev_init(vm, dev, id, VIONET_QUEUE_SIZE_DEFAULT,
 			    VIRTIO_NET_QUEUES,
-			    (VIRTIO_NET_F_MAC | VIRTIO_F_VERSION_1),
-			    vcp->vcp_id);
+			    (VIRTIO_NET_F_MAC | VIRTIO_F_VERSION_1));
 
 			if (pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io,
 			    dev) == -1) {
-				log_warnx("%s: can't add bar for virtio net "
-				    "device", __progname);
-				return;
+				log_warnx("can't add bar for virtio net "
+				    "device");
+				return (1);
 			}
 			virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG,
 			    bar_id, 0);
@@ -1057,7 +1050,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 
 			/* Device specific initializiation. */
 			dev->dev_type = VMD_DEVTYPE_NET;
-			dev->vm_vmid = vm->vm_vmid;
+			dev->vmm_id = vm->vm_vmmid;
 			dev->vionet.data_fd = child_taps[i];
 
 			/* MAC address has been assigned by the parent */
@@ -1072,7 +1065,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			    &env->vmd_cfg.cfg_localprefix,
 			    sizeof(dev->vionet.local_prefix));
 			log_debug("%s: vm \"%s\" vio%u lladdr %s%s%s%s",
-			    __func__, vcp->vcp_name, i,
+			    __func__, vm->vm_params.vmc_name, i,
 			    ether_ntoa((void *)dev->vionet.mac),
 			    dev->vionet.lockedmac ? ", locked" : "",
 			    dev->vionet.local ? ", local" : "",
@@ -1091,28 +1084,27 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 			if (dev == NULL) {
 				log_warn("%s: failure allocating vioblk",
 				    __func__);
-				return;
+				return (1);
 			}
 			if (pci_add_device(&id, PCI_VENDOR_QUMRANET,
 			    PCI_PRODUCT_QUMRANET_VIO1_BLOCK,
 			    PCI_CLASS_MASS_STORAGE,
 			    PCI_SUBCLASS_MASS_STORAGE_SCSI, PCI_VENDOR_OPENBSD,
 			    PCI_PRODUCT_VIRTIO_BLOCK, 1, 1, NULL)) {
-				log_warnx("%s: can't add PCI virtio block "
-				    "device", __progname);
-				return;
+				log_warnx("can't add PCI virtio block "
+				    "device");
+				return (1);
 			}
-			virtio_dev_init(dev, id, VIOBLK_QUEUE_SIZE_DEFAULT,
+			virtio_dev_init(vm, dev, id, VIOBLK_QUEUE_SIZE_DEFAULT,
 			    VIRTIO_BLK_QUEUES,
-			    (VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_SEG_MAX),
-			    vcp->vcp_id);
+			    (VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_SEG_MAX));
 
 			bar_id = pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io,
 			    dev);
 			if (bar_id == -1 || bar_id > 0xff) {
-				log_warnx("%s: can't add bar for virtio block "
-				    "device", __progname);
-				return;
+				log_warnx("can't add bar for virtio block "
+				    "device");
+				return (1);
 			}
 			virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG,
 			    bar_id, 0);
@@ -1125,7 +1117,7 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 
 			/* Device specific initialization. */
 			dev->dev_type = VMD_DEVTYPE_DISK;
-			dev->vm_vmid = vm->vm_vmid;
+			dev->vmm_id = vm->vm_vmmid;
 			dev->vioblk.seg_max = VIOBLK_SEG_MAX_DEFAULT;
 
 			/*
@@ -1143,37 +1135,26 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 		}
 	}
 
-	/*
-	 * Launch virtio devices that support subprocess execution.
-	 */
-	SLIST_FOREACH(dev, &virtio_devs, dev_next) {
-		if (virtio_dev_launch(vm, dev) != 0)
-			fatalx("failed to launch virtio device");
-	}
-
 	/* Virtio 1.x SCSI CD-ROM */
 	if (strlen(vmc->vmc_cdrom)) {
 		dev = malloc(sizeof(struct virtio_dev));
 		if (dev == NULL) {
-			log_warn("%s: calloc failure allocating vioscsi",
-			    __progname);
-			return;
+			log_warn("calloc failure allocating vioscsi");
+			return (1);
 		}
 		if (pci_add_device(&id, PCI_VENDOR_QUMRANET,
 		    PCI_PRODUCT_QUMRANET_VIO1_SCSI, PCI_CLASS_MASS_STORAGE,
 		    PCI_SUBCLASS_MASS_STORAGE_SCSI, PCI_VENDOR_OPENBSD,
 		    PCI_PRODUCT_VIRTIO_SCSI, 1, 1, NULL)) {
-			log_warnx("%s: can't add PCI vioscsi device",
-			    __progname);
-			return;
+			log_warnx("can't add PCI vioscsi device");
+			return (1);
 		}
-		virtio_dev_init(dev, id, VIOSCSI_QUEUE_SIZE_DEFAULT,
-		    VIRTIO_SCSI_QUEUES, VIRTIO_F_VERSION_1, vcp->vcp_id);
-		if (pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_io_dispatch, dev)
+		virtio_dev_init(vm, dev, id, VIOSCSI_QUEUE_SIZE_DEFAULT,
+		    VIRTIO_SCSI_QUEUES, VIRTIO_F_VERSION_1);
+		if (pci_add_bar(id, PCI_MAPREG_TYPE_IO, virtio_pci_io, dev)
 		    == -1) {
-			log_warnx("%s: can't add bar for vioscsi device",
-			    __progname);
-			return;
+			log_warnx("can't add bar for vioscsi device");
+			return (1);
 		}
 		virtio_pci_add_cap(id, VIRTIO_PCI_CAP_COMMON_CFG, bar_id, 0);
 		virtio_pci_add_cap(id, VIRTIO_PCI_CAP_DEVICE_CFG, bar_id, 36);
@@ -1181,17 +1162,23 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 		virtio_pci_add_cap(id, VIRTIO_PCI_CAP_NOTIFY_CFG, bar_id, 0);
 
 		/* Device specific initialization. */
-		if (virtio_raw_init(&dev->vioscsi.file, &dev->vioscsi.sz,
-		    &child_cdrom, 1) == -1) {
-			log_warnx("%s: unable to determine iso format",
-			    __func__);
-			return;
-		}
+		dev->dev_type = VMD_DEVTYPE_SCSI;
+		dev->vmm_id = vm->vm_vmmid;
+		dev->vioscsi.cdrom_fd = child_cdrom;
 		dev->vioscsi.locked = 0;
 		dev->vioscsi.lba = 0;
-		dev->vioscsi.n_blocks = dev->vioscsi.sz /
-		    VIOSCSI_BLOCK_SIZE_CDROM;
 		dev->vioscsi.max_xfer = VIOSCSI_BLOCK_SIZE_CDROM;
+		SLIST_INSERT_HEAD(&virtio_devs, dev, dev_next);
+	}
+
+	/*
+	 * Launch virtio devices that support subprocess execution.
+	 */
+	SLIST_FOREACH(dev, &virtio_devs, dev_next) {
+		if (virtio_dev_launch(vm, dev) != 0) {
+			log_warnx("failed to launch virtio device");
+			return (1);
+		}
 	}
 
 	/* Virtio 0.9 VMM Control Interface */
@@ -1199,26 +1186,27 @@ virtio_init(struct vmd_vm *vm, int child_cdrom,
 	if (pci_add_device(&id, PCI_VENDOR_OPENBSD, PCI_PRODUCT_OPENBSD_CONTROL,
 	    PCI_CLASS_COMMUNICATIONS, PCI_SUBCLASS_COMMUNICATIONS_MISC,
 	    PCI_VENDOR_OPENBSD, PCI_PRODUCT_VIRTIO_VMMCI, 0, 1, NULL)) {
-		log_warnx("%s: can't add PCI vmm control device",
-		    __progname);
-		return;
+		log_warnx("can't add PCI vmm control device");
+		return (1);
 	}
-	virtio_dev_init(dev, id, 0, 0,
-	    VMMCI_F_TIMESYNC | VMMCI_F_ACK | VMMCI_F_SYNCRTC, vcp->vcp_id);
+	virtio_dev_init(vm, dev, id, 0, 0,
+	    VMMCI_F_TIMESYNC | VMMCI_F_ACK | VMMCI_F_SYNCRTC);
 	if (pci_add_bar(id, PCI_MAPREG_TYPE_IO, vmmci_io, dev) == -1) {
-		log_warnx("%s: can't add bar for vmm control device",
-		    __progname);
-		return;
+		log_warnx("can't add bar for vmm control device");
+		return (1);
 	}
 
 	ret = pthread_mutex_init(&dev->vmmci.mutex, NULL);
 	if (ret) {
 		errno = ret;
-		fatal("could not initialize vmmci mutex");
+		log_warn("could not initialize vmmci mutex");
+		return (1);
 	}
-	evtimer_set(&dev->vmmci.timeout, vmmci_timeout, NULL);
+	evtimer_set(&dev->vmmci.timeout, vmmci_timeout, dev);
 	vm_pipe_init2(&dev->vmmci.dev_pipe, vmmci_pipe_dispatch, dev);
 	event_add(&dev->vmmci.dev_pipe.read_ev, NULL);
+
+	return (0);
 }
 
 /*
@@ -1348,8 +1336,8 @@ virtio_start(struct vmd_vm *vm)
  * Initialize a new virtio device structure.
  */
 static void
-virtio_dev_init(struct virtio_dev *dev, uint8_t pci_id, uint16_t queue_size,
-    uint16_t num_queues, uint64_t features, uint32_t vm_id)
+virtio_dev_init(struct vmd_vm *vm, struct virtio_dev *dev, uint8_t pci_id,
+    uint16_t queue_size, uint16_t num_queues, uint64_t features)
 {
 	size_t i;
 	uint16_t device_id;
@@ -1367,7 +1355,8 @@ virtio_dev_init(struct virtio_dev *dev, uint8_t pci_id, uint16_t queue_size,
 	dev->device_id = device_id;
 	dev->irq = pci_get_dev_irq(pci_id);
 	dev->isr = 0;
-	dev->vm_id = vm_id;
+	dev->vm_id = vm->vm_vmid;
+	dev->vmm_id = vm->vm_vmmid;
 
 	dev->device_feature = features;
 
@@ -1480,12 +1469,15 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 
 	switch (dev->dev_type) {
 	case VMD_DEVTYPE_NET:
-		log_debug("%s: launching vionet%d",
-		    vm->vm_params.vmc_params.vcp_name, dev->vionet.idx);
+		log_debug("%s: launching vionet%d", vm->vm_params.vmc_name,
+		    dev->vionet.idx);
 		break;
 	case VMD_DEVTYPE_DISK:
-		log_debug("%s: launching vioblk%d",
-		    vm->vm_params.vmc_params.vcp_name, dev->vioblk.idx);
+		log_debug("%s: launching vioblk%d", vm->vm_params.vmc_name,
+		    dev->vioblk.idx);
+		break;
+	case VMD_DEVTYPE_SCSI:
+		log_debug("%s: launching vioscsi", vm->vm_params.vmc_name);
 		break;
 		/* NOTREACHED */
 	default:
@@ -1544,7 +1536,7 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 
 		/* 2. Send over details on the VM (including memory fds). */
 		log_debug("%s: sending vm message for '%s'", __func__,
-			vm->vm_params.vmc_params.vcp_name);
+			vm->vm_params.vmc_name);
 		sz = atomicio(vwrite, sync_fds[0], vm, sizeof(*vm));
 		if (sz != sizeof(*vm)) {
 			log_warnx("%s: failed to send vm details", __func__);
@@ -1599,7 +1591,7 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 		close_fd(vm->vm_tty);
 		vm->vm_tty = -1;
 
-		if (vm->vm_cdrom != -1) {
+		if (vm->vm_cdrom != -1 && dev->dev_type != VMD_DEVTYPE_SCSI) {
 			close_fd(vm->vm_cdrom);
 			vm->vm_cdrom = -1;
 		}
@@ -1618,7 +1610,7 @@ virtio_dev_launch(struct vmd_vm *vm, struct virtio_dev *dev)
 		snprintf(vmm_fd, sizeof(vmm_fd), "%d", env->vmd_fd);
 		memset(vm_name, 0, sizeof(vm_name));
 		snprintf(vm_name, sizeof(vm_name), "%s",
-		    vm->vm_params.vmc_params.vcp_name);
+		    vm->vm_params.vmc_name);
 
 		t[0] = dev->dev_type;
 		t[1] = '\0';
@@ -1747,14 +1739,14 @@ virtio_dispatch_dev(int fd, short event, void *arg)
 static int
 handle_dev_msg(struct viodev_msg *msg, struct virtio_dev *gdev)
 {
-	uint32_t vm_id = gdev->vm_id;
+	uint32_t vmm_id = gdev->vmm_id;
 
 	switch (msg->type) {
 	case VIODEV_MSG_KICK:
 		if (msg->state == INTR_STATE_ASSERT)
-			vcpu_assert_irq(vm_id, msg->vcpu, msg->irq);
+			vcpu_assert_irq(vmm_id, msg->vcpu, msg->irq);
 		else if (msg->state == INTR_STATE_DEASSERT)
-			vcpu_deassert_irq(vm_id, msg->vcpu, msg->irq);
+			vcpu_deassert_irq(vmm_id, msg->vcpu, msg->irq);
 		break;
 	case VIODEV_MSG_READY:
 		log_debug("%s: device reports ready", __func__);
@@ -1853,9 +1845,9 @@ virtio_pci_io(int dir, uint16_t reg, uint32_t *data, uint8_t *intr,
 			 * device performs a register read.
 			 */
 			if (msg.state == INTR_STATE_ASSERT)
-				vcpu_assert_irq(dev->vm_id, msg.vcpu, msg.irq);
+				vcpu_assert_irq(dev->vmm_id, msg.vcpu, msg.irq);
 			else if (msg.state == INTR_STATE_DEASSERT)
-				vcpu_deassert_irq(dev->vm_id, msg.vcpu, msg.irq);
+				vcpu_deassert_irq(dev->vmm_id, msg.vcpu, msg.irq);
 		} else {
 			log_warnx("%s: expected IO_READ, got %d", __func__,
 			    msg.type);
@@ -1920,6 +1912,10 @@ virtio_dev_closefds(struct virtio_dev *dev)
 		case VMD_DEVTYPE_NET:
 			close_fd(dev->vionet.data_fd);
 			dev->vionet.data_fd = -1;
+			break;
+		case VMD_DEVTYPE_SCSI:
+			close_fd(dev->vioscsi.cdrom_fd);
+			dev->vioscsi.cdrom_fd = -1;
 			break;
 	default:
 		log_warnx("%s: invalid device type", __func__);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: fetch.c,v 1.220 2025/06/02 20:57:36 schwarze Exp $	*/
+/*	$OpenBSD: fetch.c,v 1.222 2026/02/23 05:00:51 gnezdo Exp $	*/
 /*	$NetBSD: fetch.c,v 1.14 1997/08/18 10:20:20 lukem Exp $	*/
 
 /*-
@@ -854,6 +854,7 @@ noslash:
 		goto cleanup_url_get;
 	case 416:	/* Requested Range Not Satisfiable */
 		warnx("File is already fully retrieved.");
+		rval = 0;
 		goto cleanup_url_get;
 #endif /* !SMALL */
 	case 503:
@@ -1128,7 +1129,7 @@ cleanup_url_get:
 	ftp_close(&fin, &tls, &fd);
 	if (out >= 0 && out != fileno(stdout)) {
 #ifndef SMALL
-		if (server_timestamps && lmt.tm_zone != 0 &&
+		if (server_timestamps && lmt.tm_zone != NULL &&
 		    fstat(out, &stbuf) == 0 && S_ISREG(stbuf.st_mode) != 0) {
 			ts[0].tv_nsec = UTIME_NOW;
 			ts[1].tv_nsec = 0;

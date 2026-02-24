@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.870 2025/09/08 19:44:45 kettenis Exp $
+#	$OpenBSD: Makefile,v 1.875 2026/01/29 23:03:02 kettenis Exp $
 
 MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	acpi.4 acpiac.4 acpials.4 acpiasus.4 acpibat.4 \
@@ -25,7 +25,7 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	berkwdt.4 bge.4 bgw.4 bio.4 bpe.4 bktr.4 bmtphy.4 bnx.4 bnxt.4 \
 	boca.4 bpf.4 brgphy.4 bridge.4 brswphy.4 bse.4 bwfm.4 bwi.4 bytgpio.4 \
 	cac.4 cad.4 cas.4 cardbus.4 carp.4 ccp.4 ccpmic.4 cd.4 cdce.4 \
-	cdsdhc.4 cduart.4 cfxga.4 \
+	cdpcie.4 cdsdhc.4 cduart.4 cfxga.4 \
 	ch.4 chvgpio.4 ciphy.4 ciss.4 clcs.4 clct.4 cmpci.4 \
 	com.4 cue.4 cwfg.4 cy.4 cz.4 \
 	dapmic.4 \
@@ -49,7 +49,7 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	igc.4 iha.4 ihidev.4 iic.4 iicmux.4 ikbd.4 ims.4 imt.4 imxanatop.4 \
 	imxdog.4 imxesdhc.4 imxgpc.4 imxgpio.4 imxiic.4 imxpciephy.4 \
 	imxpwm.4 imxrtc.4 imxspi.4 imxsrc.4 imxtmu.4 imxuart.4 \
-	inet.4 inet6.4 inphy.4 intelpmc.4 \
+	inet.4 inet6.4 inphy.4 intelpmc.4 inthid.4 \
 	iophy.4 iosf.4 ip.4 ip6.4 ipcomp.4 ipgphy.4 \
 	ipmi.4 ips.4 ipsec.4 ipw.4 isa.4 isagpio.4 isapnp.4 islrtc.4 \
 	it.4 itherm.4 iwi.4 iwn.4 iwm.4 iwx.4 ix.4 ixv.4 ixgb.4 ixl.4 \
@@ -65,7 +65,7 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	multicast.4 mvclock.4 mvdog.4 mvgicp.4 mvgpio.4 mvicu.4 mviic.4 \
 	mvkpcie.4 mvneta.4 mvpinctrl.4 mvpp.4 mvrng.4 mvrtc.4 mvspi.4 \
 	mvtemp.4 mvsw.4 mvuart.4 myx.4 \
-	ne.4 neo.4 nep.4 netintro.4 nfe.4 ngbe.4 nge.4 nmea.4 \
+	ne.4 neo.4 nep.4 netintro.4 nfe.4 ngbe.4 nge.4 nhi.4 nmea.4 \
 	nsclpcsio.4 nsgphy.4 nsphy.4 nsphyter.4 null.4 nviic.4 nvme.4 nvt.4 \
 	oce.4 ociic.4 ohci.4 onewire.4 oosiop.4 openprom.4 options.4 \
 	osiop.4 otus.4 owid.4 owctr.4 owsbm.4 owtemp.4 \
@@ -79,7 +79,7 @@ MAN=	aac.4 abcrtc.4 abl.4 ac97.4 acphy.4 acrtc.4 \
 	pvclock.4 pwdog.4 pwmbl.4 pwmfan.4 pwmleds.4 pwmreg.4 \
 	qccpu.4 qccpucp.4 qcdpc.4 qcdrm.4 qcdwusb.4 qcgpio.4 \
 	qciic.4 qcpdc.4 qcpmic.4 \
-	qcpmicgpio.4 qcpon.4 qcpwm.4 qcrng.4 qcrtc.4 qcspmi.4 \
+	qcpmicgpio.4 qcpon.4 qcpwm.4 qcrng.4 qcrtc.4 qcspmi.4 qcuart.4 \
 	qla.4 qle.4 qlw.4 qsphy.4 qwx.4 \
 	radio.4 ral.4 random.4 rdomain.4 rd.4 rdac.4 re.4 rdcphy.4 rgephy.4 \
 	rge.4 ricohrtc.4 rkanxdp.4 rkclock.4 rkcomphy.4 \

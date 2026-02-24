@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.40 2024/11/18 05:32:39 jsg Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.42 2025/11/27 19:15:51 kettenis Exp $	*/
 
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
@@ -33,6 +33,7 @@
 #include <sys/sensors.h>
 #include <sys/malloc.h>
 #include <sys/syscallargs.h>
+#include <sys/pledge.h>
 
 #include <net/if.h>
 #include <uvm/uvm_extern.h>
@@ -505,8 +506,12 @@ sys_sysarch(struct proc *p, void *v, register_t *retval)
 	} */ *uap = v;
 	struct riscv_sync_icache_args args;
 	int error = 0;
+	int op = SCARG(uap, op);
 
-	switch (SCARG(uap, op)) {
+	if ((p->p_p->ps_flags & PS_PLEDGE) && op != RISCV_SYNC_ICACHE)
+		return pledge_fail(p, EINVAL, 0);
+
+	switch (op) {
 	case RISCV_SYNC_ICACHE:
 		if (SCARG(uap, parms) != NULL)
 			error = copyin(SCARG(uap, parms), &args, sizeof(args));
@@ -811,25 +816,29 @@ initriscv(struct riscv_bootparams *rbp)
 	/*
 	 * Determine physical RAM size from the /memory nodes in the
 	 * FDT.  There can be multiple nodes and each node can contain
-	 * multiple ranges.
+	 * multiple ranges.  If there are no /memory nodes, use
+	 * information from the EFI memory map instead.
 	 */
 	node = fdt_find_node("/memory");
-	if (node == NULL)
-		panic("%s: no memory specified", __func__);
-	while (node) {
-		const char *s = fdt_node_name(node);
-		if (strncmp(s, "memory", 6) == 0 &&
-		    (s[6] == '\0' || s[6] == '@')) {
-			for (i = 0; i < VM_PHYSSEG_MAX; i++) {
-				if (fdt_get_reg(node, i, &reg))
-					break;
-				if (reg.size == 0)
-					continue;
-				physmem += atop(reg.size);
+	if (node) {
+		while (node) {
+			const char *s = fdt_node_name(node);
+			if (strncmp(s, "memory", 6) == 0 &&
+			    (s[6] == '\0' || s[6] == '@')) {
+				for (i = 0; i < VM_PHYSSEG_MAX; i++) {
+					if (fdt_get_reg(node, i, &reg))
+						break;
+					if (reg.size == 0)
+						continue;
+					physmem += atop(reg.size);
+				}
 			}
-		}
 
-		node = fdt_next_node(node);
+			node = fdt_next_node(node);
+		}
+	} else {
+		for (i = 0; i < nmemreg; i++)
+			physmem += atop(memreg[i].size);
 	}
 
 	kmeminit_nkmempages();

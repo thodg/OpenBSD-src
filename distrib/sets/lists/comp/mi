@@ -306,6 +306,7 @@
 ./usr/include/dev/ic/iha.h
 ./usr/include/dev/ic/imxiicvar.h
 ./usr/include/dev/ic/iosfvar.h
+./usr/include/dev/ic/ispivar.h
 ./usr/include/dev/ic/lancereg.h
 ./usr/include/dev/ic/lancevar.h
 ./usr/include/dev/ic/lemacreg.h
@@ -354,6 +355,7 @@
 ./usr/include/dev/ic/pgtvar.h
 ./usr/include/dev/ic/pluartvar.h
 ./usr/include/dev/ic/pspvar.h
+./usr/include/dev/ic/qcuartvar.h
 ./usr/include/dev/ic/qlareg.h
 ./usr/include/dev/ic/qlavar.h
 ./usr/include/dev/ic/qlwreg.h
@@ -626,6 +628,7 @@
 ./usr/include/dev/pci/ixgb_ids.h
 ./usr/include/dev/pci/ixgbe.h
 ./usr/include/dev/pci/ixgbe_type.h
+./usr/include/dev/pci/lpssreg.h
 ./usr/include/dev/pci/mpiireg.h
 ./usr/include/dev/pci/neoreg.h
 ./usr/include/dev/pci/pccbbreg.h
@@ -915,8 +918,11 @@
 ./usr/include/fstab.h
 ./usr/include/fts.h
 ./usr/include/ftw.h
-./usr/include/fuse.h
-./usr/include/fuse_opt.h
+./usr/include/fuse
+./usr/include/fuse/fuse.h
+./usr/include/fuse/fuse_common.h
+./usr/include/fuse/fuse_lowlevel.h
+./usr/include/fuse/fuse_opt.h
 ./usr/include/gelf.h
 ./usr/include/getopt.h
 ./usr/include/glob.h
@@ -2586,11 +2592,14 @@
 ./usr/share/man/man3/fuse_get_context.3
 ./usr/share/man/man3/fuse_get_session.3
 ./usr/share/man/man3/fuse_loop.3
+./usr/share/man/man3/fuse_lowlevel_new.3
 ./usr/share/man/man3/fuse_main.3
 ./usr/share/man/man3/fuse_mount.3
 ./usr/share/man/man3/fuse_new.3
 ./usr/share/man/man3/fuse_opt.3
 ./usr/share/man/man3/fuse_parse_cmdline.3
+./usr/share/man/man3/fuse_reply_err.3
+./usr/share/man/man3/fuse_session_loop.3
 ./usr/share/man/man3/fuse_set_signal_handlers.3
 ./usr/share/man/man3/fuse_setup.3
 ./usr/share/man/man3/fuse_teardown.3

@@ -1,4 +1,4 @@
-/* $OpenBSD: ec_lib.c,v 1.126 2025/08/02 15:47:27 jsing Exp $ */
+/* $OpenBSD: ec_lib.c,v 1.131 2025/12/26 18:49:13 tb Exp $ */
 /*
  * Originally written by Bodo Moeller for the OpenSSL project.
  */
@@ -792,6 +792,16 @@ EC_GROUP_cmp(const EC_GROUP *group1, const EC_GROUP *group2, BN_CTX *ctx_in)
 }
 LCRYPTO_ALIAS(EC_GROUP_cmp);
 
+int
+ec_group_and_point_compatible(const EC_GROUP *group, const EC_POINT *point)
+{
+	if (group->meth != point->meth)
+		return 0;
+	if (group->nid == NID_undef || point->nid == NID_undef)
+		return 1;
+	return group->nid == point->nid;
+}
+
 EC_POINT *
 EC_POINT_new(const EC_GROUP *group)
 {
@@ -815,6 +825,7 @@ EC_POINT_new(const EC_GROUP *group)
 		goto err;
 
 	point->meth = group->meth;
+	point->nid = group->nid;
 
 	return point;
 
@@ -855,6 +866,8 @@ EC_POINT_copy(EC_POINT *dst, const EC_POINT *src)
 	}
 	if (dst == src)
 		return 1;
+
+	dst->nid = src->nid;
 
 	if (!bn_copy(dst->X, src->X))
 		return 0;
@@ -898,11 +911,11 @@ LCRYPTO_ALIAS(EC_POINT_dup);
 int
 EC_POINT_set_to_infinity(const EC_GROUP *group, EC_POINT *point)
 {
-	if (group->meth != point->meth) {
+	if (!ec_group_and_point_compatible(group, point)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		return 0;
 	}
-	return point->meth->point_set_to_infinity(group, point);
+	return group->meth->point_set_to_infinity(group, point);
 }
 LCRYPTO_ALIAS(EC_POINT_set_to_infinity);
 
@@ -922,7 +935,7 @@ EC_POINT_set_affine_coordinates(const EC_GROUP *group, EC_POINT *point,
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != point->meth) {
+	if (!ec_group_and_point_compatible(group, point)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -973,7 +986,7 @@ EC_POINT_get_affine_coordinates(const EC_GROUP *group, const EC_POINT *point,
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != point->meth) {
+	if (!ec_group_and_point_compatible(group, point)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -1123,8 +1136,9 @@ EC_POINT_add(const EC_GROUP *group, EC_POINT *r, const EC_POINT *a,
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != r->meth || group->meth != a->meth ||
-	    group->meth != b->meth) {
+	if (!ec_group_and_point_compatible(group, r) ||
+	    !ec_group_and_point_compatible(group, a) ||
+	    !ec_group_and_point_compatible(group, b)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -1154,7 +1168,8 @@ EC_POINT_dbl(const EC_GROUP *group, EC_POINT *r, const EC_POINT *a,
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != r->meth || r->meth != a->meth) {
+	if (!ec_group_and_point_compatible(group, r) ||
+	    !ec_group_and_point_compatible(group, a)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -1183,7 +1198,7 @@ EC_POINT_invert(const EC_GROUP *group, EC_POINT *a, BN_CTX *ctx_in)
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != a->meth) {
+	if (!ec_group_and_point_compatible(group, a)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -1200,11 +1215,11 @@ LCRYPTO_ALIAS(EC_POINT_invert);
 int
 EC_POINT_is_at_infinity(const EC_GROUP *group, const EC_POINT *point)
 {
-	if (group->meth != point->meth) {
+	if (!ec_group_and_point_compatible(group, point)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		return 0;
 	}
-	return point->meth->point_is_at_infinity(group, point);
+	return group->meth->point_is_at_infinity(group, point);
 }
 LCRYPTO_ALIAS(EC_POINT_is_at_infinity);
 
@@ -1224,7 +1239,7 @@ EC_POINT_is_on_curve(const EC_GROUP *group, const EC_POINT *point,
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != point->meth) {
+	if (!ec_group_and_point_compatible(group, point)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -1254,7 +1269,8 @@ EC_POINT_cmp(const EC_GROUP *group, const EC_POINT *a, const EC_POINT *b,
 		ECerror(ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
 		goto err;
 	}
-	if (group->meth != a->meth || a->meth != b->meth) {
+	if (!ec_group_and_point_compatible(group, a) ||
+	    !ec_group_and_point_compatible(group, b)) {
 		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
@@ -1324,6 +1340,12 @@ EC_POINT_mul(const EC_GROUP *group, EC_POINT *r, const BIGNUM *g_scalar,
 
 	if (g_scalar != NULL && group->generator == NULL) {
 		ECerror(EC_R_UNDEFINED_GENERATOR);
+		goto err;
+	}
+
+	if (!ec_group_and_point_compatible(group, r) ||
+	    (point != NULL && !ec_group_and_point_compatible(group, point))) {
+		ECerror(EC_R_INCOMPATIBLE_OBJECTS);
 		goto err;
 	}
 

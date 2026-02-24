@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_output.c,v 1.413 2025/07/15 18:28:57 mvs Exp $	*/
+/*	$OpenBSD: ip_output.c,v 1.416 2025/12/13 00:55:02 jsg Exp $	*/
 /*	$NetBSD: ip_output.c,v 1.28 1996/02/13 23:43:07 christos Exp $	*/
 
 /*
@@ -175,7 +175,7 @@ reroute:
 		if (ip->ip_src.s_addr == INADDR_ANY) {
 			struct in_ifaddr *ia;
 
-			IFP_TO_IA(ifp, ia);
+			ia = in_ifp2ia(ifp);
 			if (ia != NULL)
 				ip->ip_src = ia->ia_addr.sin_addr;
 		}
@@ -293,7 +293,7 @@ reroute:
 		if (ip->ip_src.s_addr == INADDR_ANY) {
 			struct in_ifaddr *ia;
 
-			IFP_TO_IA(ifp, ia);
+			ia = in_ifp2ia(ifp);
 			if (ia != NULL)
 				ip->ip_src = ia->ia_addr.sin_addr;
 		}
@@ -583,7 +583,7 @@ ip_output_ipsec_send(struct tdb *tdb, struct mbuf *m, struct route *ro,
 	struct in_addr dst;
 	u_int len;
 	int tso = 0, ip_mtudisc_local = atomic_load_int(&ip_mtudisc);
-	int error;
+	int error = 0;
 
 #if NPF > 0
 	/*
@@ -1554,8 +1554,8 @@ ip_setmoptions(int optname, struct ip_moptions **imop, struct mbuf *m,
 		 */
 		for (i = 0; i < imo->imo_num_memberships; ++i) {
 			if (imo->imo_membership[i]->inm_ifidx == ifidx &&
-			    imo->imo_membership[i]->inm_addr.s_addr
-						== mreqn.imr_multiaddr.s_addr)
+			    imo->imo_membership[i]->inm_addr.s_addr ==
+			    mreqn.imr_multiaddr.s_addr)
 				break;
 		}
 		if (i < imo->imo_num_memberships) {
@@ -1640,8 +1640,8 @@ ip_setmoptions(int optname, struct ip_moptions **imop, struct mbuf *m,
 		for (i = 0; i < imo->imo_num_memberships; ++i) {
 			if ((ifidx == 0 ||
 			    imo->imo_membership[i]->inm_ifidx == ifidx) &&
-			     imo->imo_membership[i]->inm_addr.s_addr ==
-			     mreqn.imr_multiaddr.s_addr)
+			    imo->imo_membership[i]->inm_addr.s_addr ==
+			    mreqn.imr_multiaddr.s_addr)
 				break;
 		}
 		if (i == imo->imo_num_memberships) {
@@ -1702,9 +1702,9 @@ ip_getmoptions(int optname, struct ip_moptions *imo, struct mbuf *m)
 		if (imo == NULL || (ifp = if_get(imo->imo_ifidx)) == NULL)
 			addr->s_addr = INADDR_ANY;
 		else {
-			IFP_TO_IA(ifp, ia);
-			addr->s_addr = (ia == NULL) ? INADDR_ANY
-					: ia->ia_addr.sin_addr.s_addr;
+			ia = in_ifp2ia(ifp);
+			addr->s_addr = (ia == NULL) ? INADDR_ANY :
+			    ia->ia_addr.sin_addr.s_addr;
 			if_put(ifp);
 		}
 		return (0);

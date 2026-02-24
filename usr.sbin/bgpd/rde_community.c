@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_community.c,v 1.16 2024/09/10 08:53:20 claudio Exp $ */
+/*	$OpenBSD: rde_community.c,v 1.23 2026/02/03 10:10:35 claudio Exp $ */
 
 /*
  * Copyright (c) 2019 Claudio Jeker <claudio@openbsd.org>
@@ -19,12 +19,14 @@
 
 #include <endian.h>
 #include <limits.h>
+#include <siphash.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "bgpd.h"
 #include "rde.h"
 #include "log.h"
+#include "chash.h"
 
 static int
 apply_flag(uint32_t in, uint8_t flag, struct rde_peer *peer, uint32_t *out,
@@ -57,7 +59,7 @@ apply_flag(uint32_t in, uint8_t flag, struct rde_peer *peer, uint32_t *out,
 }
 
 static int
-fc2c(struct community *fc, struct rde_peer *peer, struct community *c,
+fc2c(const struct community *fc, struct rde_peer *peer, struct community *c,
     struct community *m)
 {
 	int type;
@@ -216,18 +218,20 @@ mask_match(struct community *a, struct community *b, struct community *m)
  * Insert a community keeping the list sorted. Don't add if already present.
  */
 static void
-insert_community(struct rde_community *comm, struct community *c)
+insert_community(struct rde_community *comm, const struct community *c)
 {
 	int l;
 	int r;
 
 	if (comm->nentries + 1 > comm->size) {
 		struct community *new;
-		int newsize = comm->size + 8;
+		int newsize = bin_of_communities(comm->nentries + 1);
 
-		if ((new = recallocarray(comm->communities, comm->size,
-		    newsize, sizeof(struct community))) == NULL)
+		if ((new = reallocarray(comm->communities, newsize,
+		    sizeof(*new))) == NULL)
 			fatal(__func__);
+		memset(&new[comm->size], 0,
+		    sizeof(*new) * (newsize - comm->size));
 		comm->communities = new;
 		comm->size = newsize;
 	}
@@ -250,6 +254,7 @@ insert_community(struct rde_community *comm, struct community *c)
 	/* insert community at slot l */
 	comm->communities[l] = *c;
 	comm->nentries++;
+	comm->flags |= PARTIAL_DIRTY;
 }
 
 static int
@@ -334,8 +339,8 @@ community_count(struct rde_community *comm, uint8_t type)
  * Insert a community, expanding local-as and neighbor-as if needed.
  */
 int
-community_set(struct rde_community *comm, struct community *fc,
-struct rde_peer *peer)
+community_set(struct rde_community *comm, const struct community *fc,
+    struct rde_peer *peer)
 {
 	struct community set;
 
@@ -373,8 +378,8 @@ struct rde_peer *peer)
  * neighbor-as and also mask of bits to support partial matches.
  */
 void
-community_delete(struct rde_community *comm, struct community *fc,
-struct rde_peer *peer)
+community_delete(struct rde_community *comm, const struct community *fc,
+    struct rde_peer *peer)
 {
 	struct community test, mask;
 	struct community *match;
@@ -391,6 +396,7 @@ struct rde_peer *peer)
 		    (char *)(comm->communities + comm->nentries) -
 		    (char *)(match + 1));
 		comm->nentries--;
+		comm->flags |= PARTIAL_DIRTY;
 		return;
 	} else {
 		if (fc2c(fc, peer, &test, &mask) == -1)
@@ -403,6 +409,7 @@ struct rde_peer *peer)
 				    comm->communities + l + 1,
 				    (comm->nentries - l - 1) * sizeof(test));
 				comm->nentries--;
+				comm->flags |= PARTIAL_DIRTY;
 				continue;
 			}
 			l++;
@@ -620,32 +627,46 @@ community_writebuf(struct rde_community *comm, uint8_t type, int ebgp,
 /*
  * Global RIB cache for communities
  */
-static inline int
-communities_compare(struct rde_community *a, struct rde_community *b)
-{
-	if (a->nentries != b->nentries)
-		return a->nentries > b->nentries ? 1 : -1;
-	if (a->flags != b->flags)
-		return a->flags > b->flags ? 1 : -1;
+static SIPHASH_KEY	commkey;
 
-	return memcmp(a->communities, b->communities,
-	    a->nentries * sizeof(struct community));
+static inline uint64_t
+communities_hash(const struct rde_community *comm)
+{
+	return comm->hash;
 }
 
-RB_HEAD(comm_tree, rde_community)	commtable = RB_INITIALIZER(&commtable);
-RB_GENERATE_STATIC(comm_tree, rde_community, entry, communities_compare);
+static inline void
+communities_calc_hash(struct rde_community *comm)
+{
+	SIPHASH_CTX ctx;
+
+	if (comm->flags & PARTIAL_DIRTY) {
+		comm->flags &= ~PARTIAL_DIRTY;
+		SipHash24_Init(&ctx, &commkey);
+		SipHash24_Update(&ctx, comm->communities,
+		    comm->nentries * sizeof(struct community));
+		SipHash24_Update(&ctx, &comm->flags, sizeof(comm->flags));
+		comm->hash = SipHash24_End(&ctx);
+	}
+}
+
+CH_HEAD(comm_tree, rde_community);
+CH_PROTOTYPE(comm_tree, rde_community, communities_hash);
+CH_GENERATE(comm_tree, rde_community, communities_equal, communities_hash);
+
+static struct comm_tree	commtable = CH_INITIALIZER(&commtable);
 
 void
-communities_shutdown(void)
+communities_init(void)
 {
-	if (!RB_EMPTY(&commtable))
-		log_warnx("%s: free non-free table", __func__);
+	arc4random_buf(&commkey, sizeof(commkey));
 }
 
 struct rde_community *
 communities_lookup(struct rde_community *comm)
 {
-	return RB_FIND(comm_tree, &commtable, comm);
+	communities_calc_hash(comm);
+	return CH_FIND(comm_tree, &commtable, comm);
 }
 
 struct rde_community *
@@ -656,8 +677,12 @@ communities_link(struct rde_community *comm)
 	if ((n = malloc(sizeof(*n))) == NULL)
 		fatal(__func__);
 	communities_copy(n, comm);
+	communities_calc_hash(comm);
 
-	if ((f = RB_INSERT(comm_tree, &commtable, n)) != NULL) {
+	switch (CH_INSERT(comm_tree, &commtable, n, &f)) {
+	case -1:
+		fatal(__func__);
+	case 0:
 		log_warnx("duplicate communities collection inserted");
 		free(n->communities);
 		free(n);
@@ -678,7 +703,7 @@ communities_unlink(struct rde_community *comm)
 	if (comm->refcnt != 1)
 		fatalx("%s: unlinking still referenced communities", __func__);
 
-	RB_REMOVE(comm_tree, &commtable, comm);
+	CH_REMOVE(comm_tree, &commtable, comm);
 
 	rdemem.comm_size -= comm->size;
 	rdemem.comm_nmemb -= comm->nentries;
@@ -693,7 +718,7 @@ communities_unlink(struct rde_community *comm)
  * otherwise returns zero.
  */
 int
-communities_equal(struct rde_community *a, struct rde_community *b)
+communities_equal(const struct rde_community *a, const struct rde_community *b)
 {
 	if (a->nentries != b->nentries)
 		return 0;
@@ -718,6 +743,7 @@ communities_copy(struct rde_community *to, struct rde_community *from)
 	to->size = from->nentries;
 	to->nentries = from->nentries;
 	to->flags = from->flags;
+	to->hash = from->hash;
 
 	if (to->nentries == 0)
 		return;

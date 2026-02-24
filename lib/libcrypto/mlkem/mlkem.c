@@ -1,4 +1,4 @@
-/*	$OpenBSD: mlkem.c,v 1.4 2025/09/05 23:30:12 beck Exp $ */
+/*	$OpenBSD: mlkem.c,v 1.7 2026/01/16 18:27:22 tb Exp $ */
 /*
  * Copyright (c) 2025, Bob Beck <beck@obtuse.com>
  *
@@ -14,9 +14,12 @@
  * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
  * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
+
 #include <stdlib.h>
+#include <string.h>
 
 #include <openssl/mlkem.h>
+
 #include "mlkem_internal.h"
 
 static inline int
@@ -24,7 +27,7 @@ private_key_is_new(const MLKEM_private_key *key)
 {
 	return (key != NULL &&
 	    key->state == MLKEM_PRIVATE_KEY_UNINITIALIZED &&
-	    (key->rank == RANK768 || key->rank == RANK1024));
+	    (key->rank == MLKEM768_RANK || key->rank == MLKEM1024_RANK));
 }
 
 static inline int
@@ -32,7 +35,7 @@ private_key_is_valid(const MLKEM_private_key *key)
 {
 	return (key != NULL &&
 	    key->state == MLKEM_PRIVATE_KEY_INITIALIZED &&
-	    (key->rank == RANK768 || key->rank == RANK1024));
+	    (key->rank == MLKEM768_RANK || key->rank == MLKEM1024_RANK));
 }
 
 static inline int
@@ -40,7 +43,7 @@ public_key_is_new(const MLKEM_public_key *key)
 {
 	return (key != NULL &&
 	    key->state == MLKEM_PUBLIC_KEY_UNINITIALIZED &&
-	    (key->rank == RANK768 || key->rank == RANK1024));
+	    (key->rank == MLKEM768_RANK || key->rank == MLKEM1024_RANK));
 }
 
 static inline int
@@ -48,7 +51,7 @@ public_key_is_valid(const MLKEM_public_key *key)
 {
 	return (key != NULL &&
 	    key->state == MLKEM_PUBLIC_KEY_INITIALIZED &&
-	    (key->rank == RANK768 || key->rank == RANK1024));
+	    (key->rank == MLKEM768_RANK || key->rank == MLKEM1024_RANK));
 }
 
 /*
@@ -71,7 +74,7 @@ MLKEM_generate_key_external_entropy(MLKEM_private_key *private_key,
 		goto err;
 
 	k_len = MLKEM768_PUBLIC_KEY_BYTES;
-	if (private_key->rank == RANK1024)
+	if (private_key->rank == MLKEM1024_RANK)
 		k_len = MLKEM1024_PUBLIC_KEY_BYTES;
 
 	if ((k = calloc(1, k_len)) == NULL)
@@ -229,11 +232,14 @@ MLKEM_encap(const MLKEM_public_key *public_key,
     uint8_t **out_shared_secret, size_t *out_shared_secret_len)
 {
 	uint8_t entropy[MLKEM_ENCAP_ENTROPY];
+	int ret;
 
-	arc4random_buf(entropy, MLKEM_ENCAP_ENTROPY);
-
-	return MLKEM_encap_external_entropy(public_key, entropy, out_ciphertext,
+	arc4random_buf(entropy, sizeof(entropy));
+	ret = MLKEM_encap_external_entropy(public_key, entropy, out_ciphertext,
 	    out_ciphertext_len, out_shared_secret, out_shared_secret_len);
+	explicit_bzero(entropy, sizeof(entropy));
+
+	return ret;
 }
 LCRYPTO_ALIAS(MLKEM_encap);
 
@@ -287,7 +293,7 @@ MLKEM_marshal_public_key(const MLKEM_public_key *public_key, uint8_t **out,
 LCRYPTO_ALIAS(MLKEM_marshal_public_key);
 
 /*
- * Not exposed publicly, becuase the NIST private key format is gigantisch, and
+ * Not exposed publicly, because the NIST private key format is gigantisch, and
  * seeds should be used instead.  Used for the NIST tests.
  */
 int

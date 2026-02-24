@@ -1,4 +1,4 @@
-/*	$OpenBSD: extern.h,v 1.265 2025/10/16 06:46:31 job Exp $ */
+/*	$OpenBSD: extern.h,v 1.277 2026/02/03 16:21:37 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -169,7 +169,7 @@ RB_HEAD(nca_tree, nonfunc_ca);
 RB_PROTOTYPE(nca_tree, nonfunc_ca, entry, ncacmp);
 
 /*
- * The TAL file conforms to RFC 7730.
+ * The TAL file conforms to RFC 8630.
  * It is the top-level structure of RPKI and defines where we can find
  * certificates for TAs (trust anchors).
  * It also includes the public key for verifying those trust anchor
@@ -178,8 +178,8 @@ RB_PROTOTYPE(nca_tree, nonfunc_ca, entry, ncacmp);
 struct tal {
 	char		**uri; /* well-formed rsync URIs */
 	size_t		 num_uris;
-	unsigned char	*pkey; /* DER-encoded public key */
-	size_t		 pkeysz; /* length of pkey */
+	unsigned char	*spki; /* DER-encoded subjectPublicKeyInfo */
+	size_t		 spkisz; /* length of SPKI */
 	char		*descr; /* basename of tal file */
 	int		 id; /* ID of this TAL */
 };
@@ -195,15 +195,14 @@ enum rtype {
 	RTYPE_ROA,
 	RTYPE_CER,
 	RTYPE_CRL,
-	RTYPE_GBR,
 	RTYPE_REPO,
 	RTYPE_FILE,
 	RTYPE_RSC,
 	RTYPE_ASPA,
 	RTYPE_TAK,
-	RTYPE_GEOFEED,
 	RTYPE_SPL,
 	RTYPE_CCR,
+	RTYPE_GZ,
 };
 
 enum location {
@@ -341,35 +340,6 @@ struct tak {
 	struct takey	*successor;
 	time_t		 signtime; /* CMS signing-time attribute */
 	time_t		 expires; /* when the signature path expires */
-};
-
-/*
- * A single geofeed record
- */
-struct geoip {
-	struct cert_ip	*ip;
-	char		*loc;
-};
-
-/*
- * A geofeed file
- */
-struct geofeed {
-	struct geoip	*geoips; /* Prefix + location entry in the CSV */
-	size_t		 num_geoips;
-	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 expires; /* when the signature path expires */
-	int		 valid; /* all resources covered */
-};
-
-/*
- * A single Ghostbuster record
- */
-struct gbr {
-	char		*vcard;
-	time_t		 signtime; /* CMS signing-time attribute */
-	time_t		 expires; /* when the signature path expires */
-	int		 talid; /* TAL the GBR is chained up to */
 };
 
 /*
@@ -512,6 +482,7 @@ struct ccr {
 };
 
 struct validation_data {
+	time_t buildtime;
 	struct vrp_tree	vrps;
 	struct brk_tree	brks;
 	struct vap_tree	vaps;
@@ -657,7 +628,6 @@ struct repotalstats {
 	uint32_t	 aspas_invalid; /* ASPAs with invalid customerASID */
 	uint32_t	 brks; /* number of BGPsec Router Key (BRK) certs */
 	uint32_t	 crls; /* revocation lists */
-	uint32_t	 gbrs; /* ghostbuster records */
 	uint32_t	 taks; /* signed TAL objects */
 	uint32_t	 vaps; /* total number of Validated ASPA Payloads */
 	uint32_t	 vaps_uniqs; /* total number of unique VAPs */
@@ -712,7 +682,6 @@ extern ASN1_OBJECT *signedobj_oid;
 extern ASN1_OBJECT *notify_oid;
 extern ASN1_OBJECT *roa_oid;
 extern ASN1_OBJECT *mft_oid;
-extern ASN1_OBJECT *gbr_oid;
 extern ASN1_OBJECT *bgpsec_oid;
 extern ASN1_OBJECT *cnt_type_oid;
 extern ASN1_OBJECT *msg_dgst_oid;
@@ -720,7 +689,6 @@ extern ASN1_OBJECT *sign_time_oid;
 extern ASN1_OBJECT *rsc_oid;
 extern ASN1_OBJECT *aspa_oid;
 extern ASN1_OBJECT *tak_oid;
-extern ASN1_OBJECT *geofeed_oid;
 extern ASN1_OBJECT *spl_oid;
 extern ASN1_OBJECT *ccr_oid;
 
@@ -746,9 +714,14 @@ struct tal	*tal_read(struct ibuf *);
 void		 cert_buffer(struct ibuf *, const struct cert *);
 void		 cert_free(struct cert *);
 void		 auth_tree_free(struct auth_tree *);
+struct cert	*cert_parse_ca_or_brk(const char *, const unsigned char *,
+		    size_t);
 struct cert	*cert_parse_ee_cert(const char *, int, X509 *);
-struct cert	*cert_parse(const char *, const unsigned char *, size_t);
-struct cert	*ta_parse(const char *, struct cert *, const unsigned char *,
+struct cert	*cert_parse_ta(const char *, const unsigned char *, size_t,
+		    const unsigned char *, size_t);
+struct cert	*cert_parse_filemode(const char *, const unsigned char *,
+		    size_t);
+struct cert	*ta_validate(const char *, struct cert *, const unsigned char *,
 		    size_t);
 struct cert	*cert_read(struct ibuf *);
 void		 cert_insert_brks(struct brk_tree *, struct cert *);
@@ -782,14 +755,6 @@ struct spl	*spl_parse(struct cert **, const char *, int,
 struct spl	*spl_read(struct ibuf *);
 void		 spl_insert_vsps(struct vsp_tree *, struct spl *,
 		    struct repo *);
-
-void		 gbr_free(struct gbr *);
-struct gbr	*gbr_parse(struct cert **, const char *, int,
-		    const unsigned char *, size_t);
-
-void		 geofeed_free(struct geofeed *);
-struct geofeed	*geofeed_parse(struct cert **, const char *, int, char *,
-		    size_t);
 
 void		 rsc_free(struct rsc *);
 struct rsc	*rsc_parse(struct cert **, const char *, int,
@@ -830,7 +795,6 @@ int		 valid_rsc(const char *, struct cert *, struct rsc *);
 int		 valid_econtent_version(const char *, const ASN1_INTEGER *,
 		    uint64_t);
 int		 valid_aspa(const char *, struct cert *, struct aspa *);
-int		 valid_geofeed(const char *, struct cert *, struct geofeed *);
 int		 valid_uuid(const char *);
 int		 valid_spl(const char *, struct cert *, struct spl *);
 
@@ -838,9 +802,6 @@ int		 valid_spl(const char *, struct cert *, struct spl *);
 unsigned char	*cms_parse_validate(struct cert **, const char *, int,
 		    const unsigned char *, size_t, const ASN1_OBJECT *,
 		    size_t *, time_t *);
-int		 cms_parse_validate_detached(struct cert **, const char *, int,
-		    const unsigned char *, size_t, const ASN1_OBJECT *, BIO *,
-		    time_t *);
 
 /* Work with RFC 3779 IP addresses, prefixes, ranges. */
 
@@ -953,9 +914,12 @@ void		 rrdp_fetch(unsigned int, const char *, const char *,
 void		 rrdp_abort(unsigned int);
 void		 rrdp_http_done(unsigned int, enum http_result, const char *);
 
-/* Encoding functions for hex and base64. */
 
+/* File loading and decompression functions. */
 unsigned char	*load_file(const char *, size_t *);
+unsigned char	*inflate_buffer(uint8_t *, size_t, size_t *);
+
+/* Encoding functions for hex and base64. */
 int		 base64_decode_len(size_t, size_t *);
 int		 base64_decode(const unsigned char *, size_t,
 		    unsigned char **, size_t *);
@@ -997,7 +961,8 @@ int		 x509_location(const char *, const char *, GENERAL_NAME *,
 		    char **);
 int		 x509_inherits(X509 *);
 int		 x509_any_inherits(X509 *);
-int		 x509_valid_name(const char *, const char *, const X509_NAME *);
+int		 x509_valid_subject_name(const char *, const X509_NAME *);
+int		 x509_valid_issuer_name(const char *, const X509_NAME *);
 time_t		 x509_find_expires(time_t, struct auth *, struct crl_tree *);
 
 /* printers */
@@ -1010,11 +975,9 @@ void		 cert_print(const struct cert *);
 void		 crl_print(const struct crl *);
 void		 mft_print(const struct cert *, const struct mft *);
 void		 roa_print(const struct cert *, const struct roa *);
-void		 gbr_print(const struct cert *, const struct gbr *);
 void		 rsc_print(const struct cert *, const struct rsc *);
 void		 aspa_print(const struct cert *, const struct aspa *);
 void		 tak_print(const struct cert *, const struct tak *);
-void		 geofeed_print(const struct cert *, const struct geofeed *);
 void		 spl_print(const struct cert *, const struct spl *);
 
 /* Missing RFC 3779 API */
@@ -1035,11 +998,11 @@ int		 outputfiles(struct validation_data *, struct stats *);
 int		 outputheader(FILE *, struct validation_data *, struct stats *);
 int		 output_bgpd(FILE *, struct validation_data *, struct stats *);
 int		 output_bird(FILE *, struct validation_data *, struct stats *);
+int		 output_ccr_der(FILE *, struct validation_data *, struct stats *);
 int		 output_csv(FILE *, struct validation_data *, struct stats *);
 int		 output_json(FILE *, struct validation_data *, struct stats *);
 int		 output_ometric(FILE *, struct validation_data *,
 		    struct stats *);
-int		 output_ccr_der(FILE *, struct validation_data *, struct stats *);
 
 /*
  * Canonical Cache Representation

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_update.c,v 1.176 2025/06/04 09:12:34 claudio Exp $ */
+/*	$OpenBSD: rde_update.c,v 1.193 2026/02/11 10:24:57 claudio Exp $ */
 
 /*
  * Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
@@ -158,11 +158,13 @@ up_enforce_open_policy(struct rde_peer *peer, struct filterstate *state,
  * - UP_EXCLUDED if prefix was excluded because of up_test_update()
  */
 static enum up_state
-up_process_prefix(struct rde_peer *peer, struct prefix *new, struct prefix *p)
+up_process_prefix(struct rde_peer *peer, struct prefix *new,
+    struct adjout_prefix *p)
 {
 	struct filterstate state;
 	struct bgpd_addr addr;
 	int excluded = 0;
+	uint32_t path_id_tx = 0;
 
 	/*
 	 * up_test_update() needs to run before the output filters
@@ -175,7 +177,7 @@ up_process_prefix(struct rde_peer *peer, struct prefix *new, struct prefix *p)
 
 	rde_filterstate_prep(&state, new);
 	pt_getaddr(new->pt, &addr);
-	if (rde_filter(peer->out_rules, peer, prefix_peer(new), &addr,
+	if (rde_filter_out(peer->out_rules, peer, prefix_peer(new), &addr,
 	    new->pt->prefixlen, &state) == ACTION_DENY) {
 		rde_filterstate_clean(&state);
 		return UP_FILTERED;
@@ -193,11 +195,13 @@ up_process_prefix(struct rde_peer *peer, struct prefix *new, struct prefix *p)
 	}
 
 	/* from here on we know this is an update */
-	if (p == (void *)-1)
-		p = prefix_adjout_get(peer, new->path_id_tx, new->pt);
+	if (p == (void *)-1) {
+		path_id_tx = new->path_id_tx;
+		p = adjout_prefix_get(peer, new->path_id_tx, new->pt);
+	}
 
 	up_prep_adjout(peer, &state, new->pt->aid);
-	prefix_adjout_update(p, peer, &state, new->pt, new->path_id_tx);
+	adjout_prefix_update(p, peer, &state, new->pt, path_id_tx);
 	rde_filterstate_clean(&state);
 
 	/* max prefix checker outbound */
@@ -217,9 +221,10 @@ up_process_prefix(struct rde_peer *peer, struct prefix *new, struct prefix *p)
 void
 up_generate_updates(struct rde_peer *peer, struct rib_entry *re)
 {
-	struct prefix		*new, *p;
+	struct prefix		*new;
+	struct adjout_prefix	*p;
 
-	p = prefix_adjout_first(peer, re->prefix);
+	p = adjout_prefix_first(peer, re->prefix);
 
 	new = prefix_best(re);
 	while (new != NULL) {
@@ -229,7 +234,7 @@ up_generate_updates(struct rde_peer *peer, struct rib_entry *re)
 			return;
 		case UP_FILTERED:
 			if (peer->flags & PEERFLAG_EVALUATE_ALL) {
-				new = TAILQ_NEXT(new, entry.list.rib);
+				new = TAILQ_NEXT(new, rib_l);
 				if (new != NULL && prefix_eligible(new))
 					continue;
 			}
@@ -242,7 +247,7 @@ up_generate_updates(struct rde_peer *peer, struct rib_entry *re)
 done:
 	/* withdraw prefix */
 	if (p != NULL)
-		prefix_adjout_withdraw(p);
+		adjout_prefix_withdraw(peer, re->prefix, p);
 }
 
 /*
@@ -255,15 +260,20 @@ done:
 void
 up_generate_addpath(struct rde_peer *peer, struct rib_entry *re)
 {
-	struct prefix		*head, *new, *p;
+	struct prefix		*new;
+	struct adjout_prefix	*head, *p;
+	uint32_t		addpath_prefix_list[2000];	/* XXX */
 	int			maxpaths = 0, extrapaths = 0, extra;
 	int			checkmode = 1;
+	unsigned int		pidx = 0, i;
 
-	head = prefix_adjout_first(peer, re->prefix);
-
-	/* mark all paths as stale */
-	for (p = head; p != NULL; p = prefix_adjout_next(peer, p))
-		p->flags |= PREFIX_FLAG_STALE;
+	/* collect all current paths */
+	head = adjout_prefix_first(peer, re->prefix);
+	for (p = head; p != NULL; p = adjout_prefix_next(peer, re->prefix, p)) {
+		addpath_prefix_list[pidx++] = p->path_id_tx;
+		if (pidx >= nitems(addpath_prefix_list))
+			fatalx("too many addpath paths to select from");
+	}
 
 	/* update paths */
 	new = prefix_best(re);
@@ -313,6 +323,12 @@ up_generate_addpath(struct rde_peer *peer, struct rib_entry *re)
 		case UP_OK:
 			maxpaths++;
 			extrapaths += extra;
+			for (i = 0; i < pidx; i++) {
+				if (addpath_prefix_list[i] == new->path_id_tx) {
+					addpath_prefix_list[i] = 0;
+					break;
+				}
+			}
 			break;
 		case UP_FILTERED:
 		case UP_EXCLUDED:
@@ -323,15 +339,19 @@ up_generate_addpath(struct rde_peer *peer, struct rib_entry *re)
 		}
 
 		/* only allow valid prefixes */
-		new = TAILQ_NEXT(new, entry.list.rib);
+		new = TAILQ_NEXT(new, rib_l);
 		if (new == NULL || !prefix_eligible(new))
 			break;
 	}
 
 	/* withdraw stale paths */
-	for (p = head; p != NULL; p = prefix_adjout_next(peer, p)) {
-		if (p->flags & PREFIX_FLAG_STALE)
-			prefix_adjout_withdraw(p);
+	for (i = 0; i < pidx; i++) {
+		if (addpath_prefix_list[i] != 0) {
+			p = adjout_prefix_get(peer, addpath_prefix_list[i],
+			    re->prefix);
+			if (p != NULL)
+				adjout_prefix_withdraw(peer, re->prefix, p);
+		}
 	}
 }
 
@@ -341,23 +361,17 @@ up_generate_addpath(struct rde_peer *peer, struct rib_entry *re)
  */
 void
 up_generate_addpath_all(struct rde_peer *peer, struct rib_entry *re,
-    struct prefix *new, struct prefix *old)
+    struct prefix *new, uint32_t old_pathid_tx)
 {
-	struct prefix		*p, *head = NULL;
-	int			all = 0;
+	struct adjout_prefix	*p;
 
 	/*
-	 * if old and new are NULL then insert all prefixes from best,
-	 * clearing old routes in the process
+	 * If old and new are NULL then re-insert all prefixes from re,
+	 * use up_generate_addpath() for that.
 	 */
-	if (old == NULL && new == NULL) {
-		/* mark all paths as stale */
-		head = prefix_adjout_first(peer, re->prefix);
-		for (p = head; p != NULL; p = prefix_adjout_next(peer, p))
-			p->flags |= PREFIX_FLAG_STALE;
-
-		new = prefix_best(re);
-		all = 1;
+	if (old_pathid_tx == 0 && new == NULL) {
+		up_generate_addpath(peer, re);
+		return;
 	}
 
 	if (new != NULL && !prefix_eligible(new)) {
@@ -365,17 +379,14 @@ up_generate_addpath_all(struct rde_peer *peer, struct rib_entry *re,
 		new = NULL;
 	}
 
-	if (old != NULL) {
-		/* withdraw stale paths */
-		p = prefix_adjout_get(peer, old->path_id_tx, old->pt);
-		if (p != NULL)
-			prefix_adjout_withdraw(p);
-	}
-
-	/* add new path (or multiple if all is set) */
-	while (new != NULL) {
+	if (new != NULL) {
+		/* add new path */
 		switch (up_process_prefix(peer, new, (void *)-1)) {
 		case UP_OK:
+			/* don't remove old if an existing prefix was updated */
+			if (old_pathid_tx == new->path_id_tx)
+				old_pathid_tx = 0;
+			break;
 		case UP_FILTERED:
 		case UP_EXCLUDED:
 			break;
@@ -383,22 +394,13 @@ up_generate_addpath_all(struct rde_peer *peer, struct rib_entry *re,
 			/* just give up */
 			return;
 		}
-
-		if (!all)
-			break;
-
-		/* only allow valid prefixes */
-		new = TAILQ_NEXT(new, entry.list.rib);
-		if (new == NULL || !prefix_eligible(new))
-			break;
 	}
 
-	if (all) {
-		/* withdraw stale paths */
-		for (p = head; p != NULL; p = prefix_adjout_next(peer, p)) {
-			if (p->flags & PREFIX_FLAG_STALE)
-				prefix_adjout_withdraw(p);
-		}
+	if (old_pathid_tx != 0) {
+		/* withdraw old path */
+		p = adjout_prefix_get(peer, old_pathid_tx, re->prefix);
+		if (p != NULL)
+			adjout_prefix_withdraw(peer, re->prefix, p);
 	}
 }
 
@@ -409,7 +411,7 @@ up_generate_default(struct rde_peer *peer, uint8_t aid)
 	extern struct rde_peer	*peerself;
 	struct filterstate	 state;
 	struct rde_aspath	*asp;
-	struct prefix		*p;
+	struct adjout_prefix	*p;
 	struct pt_entry		*pte;
 	struct bgpd_addr	 addr;
 
@@ -431,21 +433,21 @@ up_generate_default(struct rde_peer *peer, uint8_t aid)
 
 	memset(&addr, 0, sizeof(addr));
 	addr.aid = aid;
-	p = prefix_adjout_lookup(peer, &addr, 0);
 
 	/* outbound filter as usual */
-	if (rde_filter(peer->out_rules, peer, peerself, &addr, 0, &state) ==
-	    ACTION_DENY) {
+	if (rde_filter_out(peer->out_rules, peer, peerself, &addr, 0,
+	    &state) == ACTION_DENY) {
 		rde_filterstate_clean(&state);
 		return;
 	}
 
 	up_prep_adjout(peer, &state, addr.aid);
-	/* can't use pt_fill here since prefix_adjout_update keeps a ref */
+	/* can't use pt_fill here since adjout_prefix_update keeps a ref */
 	pte = pt_get(&addr, 0);
 	if (pte == NULL)
 		pte = pt_add(&addr, 0);
-	prefix_adjout_update(p, peer, &state, pte, 0);
+	p = adjout_prefix_first(peer, pte);
+	adjout_prefix_update(p, peer, &state, pte, 0);
 	rde_filterstate_clean(&state);
 
 	/* max prefix checker outbound */
@@ -510,7 +512,7 @@ up_get_nexthop(struct rde_peer *peer, struct filterstate *state, uint8_t aid)
 		/*
 		 * per RFC: if remote peer address is equal to the nexthop set
 		 * the nexthop to our local address. This reduces the risk of
-		 * routing loops. This overrides NEXTHOP_NOMODIFY.
+		 * routing loops.
 		 */
 		if (memcmp(&state->nexthop->exit_nexthop,
 		    &peer->remote_addr, sizeof(peer->remote_addr)) == 0) {
@@ -813,17 +815,11 @@ up_generate_attr(struct ibuf *buf, struct rde_peer *peer,
 int
 up_is_eor(struct rde_peer *peer, uint8_t aid)
 {
-	struct prefix *p;
+	struct pend_attr *pa;
 
-	p = RB_MIN(prefix_tree, &peer->updates[aid]);
-	if (p != NULL && (p->flags & PREFIX_FLAG_EOR)) {
-		/*
-		 * Need to remove eor from update tree because
-		 * prefix_adjout_destroy() can't handle that.
-		 */
-		RB_REMOVE(prefix_tree, &peer->updates[aid], p);
-		p->flags &= ~PREFIX_FLAG_UPDATE;
-		prefix_adjout_destroy(p);
+	pa = TAILQ_FIRST(&peer->updates[aid]);
+	if (pa != NULL && (uintptr_t)pa->attrs < AID_MAX) {
+		pend_attr_done(pa, peer);
 		return 1;
 	}
 	return 0;
@@ -832,36 +828,19 @@ up_is_eor(struct rde_peer *peer, uint8_t aid)
 /* minimal buffer size > withdraw len + attr len + attr hdr + afi/safi */
 #define MIN_UPDATE_LEN	16
 
-static void
-up_prefix_free(struct prefix_tree *prefix_head, struct prefix *p,
-    struct rde_peer *peer, int withdraw)
-{
-	if (withdraw) {
-		/* prefix no longer needed, remove it */
-		prefix_adjout_destroy(p);
-		peer->stats.prefix_sent_withdraw++;
-	} else {
-		/* prefix still in Adj-RIB-Out, keep it */
-		RB_REMOVE(prefix_tree, prefix_head, p);
-		p->flags &= ~PREFIX_FLAG_UPDATE;
-		peer->stats.pending_update--;
-		peer->stats.prefix_sent_update++;
-	}
-}
-
 /*
  * Write prefixes to buffer until either there is no more space or
  * the next prefix has no longer the same ASPATH attributes.
  * Returns -1 if no prefix was written else 0.
  */
 static int
-up_dump_prefix(struct ibuf *buf, struct prefix_tree *prefix_head,
+up_dump_prefix(struct ibuf *buf, struct pend_prefix_queue *prefix_head,
     struct rde_peer *peer, int withdraw)
 {
-	struct prefix	*p, *np;
-	int		 done = 0, has_ap = -1, rv = -1;
+	struct pend_prefix	*p, *np;
+	int			 has_ap = -1, rv = -1;
 
-	RB_FOREACH_SAFE(p, prefix_tree, prefix_head, np) {
+	TAILQ_FOREACH_SAFE(p, prefix_head, entry, np) {
 		if (has_ap == -1)
 			has_ap = peer_has_add_path(peer, p->pt->aid,
 			    CAPA_AP_SEND);
@@ -869,27 +848,21 @@ up_dump_prefix(struct ibuf *buf, struct prefix_tree *prefix_head,
 		    -1)
 			break;
 
-		/* make sure we only dump prefixes which belong together */
-		if (np == NULL ||
-		    np->aspath != p->aspath ||
-		    np->communities != p->communities ||
-		    np->nexthop != p->nexthop ||
-		    np->nhflags != p->nhflags ||
-		    (np->flags & PREFIX_FLAG_EOR))
-			done = 1;
-
 		rv = 0;
-		up_prefix_free(prefix_head, p, peer, withdraw);
-		if (done)
-			break;
+		if (withdraw)
+			peer->stats.prefix_sent_withdraw++;
+		else
+			peer->stats.prefix_sent_update++;
+		pend_prefix_free(p, prefix_head, peer);
 	}
 	return rv;
 }
 
 static int
 up_generate_mp_reach(struct ibuf *buf, struct rde_peer *peer,
-    struct nexthop *nh, uint8_t aid)
+    struct pend_attr *pa, uint8_t aid)
 {
+	struct nexthop *nh = pa->attrs->nexthop;
 	struct bgpd_addr *nexthop;
 	size_t off, nhoff;
 	uint16_t len, afi;
@@ -904,8 +877,8 @@ up_generate_mp_reach(struct ibuf *buf, struct rde_peer *peer,
 	if (ibuf_add_zero(buf, sizeof(len)) == -1)
 		return -1;
 
-	if (aid2afi(aid, &afi, &safi))
-		fatalx("up_generate_mp_reach: bad AID");
+	if (aid2afi(aid, &afi, &safi) == -1)
+		fatalx("%s: bad AID", __func__);
 
 	/* AFI + SAFI + NH LEN + NH + Reserved */
 	if (ibuf_add_n16(buf, afi) == -1)
@@ -986,7 +959,7 @@ up_generate_mp_reach(struct ibuf *buf, struct rde_peer *peer,
 	if (ibuf_add_zero(buf, 1) == -1) /* Reserved must be 0 */
 		return -1;
 
-	if (up_dump_prefix(buf, &peer->updates[aid], peer, 0) == -1)
+	if (up_dump_prefix(buf, &pa->prefixes, peer, 0) == -1)
 		/* no prefixes written, fail update  */
 		return -1;
 
@@ -1060,7 +1033,7 @@ up_dump_withdraws(struct imsgbuf *imsg, struct rde_peer *peer, uint8_t aid)
 			goto fail;
 
 		/* afi & safi */
-		if (aid2afi(aid, &afi, &safi))
+		if (aid2afi(aid, &afi, &safi) == -1)
 			fatalx("%s: bad AID", __func__);
 		if (ibuf_add_n16(buf, afi) == -1)
 			goto fail;
@@ -1101,7 +1074,8 @@ up_dump_withdraws(struct imsgbuf *imsg, struct rde_peer *peer, uint8_t aid)
  * Withdraw a single prefix after an error.
  */
 static int
-up_dump_withdraw_one(struct rde_peer *peer, struct prefix *p, struct ibuf *buf)
+up_dump_withdraw_one(struct rde_peer *peer, struct pt_entry *pt,
+    uint32_t path_id_tx, struct ibuf *buf)
 {
 	size_t off;
 	int has_ap;
@@ -1116,7 +1090,7 @@ up_dump_withdraw_one(struct rde_peer *peer, struct prefix *p, struct ibuf *buf)
 	if (ibuf_add_zero(buf, sizeof(len)) == -1)
 		return -1;
 
-	if (p->pt->aid != AID_INET) {
+	if (pt->aid != AID_INET) {
 		/* reserve space for 2-byte path attribute length */
 		off = ibuf_size(buf);
 		if (ibuf_add_zero(buf, sizeof(len)) == -1)
@@ -1131,7 +1105,7 @@ up_dump_withdraw_one(struct rde_peer *peer, struct prefix *p, struct ibuf *buf)
 			return -1;
 
 		/* afi & safi */
-		if (aid2afi(p->pt->aid, &afi, &safi))
+		if (aid2afi(pt->aid, &afi, &safi) == -1)
 			fatalx("%s: bad AID", __func__);
 		if (ibuf_add_n16(buf, afi) == -1)
 			return -1;
@@ -1139,8 +1113,8 @@ up_dump_withdraw_one(struct rde_peer *peer, struct prefix *p, struct ibuf *buf)
 			return -1;
 	}
 
-	has_ap = peer_has_add_path(peer, p->pt->aid, CAPA_AP_SEND);
-	if (pt_writebuf(buf, p->pt, 1, has_ap, p->path_id_tx) == -1)
+	has_ap = peer_has_add_path(peer, pt->aid, CAPA_AP_SEND);
+	if (pt_writebuf(buf, pt, 1, has_ap, path_id_tx) == -1)
 		return -1;
 
 	/* update length field (either withdrawn routes or attribute length) */
@@ -1148,7 +1122,7 @@ up_dump_withdraw_one(struct rde_peer *peer, struct prefix *p, struct ibuf *buf)
 	if (ibuf_set_n16(buf, off, len) == -1)
 		return -1;
 
-	if (p->pt->aid != AID_INET) {
+	if (pt->aid != AID_INET) {
 		/* write MP_UNREACH_NLRI attribute length (always extended) */
 		len -= 4; /* skip attribute header */
 		if (ibuf_set_n16(buf, off + sizeof(len) + 2, len) == -1)
@@ -1174,17 +1148,18 @@ up_dump_update(struct imsgbuf *imsg, struct rde_peer *peer, uint8_t aid)
 {
 	struct ibuf *buf;
 	struct bgpd_addr addr;
-	struct prefix *p;
+	struct pend_attr *pa;
+	struct pend_prefix *pp;
 	size_t off, pkgsize = MAX_PKTSIZE;
 	uint16_t len;
 	int force_ip4mp = 0;
 
-	p = RB_MIN(prefix_tree, &peer->updates[aid]);
-	if (p == NULL)
+	pa = TAILQ_FIRST(&peer->updates[aid]);
+	if (pa == NULL)
 		return;
 
 	if (aid == AID_INET && peer_has_ext_nexthop(peer, AID_INET)) {
-		struct nexthop *nh = prefix_nexthop(p);
+		struct nexthop *nh = pa->attrs->nexthop;
 		if (nh != NULL && nh->exit_nexthop.aid == AID_INET6)
 			force_ip4mp = 1;
 	}
@@ -1207,8 +1182,8 @@ up_dump_update(struct imsgbuf *imsg, struct rde_peer *peer, uint8_t aid)
 	if (ibuf_add_zero(buf, sizeof(len)) == -1)
 		goto fail;
 
-	if (up_generate_attr(buf, peer, prefix_aspath(p),
-	    prefix_communities(p), prefix_nexthop(p), aid) == -1)
+	if (up_generate_attr(buf, peer, pa->attrs->aspath,
+	    pa->attrs->communities, pa->attrs->nexthop, aid) == -1)
 		goto drop;
 
 	if (aid != AID_INET || force_ip4mp) {
@@ -1220,8 +1195,7 @@ up_dump_update(struct imsgbuf *imsg, struct rde_peer *peer, uint8_t aid)
 		 * merge the attributes together in reverse order of
 		 * creation.
 		 */
-		if (up_generate_mp_reach(buf, peer, prefix_nexthop(p), aid) ==
-		    -1)
+		if (up_generate_mp_reach(buf, peer, pa, aid) == -1)
 			goto drop;
 	}
 
@@ -1232,28 +1206,32 @@ up_dump_update(struct imsgbuf *imsg, struct rde_peer *peer, uint8_t aid)
 
 	if (aid == AID_INET && !force_ip4mp) {
 		/* last but not least dump the IPv4 nlri */
-		if (up_dump_prefix(buf, &peer->updates[aid], peer, 0) == -1)
+		if (up_dump_prefix(buf, &pa->prefixes, peer, 0) == -1)
 			goto drop;
 	}
+
+	pend_attr_done(pa, peer);
 
 	imsg_close(imsg, buf);
 	return;
 
  drop:
 	/* Not enough space. Drop current prefix, it will never fit. */
-	p = RB_MIN(prefix_tree, &peer->updates[aid]);
-	pt_getaddr(p->pt, &addr);
+	pp = TAILQ_FIRST(&pa->prefixes);
+	pt_getaddr(pp->pt, &addr);
 	log_peer_warnx(&peer->conf, "generating update failed, "
-	    "prefix %s/%d dropped", log_addr(&addr), p->pt->prefixlen);
+	    "prefix %s/%d dropped", log_addr(&addr), pp->pt->prefixlen);
 
-	up_prefix_free(&peer->updates[aid], p, peer, 0);
-	if (up_dump_withdraw_one(peer, p, buf) == -1)
+	if (up_dump_withdraw_one(peer, pp->pt, pp->path_id_tx, buf) == -1)
 		goto fail;
+	pend_prefix_free(pp, &pa->prefixes, peer);
+	pend_attr_done(pa, peer);
 	imsg_close(imsg, buf);
 	return;
 
  fail:
 	/* something went horribly wrong */
+	pend_attr_done(pa, peer);
 	log_peer_warn(&peer->conf, "generating update failed, peer desynced");
 	ibuf_free(buf);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd-session.c,v 1.16 2025/09/25 06:45:50 djm Exp $ */
+/* $OpenBSD: sshd-session.c,v 1.20 2026/02/09 21:38:14 dtucker Exp $ */
 /*
  * SSH2 implementation:
  * Privilege Separation:
@@ -48,11 +48,6 @@
 #include <stdarg.h>
 #include <unistd.h>
 #include <limits.h>
-
-#ifdef WITH_OPENSSL
-#include <openssl/bn.h>
-#include <openssl/evp.h>
-#endif
 
 #include "xmalloc.h"
 #include "ssh.h"
@@ -894,10 +889,6 @@ main(int ac, char **av)
 			fatal("dup %s: %s", _PATH_DEVNULL, strerror(errno));
 	}
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
-
 	/* If requested, redirect the logs to the specified logfile. */
 	if (logfile != NULL) {
 		char *cp, pid_s[32];
@@ -1145,6 +1136,9 @@ main(int ac, char **av)
 	    options.version_addendum)) != 0)
 		sshpkt_fatal(ssh, r, "banner exchange");
 
+	if ((ssh->compat & SSH_BUG_NOREKEY))
+		debug("client does not support rekeying");
+
 	ssh_packet_set_nonblocking(ssh);
 
 	/* allocate authentication context */
@@ -1240,8 +1234,6 @@ sshd_hostkey_sign(struct ssh *ssh, struct sshkey *privkey,
 void
 cleanup_exit(int i)
 {
-	extern int auth_attempted; /* monitor.c */
-
 	if (the_active_state != NULL && the_authctxt != NULL) {
 		do_cleanup(the_active_state, the_authctxt);
 		if (privsep_is_preauth &&
@@ -1255,7 +1247,9 @@ cleanup_exit(int i)
 		}
 	}
 	/* Override default fatal exit value when auth was attempted */
-	if (i == 255 && auth_attempted)
+	if (i == 255 && monitor_auth_attempted())
 		_exit(EXIT_AUTH_ATTEMPTED);
+	if (i == 255 && monitor_invalid_user())
+		_exit(EXIT_INVALID_USER);
 	_exit(i);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_bnxt.c,v 1.59 2025/10/13 10:45:08 stsp Exp $	*/
+/*	$OpenBSD: if_bnxt.c,v 1.67 2026/02/19 10:15:36 jan Exp $	*/
 /*-
  * Broadcom NetXtreme-C/E network driver.
  *
@@ -115,6 +115,18 @@
 /* NVRam stuff has a five minute timeout */
 #define BNXT_NVM_TIMEO	(5 * 60 * 1000)
 
+/* async events to enable */
+static const int bnxt_async_events[] = {
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_LINK_STATUS_CHANGE,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_LINK_SPEED_CHANGE,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_LINK_SPEED_CFG_CHANGE,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_PORT_PHY_CFG_CHANGE,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_PORT_PHY_CFG_CHANGE,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_RESET_NOTIFY,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_ECHO_REQUEST,
+	HWRM_ASYNC_EVENT_CMPL_EVENT_ID_ERROR_REPORT,
+};
+
 #define NEXT_CP_CONS_V(_ring, _cons, _v_bit)		\
 do {	 						\
 	if (++(_cons) == (_ring)->ring_size)		\
@@ -138,8 +150,6 @@ struct bnxt_cp_ring {
 	int			v_bit;
 	uint32_t		commit_cons;
 	int			commit_v_bit;
-	struct ctx_hw_stats	*stats;
-	uint32_t		stats_ctx_id;
 	struct bnxt_dmamem	*ring_mem;
 };
 
@@ -222,6 +232,7 @@ struct bnxt_queue {
 	struct bnxt_rx_queue	q_rx;
 	struct bnxt_tx_queue	q_tx;
 	struct bnxt_grp_info	q_rg;
+	uint32_t		q_stat_ctx_id;
 };
 
 struct bnxt_softc {
@@ -242,6 +253,7 @@ struct bnxt_softc {
 	struct bnxt_dmamem	*sc_cmd_resp;
 	uint16_t		sc_cmd_seq;
 	uint16_t		sc_max_req_len;
+	uint16_t		sc_max_ext_req_len;
 	uint32_t		sc_cmd_timeo;
 	uint32_t		sc_flags;
 
@@ -255,6 +267,7 @@ struct bnxt_softc {
 	int			sc_tx_queue_id;
 
 	struct bnxt_vnic_info	sc_vnic;
+	int			sc_stats_ctx_stride;
 	struct bnxt_dmamem	*sc_stats_ctx_mem;
 	struct bnxt_dmamem	*sc_rx_cfg;
 
@@ -306,10 +319,12 @@ void		bnxt_cpr_commit(struct bnxt_softc *, struct bnxt_cp_ring *);
 void		bnxt_cpr_rollback(struct bnxt_softc *, struct bnxt_cp_ring *);
 
 void		bnxt_mark_cpr_invalid(struct bnxt_cp_ring *);
-void		bnxt_write_cp_doorbell(struct bnxt_softc *, struct bnxt_ring *,
-		    int);
-void		bnxt_write_cp_doorbell_index(struct bnxt_softc *,
-		    struct bnxt_ring *, uint32_t, int);
+void		bnxt_write_intr_doorbell(struct bnxt_softc *,
+		    struct bnxt_cp_ring *, int);
+void		bnxt_write_intr_doorbell_index(struct bnxt_softc *,
+		    struct bnxt_cp_ring *, uint32_t, int);
+void		bnxt_write_cp_doorbell(struct bnxt_softc *,
+		    struct bnxt_cp_ring *, uint32_t);
 void		bnxt_write_rx_doorbell(struct bnxt_softc *, struct bnxt_ring *,
 		    int);
 void		bnxt_write_tx_doorbell(struct bnxt_softc *, struct bnxt_ring *,
@@ -352,9 +367,9 @@ int		bnxt_hwrm_vnic_cfg(struct bnxt_softc *,
 int		bnxt_hwrm_vnic_cfg_placement(struct bnxt_softc *,
 		    struct bnxt_vnic_info *vnic);
 int		bnxt_hwrm_stat_ctx_alloc(struct bnxt_softc *,
-		    struct bnxt_cp_ring *, uint64_t);
+		    uint32_t *, uint64_t);
 int		bnxt_hwrm_stat_ctx_free(struct bnxt_softc *,
-		    struct bnxt_cp_ring *);
+		    uint32_t *);
 int		bnxt_hwrm_ring_grp_alloc(struct bnxt_softc *,
 		    struct bnxt_grp_info *);
 int		bnxt_hwrm_ring_grp_free(struct bnxt_softc *,
@@ -511,6 +526,11 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 		goto free_resp;
 	}
 
+	if (bnxt_hwrm_func_reset(sc) != 0) {
+		printf(": reset failed\n");
+		goto free_resp;
+	}
+
 	if (bnxt_hwrm_nvm_get_dev_info(sc, NULL, NULL, NULL, NULL, NULL, NULL)
 	    != 0) {
 		printf(": failed to get nvram info\n");
@@ -532,6 +552,11 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 		goto free_resp;
 	}
 
+	if (bnxt_hwrm_queue_qportcfg(sc) != 0) {
+		printf(": failed to query port config\n");
+		goto free_resp;
+	}
+
 	/*
 	 * devices advertise msi support, but there's no way to tell a
 	 * completion queue to use msi mode, only legacy or msi-x.
@@ -545,9 +570,11 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 		nmsix = pci_intr_msix_count(pa);
 		if (nmsix > 1) {
 			sc->sc_ih = pci_intr_establish(sc->sc_pc, ih,
-			    IPL_NET | IPL_MPSAFE, bnxt_admin_intr, sc, DEVNAME(sc));
-			sc->sc_intrmap = intrmap_create(&sc->sc_dev,
-			    nmsix - 1, BNXT_MAX_QUEUES, INTRMAP_POWEROF2);
+			    IPL_NET | IPL_MPSAFE, bnxt_admin_intr, sc,
+			    DEVNAME(sc));
+			sc->sc_intrmap = intrmap_create(&sc->sc_dev, nmsix - 1,
+			    MIN(BNXT_MAX_QUEUES, IF_MAX_VECTORS),
+			    INTRMAP_POWEROF2);
 			sc->sc_nqueues = intrmap_count(sc->sc_intrmap);
 			KASSERT(sc->sc_nqueues > 0);
 			KASSERT(powerof2(sc->sc_nqueues));
@@ -581,22 +608,11 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 		goto deintr;
 	}
 
-	if (bnxt_hwrm_queue_qportcfg(sc) != 0) {
-		printf("%s: failed to query port config\n", DEVNAME(sc));
-		goto deintr;
-	}
-
-	if (bnxt_hwrm_func_reset(sc) != 0) {
-		printf("%s: reset failed\n", DEVNAME(sc));
-		goto deintr;
-	}
-
 	if (sc->sc_intrmap == NULL)
 		cpr = &sc->sc_queues[0].q_cp;
 	else
 		cpr = &sc->sc_cp_ring;
 
-	cpr->stats_ctx_id = HWRM_NA_SIGNATURE;
 	cpr->ring.phys_id = (uint16_t)HWRM_NA_SIGNATURE;
 	cpr->softc = sc;
 	cpr->ring.id = 0;
@@ -627,7 +643,7 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 		    DEVNAME(sc));
 		goto free_cp_ring;
 	}
-	bnxt_write_cp_doorbell(sc, &cpr->ring, 1);
+	bnxt_write_intr_doorbell(sc, cpr, 1);
 
 	if (bnxt_set_cp_ring_aggint(sc, cpr) != 0) {
 		printf("%s: failed to set interrupt aggregation\n",
@@ -650,7 +666,10 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 #if NVLAN > 0
 	ifp->if_capabilities |= IFCAP_VLAN_HWTAGGING;
 #endif
-	ifp->if_capabilities |= IFCAP_LRO;	
+#ifndef SMALL_KERNEL
+	ifp->if_capabilities |= IFCAP_LRO;
+	ifp->if_xflags |= IFXF_LRO;
+#endif
 
 	ifq_init_maxlen(&ifp->if_snd, 1024);	/* ? */
 
@@ -672,6 +691,7 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 
 		bq->q_index = i;
 		bq->q_sc = sc;
+		bq->q_stat_ctx_id = HWRM_NA_SIGNATURE;
 
 		rx->rx_softc = sc;
 		rx->rx_ifiq = ifiq;
@@ -683,7 +703,6 @@ bnxt_attach(struct device *parent, struct device *self, void *aux)
 		ifq->ifq_softc = tx;
 
 		if (sc->sc_intrmap != NULL) {
-			cp->stats_ctx_id = HWRM_NA_SIGNATURE;
 			cp->ring.phys_id = (uint16_t)HWRM_NA_SIGNATURE;
 			cp->ring.id = i + 1;	/* first cp ring is async only */
 			cp->softc = sc;
@@ -832,12 +851,12 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 			    DEVNAME(sc), bq->q_index);
 			goto free_cp_ring;
 		}
-		bnxt_write_cp_doorbell(sc, &cp->ring, 1);
+		bnxt_write_cp_doorbell(sc, cp, 0);
 	}
 
-	if (bnxt_hwrm_stat_ctx_alloc(sc, &bq->q_cp,
+	if (bnxt_hwrm_stat_ctx_alloc(sc, &bq->q_stat_ctx_id,
 	    BNXT_DMA_DVA(sc->sc_stats_ctx_mem) +
-	    (bq->q_index * sizeof(struct ctx_hw_stats))) != 0) {
+	    (bq->q_index * sc->sc_stats_ctx_stride)) != 0) {
 		printf("%s: failed to set up stats context\n", DEVNAME(sc));
 		goto free_cp_ring;
 	}
@@ -849,7 +868,7 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	tx->tx_ring.vaddr = BNXT_DMA_KVA(tx->tx_ring_mem);
 	tx->tx_ring.paddr = BNXT_DMA_DVA(tx->tx_ring_mem);
 	if (bnxt_hwrm_ring_alloc(sc, HWRM_RING_ALLOC_INPUT_RING_TYPE_TX,
-	    &tx->tx_ring, cp->ring.phys_id, HWRM_NA_SIGNATURE, 1) != 0) {
+	    &tx->tx_ring, cp->ring.phys_id, bq->q_stat_ctx_id, 1) != 0) {
 		printf("%s: failed to set up tx ring\n",
 		    DEVNAME(sc));
 		goto dealloc_stats;
@@ -863,7 +882,7 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	rx->rx_ring.vaddr = BNXT_DMA_KVA(rx->rx_ring_mem);
 	rx->rx_ring.paddr = BNXT_DMA_DVA(rx->rx_ring_mem);
 	if (bnxt_hwrm_ring_alloc(sc, HWRM_RING_ALLOC_INPUT_RING_TYPE_RX,
-	    &rx->rx_ring, cp->ring.phys_id, HWRM_NA_SIGNATURE, 1) != 0) {
+	    &rx->rx_ring, cp->ring.phys_id, bq->q_stat_ctx_id, 1) != 0) {
 		printf("%s: failed to set up rx ring\n",
 		    DEVNAME(sc));
 		goto dealloc_tx;
@@ -877,7 +896,7 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	rx->rx_ag_ring.vaddr = BNXT_DMA_KVA(rx->rx_ring_mem) + PAGE_SIZE;
 	rx->rx_ag_ring.paddr = BNXT_DMA_DVA(rx->rx_ring_mem) + PAGE_SIZE;
 	if (bnxt_hwrm_ring_alloc(sc, HWRM_RING_ALLOC_INPUT_RING_TYPE_RX,
-	    &rx->rx_ag_ring, cp->ring.phys_id, HWRM_NA_SIGNATURE, 1) != 0) {
+	    &rx->rx_ag_ring, cp->ring.phys_id, bq->q_stat_ctx_id, 1) != 0) {
 		printf("%s: failed to set up rx ag ring\n",
 		    DEVNAME(sc));
 		goto dealloc_rx;
@@ -885,7 +904,7 @@ bnxt_queue_up(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	bnxt_write_rx_doorbell(sc, &rx->rx_ag_ring, 0);
 
 	rg->grp_id = HWRM_NA_SIGNATURE;
-	rg->stats_ctx = cp->stats_ctx_id;
+	rg->stats_ctx = bq->q_stat_ctx_id;
 	rg->rx_ring_id = rx->rx_ring.phys_id;
 	rg->ag_ring_id = rx->rx_ag_ring.phys_id;
 	rg->cp_ring_id = cp->ring.phys_id;
@@ -1000,7 +1019,7 @@ dealloc_rx:
 	bnxt_hwrm_ring_free(sc, HWRM_RING_ALLOC_INPUT_RING_TYPE_RX,
 	    &rx->rx_ring);
 dealloc_stats:
-	bnxt_hwrm_stat_ctx_free(sc, cp);
+	bnxt_hwrm_stat_ctx_free(sc, &bq->q_stat_ctx_id);
 free_cp_ring:
 	if (sc->sc_intrmap != NULL) {
 		bnxt_hwrm_ring_free(sc,
@@ -1040,7 +1059,7 @@ bnxt_queue_down(struct bnxt_softc *sc, struct bnxt_queue *bq)
 	rx->rx_slots = NULL;
 
 	bnxt_hwrm_ring_grp_free(sc, &bq->q_rg);
-	bnxt_hwrm_stat_ctx_free(sc, &bq->q_cp);
+	bnxt_hwrm_stat_ctx_free(sc, &bq->q_stat_ctx_id);
 
 	/* may need to wait for 500ms here before we can free the rings */
 
@@ -1073,8 +1092,10 @@ bnxt_up(struct bnxt_softc *sc)
 	struct ifnet *ifp = &sc->sc_ac.ac_if;
 	int i, ret = 0;
 
+	sc->sc_stats_ctx_stride = roundup(sizeof(struct ctx_hw_stats_ext), 128);
+
 	sc->sc_stats_ctx_mem = bnxt_dmamem_alloc(sc,
-	    sizeof(struct ctx_hw_stats) * sc->sc_nqueues);
+	    sc->sc_stats_ctx_stride * sc->sc_nqueues);
 	if (sc->sc_stats_ctx_mem == NULL) {
 		printf("%s: failed to allocate stats contexts\n", DEVNAME(sc));
 		return ENOMEM;
@@ -1463,10 +1484,11 @@ bnxt_start(struct ifqueue *ifq)
 					tcpstat_inc(tcps_outbadtso);
 
 				hdrsize += ext.tcphlen;
-				txhi->hdr_size = htole16(hdrsize / 2);
+				txhi->kid_or_ts_low_hdr_size =
+				    htole16(hdrsize / 2);
 
 				outlen = m->m_pkthdr.ph_mss;
-				txhi->mss = htole32(outlen);
+				txhi->kid_or_ts_high_mss = htole32(outlen);
 
 				paylen = m->m_pkthdr.len - hdrsize;
 				tcpstat_add(tcps_outpkttso,
@@ -1591,7 +1613,7 @@ bnxt_admin_intr(void *xsc)
 	struct cmpl_base *cmpl;
 	uint16_t type;
 
-	bnxt_write_cp_doorbell(sc, &cpr->ring, 0);
+	bnxt_write_intr_doorbell(sc, cpr, 0);
 	cmpl = bnxt_cpr_next_cmpl(sc, cpr);
 	while (cmpl != NULL) {
 		type = le16toh(cmpl->type) & CMPL_BASE_TYPE_MASK;
@@ -1608,7 +1630,7 @@ bnxt_admin_intr(void *xsc)
 		cmpl = bnxt_cpr_next_cmpl(sc, cpr);
 	}
 
-	bnxt_write_cp_doorbell_index(sc, &cpr->ring,
+	bnxt_write_intr_doorbell_index(sc, cpr,
 	    (cpr->commit_cons+1) % cpr->ring.ring_size, 1);
 	return (1);
 }
@@ -1628,7 +1650,7 @@ bnxt_intr(void *xq)
 	uint16_t type;
 	int rxfree, txfree, agfree, rv, rollback;
 
-	bnxt_write_cp_doorbell(sc, &cpr->ring, 0);
+	bnxt_write_intr_doorbell(sc, cpr, 0);
 	rxfree = 0;
 	txfree = 0;
 	agfree = 0;
@@ -1668,8 +1690,8 @@ bnxt_intr(void *xq)
 	 * comments in bnxtreg.h suggest we should be writing cpr->cons here,
 	 * but writing cpr->cons + 1 makes it stop interrupting.
 	 */
-	bnxt_write_cp_doorbell_index(sc, &cpr->ring,
-	    (cpr->commit_cons+1) % cpr->ring.ring_size, 1);
+	bnxt_write_cp_doorbell(sc, cpr,
+	    (cpr->commit_cons+1) % cpr->ring.ring_size);
 
 	if (rxfree != 0) {
 		int livelocked = 0;
@@ -2148,32 +2170,46 @@ bnxt_mark_cpr_invalid(struct bnxt_cp_ring *cpr)
 }
 
 void
-bnxt_write_cp_doorbell(struct bnxt_softc *sc, struct bnxt_ring *ring,
+bnxt_write_intr_doorbell(struct bnxt_softc *sc, struct bnxt_cp_ring *ring,
     int enable)
 {
 	uint32_t val = CMPL_DOORBELL_KEY_CMPL;
 	if (enable == 0)
 		val |= CMPL_DOORBELL_MASK;
 
-	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, ring->doorbell, 4,
+	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, ring->ring.doorbell, 4,
 	    BUS_SPACE_BARRIER_WRITE);
 	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, 0, sc->sc_db_s,
 	    BUS_SPACE_BARRIER_WRITE);
-	bus_space_write_4(sc->sc_db_t, sc->sc_db_h, ring->doorbell,
+	bus_space_write_4(sc->sc_db_t, sc->sc_db_h, ring->ring.doorbell,
 	    htole32(val));
 }
 
 void
-bnxt_write_cp_doorbell_index(struct bnxt_softc *sc, struct bnxt_ring *ring,
+bnxt_write_intr_doorbell_index(struct bnxt_softc *sc, struct bnxt_cp_ring *ring,
     uint32_t index, int enable)
 {
 	uint32_t val = CMPL_DOORBELL_KEY_CMPL | CMPL_DOORBELL_IDX_VALID |
 	    (index & CMPL_DOORBELL_IDX_MASK);
 	if (enable == 0)
 		val |= CMPL_DOORBELL_MASK;
-	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, ring->doorbell, 4,
+	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, ring->ring.doorbell, 4,
 	    BUS_SPACE_BARRIER_WRITE);
-	bus_space_write_4(sc->sc_db_t, sc->sc_db_h, ring->doorbell,
+	bus_space_write_4(sc->sc_db_t, sc->sc_db_h, ring->ring.doorbell,
+	    htole32(val));
+	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, 0, sc->sc_db_s,
+	    BUS_SPACE_BARRIER_WRITE);
+}
+
+void
+bnxt_write_cp_doorbell(struct bnxt_softc *sc, struct bnxt_cp_ring *ring,
+    uint32_t index)
+{
+	uint32_t val = CMPL_DOORBELL_KEY_CMPL | CMPL_DOORBELL_IDX_VALID |
+	    (index & CMPL_DOORBELL_IDX_MASK);
+	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, ring->ring.doorbell, 4,
+	    BUS_SPACE_BARRIER_WRITE);
+	bus_space_write_4(sc->sc_db_t, sc->sc_db_h, ring->ring.doorbell,
 	    htole32(val));
 	bus_space_barrier(sc->sc_db_t, sc->sc_db_h, 0, sc->sc_db_s,
 	    BUS_SPACE_BARRIER_WRITE);
@@ -2496,12 +2532,16 @@ _hwrm_send_message(struct bnxt_softc *softc, void *msg, uint32_t msg_len)
 	req->seq_id = htole16(softc->sc_cmd_seq++);
 	memset(resp, 0, PAGE_SIZE);
 
-	if (softc->sc_flags & BNXT_FLAG_SHORT_CMD) {
+	if (msg_len > softc->sc_max_ext_req_len)
+		msg_len = softc->sc_max_ext_req_len;
+
+	if ((softc->sc_flags & BNXT_FLAG_SHORT_CMD) ||
+	    msg_len > softc->sc_max_req_len) {
 		void *short_cmd_req = BNXT_DMA_KVA(softc->sc_cmd_resp);
 
 		memcpy(short_cmd_req, req, msg_len);
 		memset((uint8_t *) short_cmd_req + msg_len, 0,
-		    softc->sc_max_req_len - msg_len);
+		    softc->sc_max_ext_req_len - msg_len);
 
 		short_input.req_type = req->req_type;
 		short_input.signature =
@@ -2635,6 +2675,7 @@ bnxt_hwrm_ver_get(struct bnxt_softc *softc)
 	uint32_t dev_caps_cfg;
 
 	softc->sc_max_req_len = HWRM_MAX_REQ_LEN;
+	softc->sc_max_ext_req_len = HWRM_MAX_REQ_LEN;
 	softc->sc_cmd_timeo = 1000;
 	bnxt_hwrm_cmd_hdr_init(softc, &req, HWRM_VER_GET);
 
@@ -2647,11 +2688,11 @@ bnxt_hwrm_ver_get(struct bnxt_softc *softc)
 	if (rc)
 		goto fail;
 
-	printf(": fw ver %d.%d.%d, ", resp->hwrm_fw_maj, resp->hwrm_fw_min,
-	    resp->hwrm_fw_bld);
+	printf(": fw ver %d.%d.%d, ", resp->hwrm_fw_maj_8b, resp->hwrm_fw_min_8b,
+	    resp->hwrm_fw_bld_8b);
 
-	softc->sc_hwrm_ver = (resp->hwrm_intf_maj << 16) |
-	    (resp->hwrm_intf_min << 8) | resp->hwrm_intf_upd;
+	softc->sc_hwrm_ver = (resp->hwrm_intf_maj_8b << 16) |
+	    (resp->hwrm_intf_min_8b << 8) | resp->hwrm_intf_upd_8b;
 #if 0
 	snprintf(softc->ver_info->hwrm_if_ver, BNXT_VERSTR_SIZE, "%d.%d.%d",
 	    resp->hwrm_intf_maj, resp->hwrm_intf_min, resp->hwrm_intf_upd);
@@ -2730,16 +2771,26 @@ int
 bnxt_hwrm_func_drv_rgtr(struct bnxt_softc *softc)
 {
 	struct hwrm_func_drv_rgtr_input req = {0};
+	int i;
 
 	bnxt_hwrm_cmd_hdr_init(softc, &req, HWRM_FUNC_DRV_RGTR);
 
 	req.enables = htole32(HWRM_FUNC_DRV_RGTR_INPUT_ENABLES_VER |
-	    HWRM_FUNC_DRV_RGTR_INPUT_ENABLES_OS_TYPE);
+	    HWRM_FUNC_DRV_RGTR_INPUT_ENABLES_OS_TYPE |
+	    HWRM_FUNC_DRV_RGTR_INPUT_ENABLES_ASYNC_EVENT_FWD);
 	req.os_type = htole16(HWRM_FUNC_DRV_RGTR_INPUT_OS_TYPE_FREEBSD);
 
-	req.ver_maj = 6;
-	req.ver_min = 4;
-	req.ver_upd = 0;
+	req.ver_maj = HWRM_VERSION_MAJOR;
+	req.ver_min = HWRM_VERSION_MINOR;
+	req.ver_upd = HWRM_VERSION_UPDATE;
+	req.ver_maj_8b = HWRM_VERSION_MAJOR;
+	req.ver_min_8b = HWRM_VERSION_MINOR;
+	req.ver_upd_8b = HWRM_VERSION_UPDATE;
+
+	for (i = 0; i < nitems(bnxt_async_events); i++) {
+		int event = bnxt_async_events[i];
+		req.async_event_fwd[event / 32] |= htole32(1 << event % 32);
+	}
 
 	return hwrm_send_message(softc, &req, sizeof(req));
 }
@@ -3142,16 +3193,16 @@ fail:
 
 
 int
-bnxt_hwrm_stat_ctx_alloc(struct bnxt_softc *softc, struct bnxt_cp_ring *cpr,
+bnxt_hwrm_stat_ctx_alloc(struct bnxt_softc *softc, uint32_t *stat_ctx_id,
     uint64_t paddr)
 {
 	struct hwrm_stat_ctx_alloc_input req = {0};
 	struct hwrm_stat_ctx_alloc_output *resp;
 	int rc = 0;
 
-	if (cpr->stats_ctx_id != HWRM_NA_SIGNATURE) {
+	if (*stat_ctx_id != HWRM_NA_SIGNATURE) {
 		printf("%s: attempt to re-allocate stats ctx %08x\n",
-		    DEVNAME(softc), cpr->stats_ctx_id);
+		    DEVNAME(softc), *stat_ctx_id);
 		return EINVAL;
 	}
 
@@ -3160,13 +3211,14 @@ bnxt_hwrm_stat_ctx_alloc(struct bnxt_softc *softc, struct bnxt_cp_ring *cpr,
 
 	req.update_period_ms = htole32(1000);
 	req.stats_dma_addr = htole64(paddr);
+	req.stats_dma_length = htole16(sizeof(struct ctx_hw_stats));
 
 	BNXT_HWRM_LOCK(softc);
 	rc = _hwrm_send_message(softc, &req, sizeof(req));
 	if (rc)
 		goto fail;
 
-	cpr->stats_ctx_id = le32toh(resp->stat_ctx_id);
+	*stat_ctx_id = le32toh(resp->stat_ctx_id);
 
 fail:
 	BNXT_HWRM_UNLOCK(softc);
@@ -3175,26 +3227,26 @@ fail:
 }
 
 int
-bnxt_hwrm_stat_ctx_free(struct bnxt_softc *softc, struct bnxt_cp_ring *cpr)
+bnxt_hwrm_stat_ctx_free(struct bnxt_softc *softc, uint32_t *stat_ctx_id)
 {
 	struct hwrm_stat_ctx_free_input req = {0};
 	int rc = 0;
 
-	if (cpr->stats_ctx_id == HWRM_NA_SIGNATURE) {
+	if (*stat_ctx_id == HWRM_NA_SIGNATURE) {
 		printf("%s: attempt to free stats ctx %08x\n",
-		    DEVNAME(softc), cpr->stats_ctx_id);
+		    DEVNAME(softc), *stat_ctx_id);
 		return EINVAL;
 	}
 
 	bnxt_hwrm_cmd_hdr_init(softc, &req, HWRM_STAT_CTX_FREE);
-	req.stat_ctx_id = htole32(cpr->stats_ctx_id);
+	req.stat_ctx_id = htole32(*stat_ctx_id);
 
 	BNXT_HWRM_LOCK(softc);
 	rc = _hwrm_send_message(softc, &req, sizeof(req));
 	BNXT_HWRM_UNLOCK(softc);
 
 	if (rc == 0)
-		cpr->stats_ctx_id = HWRM_NA_SIGNATURE;
+		*stat_ctx_id = HWRM_NA_SIGNATURE;
 
 	return (rc);
 }
@@ -3602,7 +3654,7 @@ bnxt_get_sffpage(struct bnxt_softc *softc, struct if_sffpage *sff)
 	for (offset = 0; offset < 256; offset += sizeof(out->data)) {
 		req.page_offset = htole16(offset);
 		req.data_length = sizeof(out->data);
-		req.enables = htole32(HWRM_PORT_PHY_I2C_READ_REQ_ENABLES_PAGE_OFFSET);
+		req.enables = htole32(HWRM_PORT_PHY_I2C_READ_INPUT_ENABLES_PAGE_OFFSET);
 		
 		if (hwrm_send_message(softc, &req, sizeof(req))) {
 			printf("%s: failed to read i2c data\n", DEVNAME(softc));

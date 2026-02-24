@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.115 2025/10/22 14:31:24 hshoexer Exp $	*/
+/*	$OpenBSD: trap.c,v 1.117 2026/02/16 15:10:39 hshoexer Exp $	*/
 /*	$NetBSD: trap.c,v 1.2 2003/05/04 23:51:56 fvdl Exp $	*/
 
 /*-
@@ -437,6 +437,14 @@ vctrap(struct trapframe *frame, int user, int *sig, int *code)
 		}
 		break;
 	    }
+	case SVM_VMEXIT_VMMCALL:
+		if (user) {
+			*sig = SIGILL;
+			*code = ILL_PRVOPC;
+			return 0;	/* not allowed from userspace */
+		}
+		panic("unexpected VMMCALL in kernelspace");
+		/* NOTREACHED */
 	case SVM_VMEXIT_NPF:
 		if (user) {
 			*sig = SIGBUS;
@@ -445,6 +453,16 @@ vctrap(struct trapframe *frame, int user, int *sig, int *code)
 		}
 		panic("unexpected MMIO in kernelspace");
 		/* NOTREACHED */
+	case SVM_VMEXIT_WBINVD:
+		/*
+		 * There is no special GHCB request for WBNOINVD.
+		 * Signal WBINVD to emulate WBNOINVD.
+		 */
+		if (*rip == 0xf3)
+			frame->tf_rip += 3;
+		else
+			frame->tf_rip += 2;
+		break;
 	default:
 		panic("invalid exit code 0x%llx", ghcb_regs.exitcode);
 	}

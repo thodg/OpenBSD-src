@@ -1,4 +1,4 @@
-/* $OpenBSD: cms_smime.c,v 1.29 2025/05/10 05:54:38 tb Exp $ */
+/* $OpenBSD: cms_smime.c,v 1.31 2025/11/28 06:07:09 tb Exp $ */
 /*
  * Written by Dr Stephen N Henson (steve@openssl.org) for the OpenSSL
  * project.
@@ -277,25 +277,32 @@ CMS_ContentInfo *
 CMS_EncryptedData_encrypt(BIO *in, const EVP_CIPHER *cipher,
     const unsigned char *key, size_t keylen, unsigned int flags)
 {
-	CMS_ContentInfo *cms;
+	CMS_ContentInfo *cms = NULL;
 
-	if (!cipher) {
+	if (cipher == NULL) {
 		CMSerror(CMS_R_NO_CIPHER);
-		return NULL;
+		goto err;
 	}
-	cms = CMS_ContentInfo_new();
-	if (cms == NULL)
-		return NULL;
+
+	if ((cms = CMS_ContentInfo_new()) == NULL)
+		goto err;
+
 	if (!CMS_EncryptedData_set1_key(cms, cipher, key, keylen))
-		return NULL;
+		goto err;
 
-	if (!(flags & CMS_DETACHED))
-		CMS_set_detached(cms, 0);
+	if ((flags & CMS_DETACHED) == 0) {
+		if (!CMS_set_detached(cms, 0))
+			goto err;
+	}
 
-	if ((flags & (CMS_STREAM | CMS_PARTIAL)) ||
-	    CMS_final(cms, in, NULL, flags))
-		return cms;
+	if ((flags & (CMS_STREAM | CMS_PARTIAL)) == 0) {
+		if (!CMS_final(cms, in, NULL, flags))
+			goto err;
+	}
 
+	return cms;
+
+ err:
 	CMS_ContentInfo_free(cms);
 
 	return NULL;

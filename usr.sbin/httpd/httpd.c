@@ -1,4 +1,4 @@
-/*	$OpenBSD: httpd.c,v 1.74 2024/04/08 12:45:18 tobhe Exp $	*/
+/*	$OpenBSD: httpd.c,v 1.76 2026/01/02 08:45:16 rsadowski Exp $	*/
 
 /*
  * Copyright (c) 2014 Reyk Floeter <reyk@openbsd.org>
@@ -278,6 +278,8 @@ parent_configure(struct httpd *env)
 	struct media_type	*media;
 	struct auth		*auth;
 
+	memset(&cf, 0, sizeof(cf));
+
 	RB_FOREACH(media, mediatypes, env->sc_mediatypes) {
 		if (config_setmedia(env, media) == -1)
 			fatal("send media");
@@ -528,7 +530,7 @@ expand_string(char *label, size_t len, const char *srch, const char *repl)
 		log_debug("%s: calloc", __func__);
 		return (-1);
 	}
-	p = q = label;
+	p = label;
 	while ((q = strstr(p, srch)) != NULL) {
 		*q = '\0';
 		if ((strlcat(tmp, p, len) >= len) ||

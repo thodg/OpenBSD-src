@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ixl.c,v 1.110 2025/10/11 18:34:24 claudio Exp $ */
+/*	$OpenBSD: if_ixl.c,v 1.115 2026/02/19 10:15:36 jan Exp $ */
 
 /*
  * Copyright (c) 2013-2015, Intel Corporation
@@ -99,8 +99,6 @@
 #ifndef CACHE_LINE_SIZE
 #define CACHE_LINE_SIZE 64
 #endif
-
-#define IXL_MAX_VECTORS			8 /* XXX this is pretty arbitrary */
 
 #define I40E_MASK(mask, shift)		((mask) << (shift))
 #define I40E_PF_RESET_WAIT_COUNT	200
@@ -1641,7 +1639,7 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	struct ifnet *ifp = &sc->sc_ac.ac_if;
 	struct pci_attach_args *pa = aux;
 	pcireg_t memtype;
-	uint32_t port, ari, func;
+	uint32_t port, ari, func, val;
 	uint64_t phy_types = 0;
 	unsigned int nqueues, i;
 	int tries;
@@ -1665,9 +1663,11 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 		return;
 	}
 
-	sc->sc_base_queue = (ixl_rd(sc, I40E_PFLAN_QALLOC) &
-	    I40E_PFLAN_QALLOC_FIRSTQ_MASK) >>
+	val = ixl_rd(sc, I40E_PFLAN_QALLOC);
+	sc->sc_base_queue = (val & I40E_PFLAN_QALLOC_FIRSTQ_MASK) >>
 	    I40E_PFLAN_QALLOC_FIRSTQ_SHIFT;
+	nqueues = ((val & I40E_PFLAN_QALLOC_LASTQ_MASK) >>
+	    I40E_PFLAN_QALLOC_LASTQ_SHIFT) - sc->sc_base_queue;
 
 	ixl_clear_hw(sc);
 	if (ixl_pf_reset(sc) == -1) {
@@ -1780,8 +1780,9 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 		if (nmsix > 1) { /* we used 1 (the 0th) for the adminq */
 			nmsix--;
 
-			sc->sc_intrmap = intrmap_create(&sc->sc_dev,
-			    nmsix, IXL_MAX_VECTORS, INTRMAP_POWEROF2);
+			sc->sc_intrmap = intrmap_create(&sc->sc_dev, nmsix,
+			    MIN(nqueues, IF_MAX_VECTORS),
+			    INTRMAP_POWEROF2);
 			nqueues = intrmap_count(sc->sc_intrmap);
 			KASSERT(nqueues > 0);
 			KASSERT(powerof2(nqueues));
@@ -1930,10 +1931,12 @@ ixl_attach(struct device *parent, struct device *self, void *aux)
 	    IFCAP_CSUM_TCPv6 | IFCAP_CSUM_UDPv6;
 	ifp->if_capabilities |= IFCAP_TSOv4 | IFCAP_TSOv6;
 
+#ifndef SMALL_KERNEL
 	ifp->if_capabilities |= IFCAP_LRO;
 #if notyet
 	/* for now tcplro at ixl(4) is default off */
 	ifp->if_xflags |= IFXF_LRO;
+#endif
 #endif
 
 	ifmedia_init(&sc->sc_media, 0, ixl_media_change, ixl_media_status);

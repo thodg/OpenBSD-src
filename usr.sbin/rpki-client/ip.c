@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip.c,v 1.34 2024/11/12 09:23:07 tb Exp $ */
+/*	$OpenBSD: ip.c,v 1.37 2025/12/04 06:11:44 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -35,17 +35,25 @@
  * Return zero on failure, non-zero on success.
  */
 int
-ip_addr_afi_parse(const char *fn, const ASN1_OCTET_STRING *p, enum afi *afi)
+ip_addr_afi_parse(const char *fn, const ASN1_OCTET_STRING *astr, enum afi *afi)
 {
+	const unsigned char *buf;
+	int len;
 	uint16_t v;
 
-	if (p->length == 0 || p->length > 3) {
-		warnx("%s: invalid field length, want 1--3, have %d",
-		    fn, p->length);
+	buf = ASN1_STRING_get0_data(astr);
+	len = ASN1_STRING_length(astr);
+
+	if (len == 3) {
+		warnx("%s: SAFI not allowed", fn);
+		return 0;
+	}
+	if (len != sizeof(v)) {
+		warnx("%s: invalid AFI length, want 2, have %d", fn, len);
 		return 0;
 	}
 
-	memcpy(&v, p->data, sizeof(v));
+	memcpy(&v, buf, sizeof(v));
 	v = ntohs(v);
 
 	/* Only accept IPv4 and IPv6 AFIs. */
@@ -53,13 +61,6 @@ ip_addr_afi_parse(const char *fn, const ASN1_OCTET_STRING *p, enum afi *afi)
 	if (v != AFI_IPV4 && v != AFI_IPV6) {
 		warnx("%s: only AFI for IPV4 (1) and IPV6 (2) allowed: "
 		    "have %hd", fn, v);
-		return 0;
-	}
-
-	/* Disallow the optional SAFI. */
-
-	if (p->length == 3) {
-		warnx("%s: SAFI not allowed", fn);
 		return 0;
 	}
 
@@ -168,17 +169,21 @@ ip_addr_check_overlap(const struct cert_ip *ip, const char *fn,
  * Return zero on failure, non-zero on success.
  */
 int
-ip_addr_parse(const ASN1_BIT_STRING *p,
+ip_addr_parse(const ASN1_BIT_STRING *abs,
     enum afi afi, const char *fn, struct ip_addr *addr)
 {
-	long	 unused = 0;
+	const unsigned char *data;
+	int length, unused = 0;
+
+	data = ASN1_STRING_get0_data(abs);
+	length = ASN1_STRING_length(abs);
 
 	/* Weird OpenSSL-ism to get unused bit count. */
 
-	if ((p->flags & ASN1_STRING_FLAG_BITS_LEFT))
-		unused = p->flags & 0x07;
+	if ((abs->flags & ASN1_STRING_FLAG_BITS_LEFT))
+		unused = abs->flags & 0x07;
 
-	if (p->length == 0 && unused != 0) {
+	if (length == 0 && unused != 0) {
 		warnx("%s: RFC 3779 section 2.2.3.8: "
 		    "unused bit count must be zero if length is zero", fn);
 		return 0;
@@ -190,8 +195,7 @@ ip_addr_parse(const ASN1_BIT_STRING *p,
 	 * of the [minimum] address ranges.
 	 */
 
-	if (p->length != 0 &&
-	    (p->data[p->length - 1] & ((1 << unused) - 1))) {
+	if (length != 0 && (data[length - 1] & ((1 << unused) - 1))) {
 		warnx("%s: RFC 3779 section 2.2.3.8: "
 		    "unused bits must be set to zero", fn);
 		return 0;
@@ -199,16 +203,16 @@ ip_addr_parse(const ASN1_BIT_STRING *p,
 
 	/* Limit possible sizes of addresses. */
 
-	if ((afi == AFI_IPV4 && p->length > 4) ||
-	    (afi == AFI_IPV6 && p->length > 16)) {
+	if ((afi == AFI_IPV4 && length > 4) ||
+	    (afi == AFI_IPV6 && length > 16)) {
 		warnx("%s: RFC 3779 section 2.2.3.8: "
 		    "IP address too long", fn);
 		return 0;
 	}
 
 	memset(addr, 0, sizeof(struct ip_addr));
-	addr->prefixlen = p->length * 8 - unused;
-	memcpy(addr->addr, p->data, p->length);
+	addr->prefixlen = length * 8 - unused;
+	memcpy(addr->addr, data, length);
 	return 1;
 }
 

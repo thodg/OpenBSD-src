@@ -177,6 +177,11 @@ static const struct pci_matchid amdgpu_devices[] = {
 	{0x1002, 0x7410 },
 
 	/* CYAN_SKILLFISH */
+	{0x1002, 0x13DB },
+	{0x1002, 0x13F9 },
+	{0x1002, 0x13FA },
+	{0x1002, 0x13FB },
+	{0x1002, 0x13FC },
 	{0x1002, 0x13FE },
 	{0x1002, 0x143F },
 
@@ -258,15 +263,18 @@ static const struct pci_matchid amdgpu_devices[] = {
 	/* GC 11.5.1, DCN 3.5.1, APU, Ryzen AI Max 300 "Strix Halo" */
 	{0x1002, 0x1586 },	/* Radeon 8040S / 8050S / 8060S */
 
-	/* GC 11.5.2, DCN 3.5.0, APU, Ryzen AI 300 "Krackan Point" */
+	/* GC 11.5.2, DCN 3.5.0, APU, Ryzen AI 350 "Krackan Point" */
 	{0x1002, 0x1114 },	/* Radeon 840M / 860M */
 
-	/* GC 11.5.3, DCN 3.6.0?, APU, linux 6.15 */
+#ifdef notyet
+	/* GC 11.5.3, DCN 3.6.0, APU, Ryzen AI 330 "Krackan Point" linux 6.15 */
+	{0x1002, 0x1902 },	/* Radeon 820M */
+#endif
 
 	/* GC 12.0.0, DCN 4.0.1, dGPU, "Navi 44" */
 	{0x1002, 0x7590 },	/* Radeon RX 9060, 9060 XT */
 
 	/* GC 12.0.1, DCN 4.0.1, dGPU, "Navi 48" */
 	{0x1002, 0x7550 },	/* Radeon RX 9070, 9070 XT, 9070 GRE */
-	{0x1002, 0x7551 },	/* Radeon AI PRO R9700 */
+	{0x1002, 0x7551 },	/* Radeon AI PRO R9700, R9700S, R9600D */
 };

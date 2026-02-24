@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_pledge.c,v 1.333 2025/09/17 10:30:10 deraadt Exp $	*/
+/*	$OpenBSD: kern_pledge.c,v 1.336 2026/02/09 20:11:41 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2015 Nicholas Marriott <nicm@openbsd.org>
@@ -362,6 +362,9 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_ypconnect] = PLEDGE_GETPW,
 
 	[SYS_swapctl] = PLEDGE_VMINFO,
+
+	/* for sysarch(*_SYNC_ICACHE) requests only */
+	[SYS_sysarch] = PLEDGE_PROTEXEC,
 };
 
 static const struct {
@@ -798,9 +801,7 @@ pledge_sendfd(struct proc *p, struct file *fp)
 int
 pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 {
-	char	buf[80];
 	uint64_t pledge;
-	int	i;
 
 	if ((p->p_p->ps_flags & PS_PLEDGE) == 0)
 		return (0);
@@ -986,14 +987,6 @@ pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 		return (0);
 #endif /* CPU_ID_AA64ISAR1 */
 
-	snprintf(buf, sizeof(buf), "%s(%d): pledge sysctl %d:",
-	    p->p_p->ps_comm, p->p_p->ps_pid, miblen);
-	for (i = 0; i < miblen; i++) {
-		char *s = buf + strlen(buf);
-		snprintf(s, sizeof(buf) - (s - buf), " %d", mib[i]);
-	}
-	uprintf("%s\n", buf);
-
 	return pledge_fail(p, EINVAL, 0);
 }
 
@@ -1145,10 +1138,7 @@ pledge_ioctl(struct proc *p, long com, struct file *fp)
 	if ((pledge & PLEDGE_DISKLABEL)) {
 		switch (com) {
 		case DIOCGDINFO:
-#if MAXPARTITIONS != 16
-		/* XXX temporary to support the transition to 52 partitions */
-		case O_DIOCGDINFO:
-#endif
+		case O_DIOCGDINFO: /* XXX temporary transition to 52 partitions */
 		case DIOCGPDINFO:
 		case DIOCRLDINFO:
 		case DIOCWDINFO:

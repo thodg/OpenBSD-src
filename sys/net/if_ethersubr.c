@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_ethersubr.c,v 1.303 2025/07/07 02:28:50 jsg Exp $	*/
+/*	$OpenBSD: if_ethersubr.c,v 1.308 2025/12/19 02:04:13 dlg Exp $	*/
 /*	$NetBSD: if_ethersubr.c,v 1.19 1996/05/07 02:40:30 thorpej Exp $	*/
 
 /*
@@ -375,20 +375,32 @@ ether_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	return (if_enqueue(ifp, m));
 }
 
+static struct mbuf *
+ether_port_input(struct ifnet *ifp, struct mbuf *m, uint64_t dst,
+    const struct ether_port **epp, struct netstack *ns)
+{
+	const struct ether_port *ep;
+	void *ref;
+
+	smr_read_enter();
+	ep = SMR_PTR_GET(epp);
+	if (ep != NULL)
+		ref = ep->ep_port_take(ep->ep_port);
+	smr_read_leave();
+	if (ep != NULL) {
+		m = (*ep->ep_input)(ifp, m, dst, ep->ep_port, ns);
+		ep->ep_port_rele(ref, ep->ep_port);
+	}
+
+	return (m);
+}
+
 /*
  * Process a received Ethernet packet.
  *
  * Ethernet input has several "phases" of filtering packets to
  * support virtual/pseudo interfaces before actual layer 3 protocol
  * handling.
- *
- * First phase:
- *
- * The first phase supports drivers that aggregate multiple Ethernet
- * ports into a single logical interface, ie, aggr(4) and trunk(4).
- * These drivers intercept packets by swapping out the if_input handler
- * on the "port" interfaces to steal the packets before they get here
- * to ether_input().
  */
 void
 ether_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
@@ -396,14 +408,27 @@ ether_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
 	struct ether_header *eh;
 	void (*input)(struct ifnet *, struct mbuf *, struct netstack *);
 	u_int16_t etype;
-	struct arpcom *ac;
-	const struct ether_brport *eb;
+	struct arpcom *ac = (struct arpcom *)ifp;
 	unsigned int sdelim = 0;
 	uint64_t dst, self;
 
 	/* Drop short frames */
 	if (m->m_len < ETHER_HDR_LEN)
 		goto dropanyway;
+
+	eh = mtod(m, struct ether_header *);
+	dst = ether_addr_to_e64((struct ether_addr *)eh->ether_dhost);
+
+	/*
+	 * First phase:
+	 *
+	 * The first phase supports drivers that aggregate multiple
+	 * Ethernet ports into a single logical interface, ie, aggr(4)
+	 * and trunk(4).
+	 */
+	m = ether_port_input(ifp, m, dst, &ac->ac_trport, ns);
+	if (m == NULL)
+		return;
 
 	/*
 	 * Second phase: service delimited packet filtering.
@@ -414,8 +439,6 @@ ether_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
 	 * bridge can have a go at forwarding them.
 	 */
 
-	eh = mtod(m, struct ether_header *);
-	dst = ether_addr_to_e64((struct ether_addr *)eh->ether_dhost);
 	etype = ntohs(eh->ether_type);
 
 	if (ISSET(m->m_flags, M_VLANTAG) ||
@@ -438,21 +461,9 @@ ether_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
 	 * may return it here to ether_input() to support local
 	 * delivery to this port.
 	 */
-
-	ac = (struct arpcom *)ifp;
-
-	smr_read_enter();
-	eb = SMR_PTR_GET(&ac->ac_brport);
-	if (eb != NULL)
-		eb->eb_port_take(eb->eb_port);
-	smr_read_leave();
-	if (eb != NULL) {
-		m = (*eb->eb_input)(ifp, m, dst, eb->eb_port, ns);
-		eb->eb_port_rele(eb->eb_port);
-		if (m == NULL) {
-			return;
-		}
-	}
+	m = ether_port_input(ifp, m, dst, &ac->ac_brport, ns);
+	if (m == NULL)
+		return;
 
 	/*
 	 * Fourth phase: drop service delimited packets.
@@ -477,8 +488,8 @@ ether_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
 		/*
 		 * If it's not for this port, it could be for carp(4).
 		 */
-		if (ifp->if_type != IFT_CARP &&
-		    !SRPL_EMPTY_LOCKED(&ifp->if_carp)) {
+		if (ifp->if_type == IFT_ETHER &&
+		    !SMR_LIST_EMPTY_LOCKED(&ifp->if_carp)) {
 			m = carp_input(ifp, m, dst, ns);
 			if (m == NULL)
 				return;
@@ -586,7 +597,7 @@ ether_input(struct ifnet *ifp, struct mbuf *m, struct netstack *ns)
 	}
 
 	m_adj(m, sizeof(*eh));
-	(*input)(ifp, m, ns);
+	if_input_proto(ifp, m, input, ns);
 	return;
 dropanyway:
 	m_freem(m);
@@ -606,7 +617,7 @@ ether_brport_isset(struct ifnet *ifp)
 }
 
 void
-ether_brport_set(struct ifnet *ifp, const struct ether_brport *eb)
+ether_brport_set(struct ifnet *ifp, const struct ether_port *ep)
 {
 	struct arpcom *ac = (struct arpcom *)ifp;
 
@@ -614,7 +625,7 @@ ether_brport_set(struct ifnet *ifp, const struct ether_brport *eb)
 	KASSERTMSG(SMR_PTR_GET_LOCKED(&ac->ac_brport) == NULL,
 	    "%s setting an already set brport", ifp->if_xname);
 
-	SMR_PTR_SET_LOCKED(&ac->ac_brport, eb);
+	SMR_PTR_SET_LOCKED(&ac->ac_brport, ep);
 }
 
 void
@@ -629,7 +640,7 @@ ether_brport_clr(struct ifnet *ifp)
 	SMR_PTR_SET_LOCKED(&ac->ac_brport, NULL);
 }
 
-const struct ether_brport *
+const struct ether_port *
 ether_brport_get(struct ifnet *ifp)
 {
 	struct arpcom *ac = (struct arpcom *)ifp;
@@ -637,7 +648,7 @@ ether_brport_get(struct ifnet *ifp)
 	return (SMR_PTR_GET(&ac->ac_brport));
 }
 
-const struct ether_brport *
+const struct ether_port *
 ether_brport_get_locked(struct ifnet *ifp)
 {
 	struct arpcom *ac = (struct arpcom *)ifp;
@@ -1250,6 +1261,80 @@ ether_extract_headers(struct mbuf *m0, struct ether_extracted *ext)
 	    ext->ip4 ? "ip4," : "", ext->ip6 ? "ip6," : "",
 	    ext->tcp ? "tcp," : "", ext->udp ? "udp," : "",
 	    ext->iplen, ext->iphlen, ext->tcphlen, ext->paylen);
+}
+
+struct mbuf *
+ether_offload_ifcap(struct ifnet *ifp, struct mbuf *m)
+{
+	struct ether_extracted ext;
+	int csum = 0;
+
+#if NVLAN > 0
+	if (ISSET(m->m_flags, M_VLANTAG) &&
+	    !ISSET(ifp->if_capabilities, IFCAP_VLAN_HWTAGGING)) {
+		/*
+		 * If the underlying interface has no VLAN hardware tagging
+		 * support, inject one in software.
+		 */
+		m = vlan_inject(m, ETHERTYPE_VLAN, m->m_pkthdr.ether_vtag);
+		if (m == NULL)
+			return (NULL);
+	}
+#endif
+
+	if (ISSET(m->m_pkthdr.csum_flags, M_IPV4_CSUM_OUT) &&
+	    !ISSET(ifp->if_capabilities, IFCAP_CSUM_IPv4))
+		csum = 1;
+
+	if (ISSET(m->m_pkthdr.csum_flags, M_TCP_CSUM_OUT) &&
+	    (!ISSET(ifp->if_capabilities, IFCAP_CSUM_TCPv4) ||
+	     !ISSET(ifp->if_capabilities, IFCAP_CSUM_TCPv6)))
+		csum = 1;
+
+	if (ISSET(m->m_pkthdr.csum_flags, M_UDP_CSUM_OUT) &&
+	    (!ISSET(ifp->if_capabilities, IFCAP_CSUM_UDPv4) ||
+	     !ISSET(ifp->if_capabilities, IFCAP_CSUM_UDPv6)))
+		csum = 1;
+
+	if (csum) {
+		int ethlen;
+		int hlen;
+
+		ether_extract_headers(m, &ext);
+
+		ethlen = sizeof *ext.eh;
+		if (ext.evh)
+			ethlen = sizeof *ext.evh;
+
+		hlen = m->m_pkthdr.len - ext.paylen;
+
+		if (m->m_len < hlen) {
+			m = m_pullup(m, hlen);
+			if (m == NULL)
+				return (NULL);
+		}
+
+		/* hide ethernet header */
+		m->m_data += ethlen;
+		m->m_len -= ethlen;
+		m->m_pkthdr.len -= ethlen;
+
+		if (ext.ip4) {
+			in_hdr_cksum_out(m, ifp);
+			in_proto_cksum_out(m, ifp);
+#ifdef INET6
+		} else if (ext.ip6) {
+			in6_proto_cksum_out(m, ifp);
+#endif
+		}
+
+		/* show ethernet header again */
+		m->m_data -= ethlen;
+		m->m_len += ethlen;
+		m->m_pkthdr.len += ethlen;
+	}
+
+	return m;
 }
 
 #if NAF_FRAME > 0

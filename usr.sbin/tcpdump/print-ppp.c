@@ -1,4 +1,4 @@
-/*	$OpenBSD: print-ppp.c,v 1.37 2024/10/30 10:36:28 sthen Exp $	*/
+/*	$OpenBSD: print-ppp.c,v 1.39 2025/12/27 06:34:31 dlg Exp $	*/
 
 /*
  * Copyright (c) 1990, 1991, 1993, 1994, 1995, 1996, 1997
@@ -260,9 +260,13 @@ static const char *eaptype[] = {
 #define IPCP_CODE_MIN IPCP_CODE_CFG_REQ
 #define IPCP_CODE_MAX IPCP_CODE_COD_REJ
 
-#define IPCP_2ADDR	1
-#define IPCP_CP		2
-#define IPCP_ADDR	3
+#define IPCP_2ADDR		1
+#define IPCP_CP			2
+#define IPCP_ADDR		3
+#define IPCP_DNS1		129
+#define IPCP_NBNS1		130
+#define IPCP_DNS2		131
+#define IPCP_NBNS2		132
 
 /* IPV6CP */
 
@@ -982,6 +986,18 @@ print_ipcp_config_options(const u_char *p, int l)
 	case IPCP_ADDR:
 		printf(" IP-Address");
 		break;
+	case IPCP_DNS1:
+		printf(" Primary-DNS-Server");
+		break;
+	case IPCP_NBNS1:
+		printf(" Primary-NBNS-Server");
+		break;
+	case IPCP_DNS2:
+		printf(" Secondary-DNS-Server");
+		break;
+	case IPCP_NBNS2:
+		printf(" Secondary-NBNS-Server");
+		break;
 	default:
 		printf(" ipcp-type-%u", type);
 		break;
@@ -1029,6 +1045,10 @@ print_ipcp_config_options(const u_char *p, int l)
 		}
 		break;
 	case IPCP_ADDR:
+	case IPCP_DNS1:
+	case IPCP_NBNS1:
+	case IPCP_DNS2:
+	case IPCP_NBNS2:
 		if (length != 6)
 			goto invalid;
 		if (l < IP_LEN)

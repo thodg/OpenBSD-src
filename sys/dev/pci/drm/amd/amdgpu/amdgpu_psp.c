@@ -2163,11 +2163,7 @@ static int psp_securedisplay_initialize(struct psp_context *psp)
 	/*
 	 * with 20230117 or later firmware or later on renoir:
 	 *
-	 * [drm] psp gfx command LOAD_TA(0x1) failed and response status is (0x7)
-	 * [drm] psp gfx command INVOKE_CMD(0x3) failed and response status is (0x4)
-	 * psp_securedisplay_parse_resp_status *ERROR* Secure display: Generic Failure
-	 * psp_securedisplay_initialize *ERROR* SECUREDISPLAY: query
-	 *   securedisplay TA failed. ret 0x0
+	 * *WARNING* psp gfx command LOAD_TA(0x1) failed and response status is (0x7)
 	 */
 	return 0;
 #endif
@@ -2187,8 +2183,11 @@ static int psp_securedisplay_initialize(struct psp_context *psp)
 	if (!ret && !psp->securedisplay_context.context.resp_status) {
 		psp->securedisplay_context.context.initialized = true;
 		rw_init(&psp->securedisplay_context.mutex, "pscm");
-	} else
+	} else {
+		/* don't try again */
+		psp->securedisplay_context.context.bin_desc.size_bytes = 0;
 		return ret;
+	}
 
 	mutex_lock(&psp->securedisplay_context.mutex);
 

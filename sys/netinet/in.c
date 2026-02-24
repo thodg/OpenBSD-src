@@ -1,4 +1,4 @@
-/*	$OpenBSD: in.c,v 1.187 2025/07/08 00:47:41 jsg Exp $	*/
+/*	$OpenBSD: in.c,v 1.192 2026/01/03 14:10:04 bluhm Exp $	*/
 /*	$NetBSD: in.c,v 1.26 1996/02/13 23:41:39 christos Exp $	*/
 
 /*
@@ -191,6 +191,28 @@ in_sa2sin(struct sockaddr *sa, struct sockaddr_in **sin)
 	*sin = satosin(sa);
 
 	return 0;
+}
+
+/*
+ * Find the internet address structure (in_ifaddr) corresponding
+ * to a given interface (ifnet structure).
+ */
+struct in_ifaddr *
+in_ifp2ia(struct ifnet *ifp)
+{
+	struct in_ifaddr *ia = NULL;
+	struct ifaddr *ifa;
+
+	NET_ASSERT_LOCKED();
+
+	TAILQ_FOREACH(ifa, &ifp->if_addrlist, ifa_list) {
+		if (ifa->ifa_addr->sa_family != AF_INET)
+			continue;
+		ia = ifatoia(ifa);
+		break;
+	}
+
+	return (ia);
 }
 
 int
@@ -801,6 +823,8 @@ in_broadcast(struct in_addr in, u_int rtableid)
 	struct ifaddr *ifa;
 	u_int rdomain;
 
+	NET_ASSERT_LOCKED();
+
 	rdomain = rtable_l2(rtableid);
 
 #define ia (ifatoia(ifa))
@@ -820,10 +844,32 @@ in_broadcast(struct in_addr in, u_int rtableid)
 }
 
 /*
+ * Look up the in_multi record for a given IP multicast address
+ * on a given interface.  Return the matching record if found or NULL.
+ */
+struct in_multi *
+in_lookupmulti(const struct in_addr *addr, struct ifnet *ifp)
+{
+	struct in_multi *inm = NULL;
+	struct ifmaddr *ifma;
+
+	NET_ASSERT_LOCKED();
+
+	TAILQ_FOREACH(ifma, &ifp->if_maddrlist, ifma_list) {
+		if (ifma->ifma_addr->sa_family == AF_INET &&
+		    ifmatoinm(ifma)->inm_addr.s_addr == addr->s_addr) {
+			inm = ifmatoinm(ifma);
+			break;
+		}
+	}
+	return (inm);
+}
+
+/*
  * Add an address to the list of IP multicast addresses for a given interface.
  */
 struct in_multi *
-in_addmulti(struct in_addr *ap, struct ifnet *ifp)
+in_addmulti(const struct in_addr *addr, struct ifnet *ifp)
 {
 	struct in_multi *inm;
 	struct ifreq ifr;
@@ -831,7 +877,7 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 	/*
 	 * See if address already in list.
 	 */
-	IN_LOOKUP_MULTI(*ap, ifp, inm);
+	inm = in_lookupmulti(addr, ifp);
 	if (inm != NULL) {
 		/*
 		 * Found it; just increment the reference count.
@@ -845,7 +891,7 @@ in_addmulti(struct in_addr *ap, struct ifnet *ifp)
 		inm = malloc(sizeof(*inm), M_IPMADDR, M_WAITOK | M_ZERO);
 		inm->inm_sin.sin_len = sizeof(struct sockaddr_in);
 		inm->inm_sin.sin_family = AF_INET;
-		inm->inm_sin.sin_addr = *ap;
+		inm->inm_sin.sin_addr = *addr;
 		refcnt_init_trace(&inm->inm_refcnt, DT_REFCNT_IDX_IFMADDR);
 		inm->inm_ifidx = ifp->if_index;
 		inm->inm_ifma.ifma_addr = sintosa(&inm->inm_sin);
@@ -918,16 +964,16 @@ in_delmulti(struct in_multi *inm)
 }
 
 /*
- * Return 1 if the multicast group represented by ``ap'' has been
+ * Return 1 if the multicast group represented by ``addr'' has been
  * joined by interface ``ifp'', 0 otherwise.
  */
 int
-in_hasmulti(struct in_addr *ap, struct ifnet *ifp)
+in_hasmulti(const struct in_addr *addr, struct ifnet *ifp)
 {
 	struct in_multi *inm;
 	int joined;
 
-	IN_LOOKUP_MULTI(*ap, ifp, inm);
+	inm = in_lookupmulti(addr, ifp);
 	joined = (inm != NULL);
 
 	return (joined);

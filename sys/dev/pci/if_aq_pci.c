@@ -1,4 +1,4 @@
-/* $OpenBSD: if_aq_pci.c,v 1.32 2025/06/29 19:32:08 miod Exp $ */
+/* $OpenBSD: if_aq_pci.c,v 1.34 2026/01/15 06:41:21 dlg Exp $ */
 /*	$NetBSD: if_aq.c,v 1.27 2021/06/16 00:21:18 riastradh Exp $	*/
 
 /*
@@ -1310,8 +1310,8 @@ aq_attach(struct device *parent, struct device *self, void *aux)
 		int nmsix = pci_intr_msix_count(pa);
 		if (nmsix > 1) {
 			nmsix--;
-			sc->sc_intrmap = intrmap_create(&sc->sc_dev,
-			    nmsix, AQ_MAXQ, INTRMAP_POWEROF2);
+			sc->sc_intrmap = intrmap_create(&sc->sc_dev, nmsix,
+			    MIN(AQ_MAXQ, IF_MAX_VECTORS), INTRMAP_POWEROF2);
 			sc->sc_nqueues = intrmap_count(sc->sc_intrmap);
 			KASSERT(sc->sc_nqueues > 0);
 			KASSERT(powerof2(sc->sc_nqueues));
@@ -3261,6 +3261,11 @@ aq_start(struct ifqueue *ifq)
 	struct mbuf *m;
 	uint32_t idx, free, used, ctl1, ctl2;
 	int error, i;
+
+	if (!LINK_STATE_IS_UP(sc->sc_arpcom.ac_if.if_link_state)) {
+		ifq_purge(ifq);
+		return;
+	}
 
 	idx = tx->tx_prod;
 	free = tx->tx_cons + AQ_TXD_NUM - tx->tx_prod;

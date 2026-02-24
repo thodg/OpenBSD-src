@@ -1,4 +1,4 @@
-/* $OpenBSD: readconf.c,v 1.406 2025/08/29 03:50:38 djm Exp $ */
+/* $OpenBSD: readconf.c,v 1.410 2026/02/14 00:18:34 jsg Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -24,9 +24,9 @@
 
 #include <ctype.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <glob.h>
 #include <ifaddrs.h>
+#include <limits.h>
 #include <netdb.h>
 #include <paths.h>
 #include <pwd.h>
@@ -35,13 +35,11 @@
 #include <string.h>
 #include <stdarg.h>
 #include <unistd.h>
-#include <limits.h>
 #include <util.h>
 #include <vis.h>
 
 #include "xmalloc.h"
 #include "ssh.h"
-#include "ssherr.h"
 #include "cipher.h"
 #include "pathnames.h"
 #include "log.h"
@@ -51,7 +49,6 @@
 #include "match.h"
 #include "kex.h"
 #include "mac.h"
-#include "uidswap.h"
 #include "myproposal.h"
 #include "digest.h"
 #include "version.h"
@@ -715,12 +712,12 @@ match_cfg_line(Options *options, const char *full_line, int *acp, char ***avp,
 	debug2("checking match for '%s' host %s originally %s",
 	    full_line, host, original_host);
 	while ((attrib = argv_next(acp, avp)) != NULL) {
-		attrib = oattrib = xstrdup(attrib);
 		/* Terminate on comment */
 		if (*attrib == '#') {
 			argv_consume(acp);
 			break;
 		}
+		attrib = oattrib = xstrdup(attrib);
 		arg = criteria = NULL;
 		this_result = 1;
 		if ((negate = (attrib[0] == '!')))
@@ -760,7 +757,7 @@ match_cfg_line(Options *options, const char *full_line, int *acp, char ***avp,
 			debug3("%.200s line %d: %smatched '%s'",
 			    filename, linenum,
 			    this_result ? "" : "not ", oattrib);
-			continue;
+			goto next;
 		}
 
 		/* Keep this list in sync with below */
@@ -871,7 +868,7 @@ match_cfg_line(Options *options, const char *full_line, int *acp, char ***avp,
 				debug3("%.200s line %d: skipped exec "
 				    "\"%.100s\"", filename, linenum, cmd);
 				free(cmd);
-				continue;
+				goto next;
 			}
 			r = execute_in_shell(cmd);
 			if (r == -1) {
@@ -895,6 +892,7 @@ match_cfg_line(Options *options, const char *full_line, int *acp, char ***avp,
 		    criteria == NULL ? "" : " \"",
 		    criteria == NULL ? "" : criteria,
 		    criteria == NULL ? "" : "\"");
+ next:
 		free(criteria);
 		free(oattrib);
 		oattrib = attrib = NULL;
@@ -2313,8 +2311,38 @@ parse_pubkey_algos:
 		goto parse_flag;
 
 	case oRevokedHostKeys:
-		charptr = &options->revoked_host_keys;
-		goto parse_string;
+		uintptr = &options->num_revoked_host_keys;
+		cppptr = &options->revoked_host_keys;
+		found = *uintptr == 0;
+		while ((arg = argv_next(&ac, &av)) != NULL) {
+			if (*arg == '\0') {
+				error("%s line %d: keyword %s empty argument",
+				    filename, linenum, keyword);
+				goto out;
+			}
+			/* Allow "none" only in first position */
+			if (strcasecmp(arg, "none") == 0) {
+				if (nstrs > 0 || ac > 0) {
+					error("%s line %d: keyword %s \"none\" "
+					    "argument must appear alone.",
+					    filename, linenum, keyword);
+					goto out;
+				}
+			}
+			opt_array_append(filename, linenum, keyword,
+			    &strs, &nstrs, arg);
+		}
+		if (nstrs == 0) {
+			fatal("%s line %d: no %s specified",
+			    filename, linenum, keyword);
+		}
+		if (found && *activep) {
+			*cppptr = strs;
+			*uintptr = nstrs;
+			strs = NULL; /* transferred */
+			nstrs = 0;
+		}
+		break;
 
 	case oFingerprintHash:
 		intptr = &options->fingerprint_hash;
@@ -2772,6 +2800,7 @@ initialize_options(Options * options)
 	options->canonicalize_fallback_local = -1;
 	options->canonicalize_hostname = -1;
 	options->revoked_host_keys = NULL;
+	options->num_revoked_host_keys = 0;
 	options->fingerprint_hash = -1;
 	options->update_hostkeys = -1;
 	options->hostbased_accepted_algos = NULL;
@@ -3033,11 +3062,11 @@ fill_default_options(Options * options)
 	CLEAR_ON_NONE(options->remote_command);
 	CLEAR_ON_NONE(options->proxy_command);
 	CLEAR_ON_NONE(options->control_path);
-	CLEAR_ON_NONE(options->revoked_host_keys);
 	CLEAR_ON_NONE(options->pkcs11_provider);
 	CLEAR_ON_NONE(options->sk_provider);
 	CLEAR_ON_NONE(options->known_hosts_command);
 	CLEAR_ON_NONE_ARRAY(channel_timeouts, num_channel_timeouts, "none");
+	CLEAR_ON_NONE_ARRAY(revoked_host_keys, num_revoked_host_keys, "none");
 #undef CLEAR_ON_NONE
 #undef CLEAR_ON_NONE_ARRAY
 	if (options->jump_host != NULL &&
@@ -3148,6 +3177,7 @@ free_options(Options *o)
 		free(o->permitted_cnames[i].source_list);
 		free(o->permitted_cnames[i].target_list);
 	}
+	FREE_ARRAY(u_int, o->num_revoked_host_keys, o->revoked_host_keys);
 	free(o->revoked_host_keys);
 	free(o->hostbased_accepted_algos);
 	free(o->pubkey_accepted_algos);
@@ -3727,7 +3757,6 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_string(oSecurityKeyProvider, o->sk_provider);
 	dump_cfg_string(oPreferredAuthentications, o->preferred_authentications);
 	dump_cfg_string(oPubkeyAcceptedAlgorithms, o->pubkey_accepted_algos);
-	dump_cfg_string(oRevokedHostKeys, o->revoked_host_keys);
 	dump_cfg_string(oXAuthLocation, o->xauth_location);
 	dump_cfg_string(oKnownHostsCommand, o->known_hosts_command);
 	dump_cfg_string(oTag, o->tag);
@@ -3744,6 +3773,7 @@ dump_client_config(Options *o, const char *host)
 	dump_cfg_strarray(oCertificateFile, o->num_certificate_files, o->certificate_files);
 	dump_cfg_strarray_oneline(oGlobalKnownHostsFile, o->num_system_hostfiles, o->system_hostfiles);
 	dump_cfg_strarray_oneline(oUserKnownHostsFile, o->num_user_hostfiles, o->user_hostfiles);
+	dump_cfg_strarray_oneline(oRevokedHostKeys, o->num_revoked_host_keys, o->revoked_host_keys);
 	dump_cfg_strarray(oSendEnv, o->num_send_env, o->send_env);
 	dump_cfg_strarray(oSetEnv, o->num_setenv, o->setenv);
 	dump_cfg_strarray_oneline(oLogVerbose,

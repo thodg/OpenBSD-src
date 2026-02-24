@@ -1,4 +1,4 @@
-/* $OpenBSD: server-fn.c,v 1.140 2025/10/20 07:28:38 nicm Exp $ */
+/* $OpenBSD: server-fn.c,v 1.142 2026/02/02 10:08:30 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -289,6 +289,8 @@ server_link_window(struct session *src, struct winlink *srcwl,
 	if (dstwl == NULL)
 		return (-1);
 
+	if (marked_pane.wl == srcwl)
+		marked_pane.wl = dstwl;
 	if (selectflag)
 		session_select(dst, dstwl->idx);
 	server_redraw_session_group(dst);
@@ -436,9 +438,9 @@ server_destroy_session(struct session *s)
 	else if (detach_on_destroy == 2)
 		s_new = server_find_session(s, server_newer_detached_session);
 	else if (detach_on_destroy == 3)
-		s_new = session_previous_session(s);
+		s_new = session_previous_session(s, NULL);
 	else if (detach_on_destroy == 4)
-		s_new = session_next_session(s);
+		s_new = session_next_session(s, NULL);
 
 	/*
 	 * If no suitable new session was found above, then look for any

@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_malloc.c,v 1.155 2025/06/12 20:37:58 deraadt Exp $	*/
+/*	$OpenBSD: kern_malloc.c,v 1.158 2026/02/11 22:34:41 deraadt Exp $	*/
 /*	$NetBSD: kern_malloc.c,v 1.15.4.2 1996/06/13 17:10:56 cgd Exp $	*/
 
 /*
@@ -146,6 +146,7 @@ struct timeval malloc_lasterr;
 void *
 malloc(size_t size, int type, int flags)
 {
+	const struct kmem_dyn_mode *kdp;
 	struct kmembuckets *kbp;
 	struct kmemusage *kup;
 	struct kmem_freelist *freep;
@@ -216,13 +217,16 @@ malloc(size_t size, int type, int flags)
 	if (XSIMPLEQ_FIRST(&kbp->kb_freelist) == NULL) {
 		mtx_leave(&malloc_mtx);
 		npg = atop(round_page(allocsize));
+		KASSERT(atomic_load_sint(&uvmexp.swpgonly) <=
+		    atomic_load_sint(&uvmexp.swpages));
+		if ((flags & M_NOWAIT) || ((flags & M_CANFAIL) &&
+		    atomic_load_sint(&uvmexp.swpages) -
+		    atomic_load_sint(&uvmexp.swpgonly) <= npg))
+			kdp = &kd_nowait;
+		else
+			kdp = &kd_waitok;
 		s = splvm();
-		va = (caddr_t)uvm_km_kmemalloc_pla(kmem_map, NULL,
-		    (vsize_t)ptoa(npg), 0,
-		    ((flags & M_NOWAIT) ? UVM_KMF_NOWAIT : 0) |
-		    ((flags & M_CANFAIL) ? UVM_KMF_CANFAIL : 0),
-		    no_constraint.ucr_low, no_constraint.ucr_high,
-		    0, 0, 0);
+		va = (caddr_t)km_alloc(ptoa(npg), &kv_intrsafe, &kp_dirty, kdp);
 		splx(s);
 		if (va == NULL) {
 			/*
@@ -428,7 +432,7 @@ free(void *addr, int type, size_t freedsize)
 		kup->ku_pagecnt = 0;
 		mtx_leave(&malloc_mtx);
 		s = splvm();
-		uvm_km_free(kmem_map, (vaddr_t)addr, ptoa(pagecnt));
+		km_free(addr, ptoa(pagecnt), &kv_intrsafe, &kp_dirty);
 		splx(s);
 #ifdef KMEMSTATS
 		mtx_enter(&malloc_mtx);

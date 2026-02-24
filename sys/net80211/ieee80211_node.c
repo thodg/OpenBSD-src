@@ -1,4 +1,4 @@
-/*	$OpenBSD: ieee80211_node.c,v 1.204 2025/10/08 13:15:33 stsp Exp $	*/
+/*	$OpenBSD: ieee80211_node.c,v 1.209 2026/02/06 16:27:46 stsp Exp $	*/
 /*	$NetBSD: ieee80211_node.c,v 1.14 2004/05/09 09:18:47 dyoung Exp $	*/
 
 /*-
@@ -75,12 +75,15 @@ void ieee80211_setup_node(struct ieee80211com *, struct ieee80211_node *,
 struct ieee80211_node *ieee80211_alloc_node_helper(struct ieee80211com *);
 void ieee80211_node_free_unref_cb(struct ieee80211_node *);
 void ieee80211_node_tx_flushed(struct ieee80211com *, struct ieee80211_node *);
-void ieee80211_node_switch_bss(struct ieee80211com *, struct ieee80211_node *);
 void ieee80211_node_addba_request(struct ieee80211_node *, int);
 void ieee80211_node_addba_request_ac_be_to(void *);
 void ieee80211_node_addba_request_ac_bk_to(void *);
 void ieee80211_node_addba_request_ac_vi_to(void *);
 void ieee80211_node_addba_request_ac_vo_to(void *);
+void ieee80211_node_addba_request_tid4(void *);
+void ieee80211_node_addba_request_tid5(void *);
+void ieee80211_node_addba_request_tid6(void *);
+void ieee80211_node_addba_request_tid7(void *);
 void ieee80211_needs_auth(struct ieee80211com *, struct ieee80211_node *);
 #ifndef IEEE80211_STA_ONLY
 void ieee80211_node_join_ht(struct ieee80211com *, struct ieee80211_node *);
@@ -142,6 +145,11 @@ ieee80211_print_ess(struct ieee80211_ess *ess)
 			printf(",wpa2");
 		if (ess->rsnprotos & IEEE80211_PROTO_WPA)
 			printf(",wpa1");
+
+		if (ess->rsnakms & IEEE80211_AKM_PSK)
+			printf(",psk");
+		if (ess->rsnakms & IEEE80211_AKM_SHA256_PSK)
+			printf(",sha256-psk");
 
 		if (ess->rsnakms & IEEE80211_AKM_8021X ||
 		    ess->rsnakms & IEEE80211_AKM_SHA256_8021X)
@@ -264,7 +272,7 @@ ieee80211_ess_setnwkeys(struct ieee80211_ess *ess,
 
 /* Keep in sync with ieee80211_ioctl.c:ieee80211_ioctl_setwpaparms() */
 static int
-ieee80211_ess_setwpaparms(struct ieee80211_ess *ess,
+ieee80211_ess_setwpaparms(struct ieee80211com *ic, struct ieee80211_ess *ess,
     const struct ieee80211_wpaparams *wpa)
 {
 	if (!wpa->i_enabled) {
@@ -297,8 +305,11 @@ ieee80211_ess_setwpaparms(struct ieee80211_ess *ess,
 		ess->rsnakms |= IEEE80211_AKM_SHA256_8021X;
 	if (wpa->i_akms & IEEE80211_WPA_AKM_SAE)
 		ess->rsnakms |= IEEE80211_AKM_SAE;
-	if (ess->rsnakms == 0)	/* set to default (PSK) */
-		ess->rsnakms = IEEE80211_AKM_PSK;
+	if (ess->rsnakms == 0)	{ /* set to default (PSK) */
+		ess->rsnakms |= IEEE80211_AKM_PSK;
+		if (ic->ic_caps & IEEE80211_C_MFP)
+			ess->rsnakms |= IEEE80211_AKM_SHA256_PSK;
+	}
 
 	if (wpa->i_groupcipher == IEEE80211_WPA_CIPHER_WEP40)
 		ess->rsngroupcipher = IEEE80211_CIPHER_WEP40;
@@ -399,7 +410,7 @@ ieee80211_add_ess(struct ieee80211com *ic, struct ieee80211_join *join)
 				free(ess, M_DEVBUF, sizeof(*ess));
 				return ENODEV;
 			}
-			ieee80211_ess_setwpaparms(ess,
+			ieee80211_ess_setwpaparms(ic, ess,
 			    &join->i_wpaparams);
 			if (join->i_flags & IEEE80211_JOIN_WPAPSK) {
 				ess->flags |= IEEE80211_F_PSK;
@@ -1790,6 +1801,14 @@ ieee80211_node_set_timeouts(struct ieee80211_node *ni)
 	    ieee80211_node_addba_request_ac_vi_to, ni);
 	timeout_set(&ni->ni_addba_req_to[EDCA_AC_VO],
 	    ieee80211_node_addba_request_ac_vo_to, ni);
+	timeout_set(&ni->ni_addba_req_to[4],
+	    ieee80211_node_addba_request_tid4, ni);
+	timeout_set(&ni->ni_addba_req_to[5],
+	    ieee80211_node_addba_request_tid5, ni);
+	timeout_set(&ni->ni_addba_req_to[6],
+	    ieee80211_node_addba_request_tid6, ni);
+	timeout_set(&ni->ni_addba_req_to[7],
+	    ieee80211_node_addba_request_tid7, ni);
 	for (i = 0; i < nitems(ni->ni_addba_req_intval); i++)
 		ni->ni_addba_req_intval[i] = 1;
 }
@@ -2086,10 +2105,10 @@ ieee80211_ba_del(struct ieee80211_node *ni)
 	for (tid = 0; tid < nitems(ni->ni_tx_ba); tid++)
 		ieee80211_node_tx_ba_clear(ni, tid);
 
-	timeout_del(&ni->ni_addba_req_to[EDCA_AC_BE]);
-	timeout_del(&ni->ni_addba_req_to[EDCA_AC_BK]);
-	timeout_del(&ni->ni_addba_req_to[EDCA_AC_VI]);
-	timeout_del(&ni->ni_addba_req_to[EDCA_AC_VO]);
+	for (tid = 0; tid < IEEE80211_NUM_TID; tid++) {
+		if (timeout_initialized(&ni->ni_addba_req_to[tid]))
+			timeout_del(&ni->ni_addba_req_to[tid]);
+	}
 }
 
 void
@@ -2765,6 +2784,34 @@ ieee80211_node_addba_request_ac_vo_to(void *arg)
 	ieee80211_node_addba_request(ni, EDCA_AC_VO);
 }
 
+void
+ieee80211_node_addba_request_tid4(void *arg)
+{
+	struct ieee80211_node *ni = arg;
+	ieee80211_node_addba_request(ni, 4);
+}
+
+void
+ieee80211_node_addba_request_tid5(void *arg)
+{
+	struct ieee80211_node *ni = arg;
+	ieee80211_node_addba_request(ni, 5);
+}
+
+void
+ieee80211_node_addba_request_tid6(void *arg)
+{
+	struct ieee80211_node *ni = arg;
+	ieee80211_node_addba_request(ni, 6);
+}
+
+void
+ieee80211_node_addba_request_tid7(void *arg)
+{
+	struct ieee80211_node *ni = arg;
+	ieee80211_node_addba_request(ni, 7);
+}
+
 #ifndef IEEE80211_STA_ONLY
 /*
  * This function is called to notify the 802.1X PACP machine that a new
@@ -2817,6 +2864,8 @@ ieee80211_node_join_rsn(struct ieee80211com *ic, struct ieee80211_node *ni)
 	ni->ni_key_count = 0;
 	ni->ni_port_valid = 0;
 	ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
+	ni->ni_flags &= ~IEEE80211_NODE_RXMGMTPROT;
+	ni->ni_flags &= ~IEEE80211_NODE_TXMGMTPROT;
 	ni->ni_flags &= ~IEEE80211_NODE_RSN_NEW_PTK;
 	ni->ni_replaycnt = -1;	/* XXX */
 	ni->ni_rsn_retries = 0;
@@ -3055,6 +3104,9 @@ ieee80211_node_leave_rsn(struct ieee80211com *ic, struct ieee80211_node *ni)
 
 	ni->ni_rsn_retries = 0;
 	ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
+	ni->ni_flags &= ~IEEE80211_NODE_RXMGMTPROT;
+	ni->ni_flags &= ~IEEE80211_NODE_TXMGMTPROT;
+	ni->ni_flags &= ~IEEE80211_NODE_RSN_NEW_PTK;
 	ni->ni_port_valid = 0;
 	(*ic->ic_delete_key)(ic, ni, &ni->ni_pairwise_key);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: session.c,v 1.344 2025/09/25 02:15:39 jsg Exp $ */
+/* $OpenBSD: session.c,v 1.347 2026/02/08 15:28:01 dtucker Exp $ */
 /*
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
@@ -88,7 +88,7 @@
 #include "sftp.h"
 #include "atomicio.h"
 
-#ifdef KRB5
+#if defined(KRB5) && defined(USE_AFS)
 #include <kafs.h>
 #endif
 
@@ -294,7 +294,7 @@ do_authenticated(struct ssh *ssh, Authctxt *authctxt)
 
 	auth_log_authopts("active", auth_opts, 0);
 
-	/* setup the channel layer */
+	/* set up the channel layer */
 	/* XXX - streamlocal? */
 	set_fwdpermit_from_authopts(ssh, auth_opts);
 
@@ -827,6 +827,10 @@ do_setup_env(struct ssh *ssh, Session *s, const char *shell)
 
 	if (getenv("TZ"))
 		child_set_env(&env, &envsize, "TZ", getenv("TZ"));
+	if (getenv("XDG_RUNTIME_DIR")) {
+		child_set_env(&env, &envsize, "XDG_RUNTIME_DIR",
+		    getenv("XDG_RUNTIME_DIR"));
+	}
 	if (s->term)
 		child_set_env(&env, &envsize, "TERM", s->term);
 	if (s->display)
@@ -1237,7 +1241,7 @@ do_child(struct ssh *ssh, Session *s, const char *command)
 	 */
 	environ = env;
 
-#ifdef KRB5
+#if defined(KRB5) && defined(USE_AFS)
 	/*
 	 * At this point, we check to see if AFS is active and if we have
 	 * a valid Kerberos 5 TGT. If so, it seems like a good idea to see

@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.93 2025/10/19 18:06:57 miod Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.95 2025/12/23 19:16:51 miod Exp $	*/
 
 /*
  * Copyright (c) 2001-2004, 2010, Miodrag Vallat.
@@ -81,7 +81,6 @@
 /*
  * VM externals
  */
-extern paddr_t last_addr;
 vaddr_t avail_start;
 vaddr_t avail_end;
 vaddr_t virtual_avail = VM_MIN_KERNEL_ADDRESS;
@@ -1067,7 +1066,7 @@ pmap_enter(pmap_t pmap, vaddr_t va, paddr_t pa, vm_prot_t prot, int flags)
 	/*
 	 * If outside physical memory, disable cache on this (device) page.
 	 */
-	if (pa >= last_addr)
+	if (pg == NULL)
 		npte |= CACHE_INH;
 
 	/*
@@ -1115,11 +1114,6 @@ pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t prot)
 	if (CPU_IS88110 && m88k_protection(prot) != PG_RO)
 		npte |= PG_M;
 #endif
-	/*
-	 * If outside physical memory, disable cache on this (device) page.
-	 */
-	if (pa >= last_addr)
-		npte |= CACHE_INH;
 
 	/*
 	 * Expand pmap to include this pte.

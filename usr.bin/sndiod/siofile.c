@@ -1,4 +1,4 @@
-/*	$OpenBSD: siofile.c,v 1.28 2024/12/20 07:35:56 ratchov Exp $	*/
+/*	$OpenBSD: siofile.c,v 1.30 2026/01/22 09:24:26 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -36,6 +36,7 @@
 #define WATCHDOG_USEC	4000000		/* 4 seconds */
 
 void dev_sio_onmove(void *, int);
+void dev_sio_onxrun(void *);
 void dev_sio_timeout(void *);
 int dev_sio_pollfd(void *, struct pollfd *);
 int dev_sio_revents(void *, struct pollfd *);
@@ -74,13 +75,26 @@ dev_sio_onmove(void *arg, int delta)
 }
 
 void
+dev_sio_onxrun(void *arg)
+{
+	struct dev *d = arg;
+	struct slot *s;
+
+#ifdef DEBUG
+	logx(1, "%s: xrun", d->path);
+#endif
+	for (s = d->slot_list; s != NULL; s = s->next)
+		s->ops->onxrun(s->arg);
+}
+
+void
 dev_sio_timeout(void *arg)
 {
 	struct dev *d = arg;
 
 	logx(1, "%s: watchdog timeout", d->path);
-	dev_migrate(d);
-	dev_abort(d);
+
+	timo_add(&d->sio.watchdog, WATCHDOG_USEC);
 }
 
 /*
@@ -213,6 +227,7 @@ dev_sio_open(struct dev *d)
 	if (d->mode & MODE_PLAY)
 		d->mode |= MODE_MON;
 	sio_onmove(d->sio.hdl, dev_sio_onmove, d);
+	sio_onxrun(d->sio.hdl, dev_sio_onxrun, d);
 	d->sio.file = file_new(&dev_sio_ops, d, "dev", sio_nfds(d->sio.hdl));
 	if (d->sioctl.hdl) {
 		d->sioctl.file = file_new(&dev_sioctl_ops, d, "mix",

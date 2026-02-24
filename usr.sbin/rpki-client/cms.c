@@ -1,4 +1,4 @@
-/*	$OpenBSD: cms.c,v 1.54 2025/08/01 14:57:15 tb Exp $ */
+/*	$OpenBSD: cms.c,v 1.60 2026/01/24 08:11:26 tb Exp $ */
 /*
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
  *
@@ -17,12 +17,11 @@
 
 #include <assert.h>
 #include <err.h>
-#include <stdint.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
-#include <openssl/bio.h>
 #include <openssl/cms.h>
 
 #include "extern.h"
@@ -33,13 +32,19 @@ cms_extract_econtent(const char *fn, CMS_ContentInfo *cms, unsigned char **res,
 {
 	ASN1_OCTET_STRING		**os = NULL;
 
-	/* Detached signature case: no eContent to extract, so do nothing. */
-	if (res == NULL || rsz == NULL)
-		return 1;
-
 	if ((os = CMS_get0_content(cms)) == NULL || *os == NULL) {
 		warnx("%s: RFC 6488 section 2.1.4: "
 		    "eContent: zero-length content", fn);
+		return 0;
+	}
+
+	if ((*rsz = ASN1_STRING_length(*os)) == 0) {
+		warnx("%s: RFC 6488 section 2.1.4: "
+		    "eContent: zero-length content", fn);
+		return 0;
+	}
+	if (*rsz > MAX_FILE_SIZE) {
+		warnx("%s: overlong eContent of length %zu", fn, *rsz);
 		return 0;
 	}
 
@@ -48,10 +53,9 @@ cms_extract_econtent(const char *fn, CMS_ContentInfo *cms, unsigned char **res,
 	 * it for further processing by the signedObject handlers. Since there
 	 * is no convenient API for this purpose, duplicate it by hand.
 	 */
-	if ((*res = malloc((*os)->length)) == NULL)
+	if ((*res = malloc(*rsz)) == NULL)
 		err(1, NULL);
-	memcpy(*res, (*os)->data, (*os)->length);
-	*rsz = (*os)->length;
+	memcpy(*res, ASN1_STRING_get0_data(*os), *rsz);
 
 	return 1;
 }
@@ -60,7 +64,7 @@ static int
 cms_get_signtime(const char *fn, X509_ATTRIBUTE *attr, time_t *signtime)
 {
 	const ASN1_TIME		*at;
-	const char		*time_str = "UTCtime";
+	const char		*time_str = "UTCTime";
 	int			 time_type = V_ASN1_UTCTIME;
 
 	*signtime = 0;
@@ -73,7 +77,7 @@ cms_get_signtime(const char *fn, X509_ATTRIBUTE *attr, time_t *signtime)
 			warnx("%s: CMS signing-time issue", fn);
 			return 0;
 		}
-		warnx("%s: GeneralizedTime instead of UTCtime", fn);
+		warnx("%s: GeneralizedTime instead of UTCTime", fn);
 	}
 
 	if (!x509_get_time(at, signtime)) {
@@ -85,8 +89,89 @@ cms_get_signtime(const char *fn, X509_ATTRIBUTE *attr, time_t *signtime)
 }
 
 static int
+cms_SignerInfo_check_attributes(const char *fn, const CMS_SignerInfo *si,
+    time_t *signtime)
+{
+	char buf[128];
+	const ASN1_OBJECT *obj;
+	int i, nattrs;
+	int has_ct = 0, has_md = 0, has_st = 0;
+
+	*signtime = 0;
+
+	nattrs = CMS_signed_get_attr_count(si);
+	if (nattrs <= 0) {
+		warnx("%s: RFC 6488: error extracting signedAttrs", fn);
+		return 0;
+	}
+	for (i = 0; i < nattrs; i++) {
+		X509_ATTRIBUTE *attr;
+
+		attr = CMS_signed_get_attr(si, i);
+		if (attr == NULL || X509_ATTRIBUTE_count(attr) != 1) {
+			warnx("%s: RFC 6488: bad signed attribute encoding",
+			    fn);
+			return 0;
+		}
+
+		obj = X509_ATTRIBUTE_get0_object(attr);
+		if (obj == NULL) {
+			warnx("%s: RFC 6488: bad signed attribute", fn);
+			return 0;
+		}
+		if (OBJ_cmp(obj, cnt_type_oid) == 0) {
+			if (has_ct++ != 0) {
+				warnx("%s: RFC 6488: duplicate "
+				    "signed attribute", fn);
+				return 0;
+			}
+		} else if (OBJ_cmp(obj, msg_dgst_oid) == 0) {
+			if (has_md++ != 0) {
+				warnx("%s: RFC 6488: duplicate "
+				    "signed attribute", fn);
+				return 0;
+			}
+		} else if (OBJ_cmp(obj, sign_time_oid) == 0) {
+			if (has_st++ != 0) {
+				warnx("%s: RFC 6488: duplicate "
+				    "signed attribute", fn);
+				return 0;
+			}
+			if (!cms_get_signtime(fn, attr, signtime))
+				return 0;
+		} else {
+			OBJ_obj2txt(buf, sizeof(buf), obj, 1);
+			warnx("%s: RFC 6488: "
+			    "CMS has unexpected signed attribute %s",
+			    fn, buf);
+			return 0;
+		}
+	}
+
+	if (!has_ct || !has_md) {
+		/* RFC 9589, section 4 */
+		warnx("%s: RFC 6488: CMS missing required "
+		    "signed attribute", fn);
+		return 0;
+	}
+
+	if (!has_st) {
+		/* RFC 9589, section 4 */
+		warnx("%s: missing CMS signing-time attribute", fn);
+		return 0;
+	}
+
+	if (CMS_unsigned_get_attr_count(si) != -1) {
+		warnx("%s: RFC 6488: CMS has unsignedAttrs", fn);
+		return 0;
+	}
+
+	return 1;
+}
+
+static int
 cms_parse_validate_internal(struct cert **out_cert, const char *fn, int talid,
-    const unsigned char *der, size_t len, const ASN1_OBJECT *oid, BIO *bio,
+    const unsigned char *der, size_t len, const ASN1_OBJECT *oid,
     unsigned char **res, size_t *rsz, time_t *signtime)
 {
 	struct cert			*cert = NULL;
@@ -101,8 +186,7 @@ cms_parse_validate_internal(struct cert **out_cert, const char *fn, int talid,
 	STACK_OF(CMS_SignerInfo)	*sinfos;
 	CMS_SignerInfo			*si;
 	X509_ALGOR			*pdig, *psig;
-	int				 i, nattrs, nid;
-	int				 has_ct = 0, has_md = 0, has_st = 0;
+	int				 nid;
 	int				 rc = 0;
 
 	assert(*out_cert == NULL);
@@ -129,7 +213,7 @@ cms_parse_validate_internal(struct cert **out_cert, const char *fn, int talid,
 	 * The CMS is self-signed with a signing certificate.
 	 * Verify that the self-signage is correct.
 	 */
-	if (!CMS_verify(cms, NULL, NULL, bio, NULL,
+	if (!CMS_verify(cms, NULL, NULL, NULL, NULL,
 	    CMS_NO_SIGNER_CERT_VERIFY)) {
 		warnx("%s: CMS verification error", fn);
 		goto out;
@@ -171,72 +255,8 @@ cms_parse_validate_internal(struct cert **out_cert, const char *fn, int talid,
 		goto out;
 	}
 
-	nattrs = CMS_signed_get_attr_count(si);
-	if (nattrs <= 0) {
-		warnx("%s: RFC 6488: error extracting signedAttrs", fn);
+	if (!cms_SignerInfo_check_attributes(fn, si, signtime))
 		goto out;
-	}
-	for (i = 0; i < nattrs; i++) {
-		X509_ATTRIBUTE *attr;
-
-		attr = CMS_signed_get_attr(si, i);
-		if (attr == NULL || X509_ATTRIBUTE_count(attr) != 1) {
-			warnx("%s: RFC 6488: bad signed attribute encoding",
-			    fn);
-			goto out;
-		}
-
-		obj = X509_ATTRIBUTE_get0_object(attr);
-		if (obj == NULL) {
-			warnx("%s: RFC 6488: bad signed attribute", fn);
-			goto out;
-		}
-		if (OBJ_cmp(obj, cnt_type_oid) == 0) {
-			if (has_ct++ != 0) {
-				warnx("%s: RFC 6488: duplicate "
-				    "signed attribute", fn);
-				goto out;
-			}
-		} else if (OBJ_cmp(obj, msg_dgst_oid) == 0) {
-			if (has_md++ != 0) {
-				warnx("%s: RFC 6488: duplicate "
-				    "signed attribute", fn);
-				goto out;
-			}
-		} else if (OBJ_cmp(obj, sign_time_oid) == 0) {
-			if (has_st++ != 0) {
-				warnx("%s: RFC 6488: duplicate "
-				    "signed attribute", fn);
-				goto out;
-			}
-			if (!cms_get_signtime(fn, attr, signtime))
-				goto out;
-		} else {
-			OBJ_obj2txt(buf, sizeof(buf), obj, 1);
-			warnx("%s: RFC 6488: "
-			    "CMS has unexpected signed attribute %s",
-			    fn, buf);
-			goto out;
-		}
-	}
-
-	if (!has_ct || !has_md) {
-		/* RFC 9589, section 4 */
-		warnx("%s: RFC 6488: CMS missing required "
-		    "signed attribute", fn);
-		goto out;
-	}
-
-	if (!has_st) {
-		/* RFC 9589, section 4 */
-		warnx("%s: missing CMS signing-time attribute", fn);
-		goto out;
-	}
-
-	if (CMS_unsigned_get_attr_count(si) != -1) {
-		warnx("%s: RFC 6488: CMS has unsignedAttrs", fn);
-		goto out;
-	}
 
 	/* Check digest and signature algorithms (RFC 7935) */
 	CMS_SignerInfo_get0_algs(si, NULL, NULL, &pdig, &psig);
@@ -304,7 +324,7 @@ cms_parse_validate_internal(struct cert **out_cert, const char *fn, int talid,
 	}
 
 	/*
-	 * Check that there are no CRLS in this CMS message.
+	 * Check that there are no CRLs in this CMS message.
 	 * XXX - can only error check for OpenSSL >= 3.4.
 	 */
 	crls = CMS_get1_crls(cms);
@@ -373,22 +393,8 @@ cms_parse_validate(struct cert **out_cert, const char *fn, int talid,
 	unsigned char *res = NULL;
 
 	if (!cms_parse_validate_internal(out_cert, fn, talid, der, derlen, oid,
-	    NULL, &res, rsz, st))
+	    &res, rsz, st))
 		return NULL;
 
 	return res;
-}
-
-/*
- * Parse and validate a detached CMS signature.
- * bio must contain the original message, der must contain the CMS.
- * Return the 1 on success, 0 on failure.
- */
-int
-cms_parse_validate_detached(struct cert **out_cert, const char *fn, int talid,
-    const unsigned char *der, size_t derlen, const ASN1_OBJECT *oid, BIO *bio,
-    time_t *st)
-{
-	return cms_parse_validate_internal(out_cert, fn, talid, der, derlen,
-	    oid, bio, NULL, NULL, st);
 }

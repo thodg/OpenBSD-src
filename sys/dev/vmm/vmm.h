@@ -1,4 +1,4 @@
-/* $OpenBSD: vmm.h,v 1.11 2025/07/15 13:40:02 jsg Exp $ */
+/* $OpenBSD: vmm.h,v 1.13 2025/12/17 19:26:25 dv Exp $ */
 /*
  * Copyright (c) 2014-2023 Mike Larkin <mlarkin@openbsd.org>
  *
@@ -32,6 +32,9 @@
 #define VMM_MAX_VCPUS_PER_VM	64
 #define VMM_MAX_VM_MEM_SIZE	128L * 1024 * 1024 * 1024
 #define VMM_MAX_NICS_PER_VM	4
+
+/* VMCALL services %rax values */
+#define	HVCALL_FORCED_ABORT	0x1234
 
 struct vm_mem_range {
 	paddr_t vmr_gpa;
@@ -184,6 +187,7 @@ struct vm {
 
 	char			 vm_name[VMM_MAX_NAME_LEN];
 	struct refcnt		 vm_refcnt;		/* [a] */
+	unsigned int		 vm_dying;		/* [a] */
 
 	struct vcpu_head	 vm_vcpu_list;		/* [v] */
 	uint32_t		 vm_vcpu_ct;		/* [v] */

@@ -1,4 +1,4 @@
-#	$OpenBSD: bsd.lib.mk,v 1.103 2025/07/16 16:22:58 deraadt Exp $
+#	$OpenBSD: bsd.lib.mk,v 1.105 2025/11/16 10:20:54 robert Exp $
 #	$NetBSD: bsd.lib.mk,v 1.67 1996/01/17 20:39:26 mycroft Exp $
 #	@(#)bsd.lib.mk	5.26 (Berkeley) 5/2/91
 
@@ -211,6 +211,7 @@ EXCLUDE_REGEX:=	"(cmll-586|(comparetf|libgcc|unwind-dw)2|		\
 		mul(t|d|s|x)(c|f)3|crt(begin|end)S|			\
 		(div|umod|mod)(d|t)i3|emutls|(add|div|sub)tf3|		\
 		(fixtf|float|extend|trunctf)(d|s)(ftf2|i|itf|f2)|	\
+		outline_atomic_(ldadd|swp)(4|8)_4|aarch64|		\
 		floatunsitf|udivmodti4|AMDGPURegAsmNames|clear_cache)"
 
 ${FULLSHLIBNAME}: ${SOBJS} ${DPADD}
@@ -256,7 +257,7 @@ ${DIST_LIB}: ${SELECTED_DOBJS}
 
 .if !target(clean)
 clean: _SUBDIRUSE
-	rm -f a.out [Ee]rrs mklog *.core y.tab.h \
+	rm -f a.out [Ee]rrs mklog *.core *.o.tmp y.tab.h \
 	    ${_LEXINTM} ${_YACCINTM} ${CLEANFILES}
 	rm -f lib${LIB}.a ${OBJS}
 	rm -f lib${LIB}_g.a ${GOBJS}

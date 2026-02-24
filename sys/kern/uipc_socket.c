@@ -1,4 +1,4 @@
-/*	$OpenBSD: uipc_socket.c,v 1.386 2025/10/24 15:09:56 bluhm Exp $	*/
+/*	$OpenBSD: uipc_socket.c,v 1.388 2026/02/22 21:30:58 bluhm Exp $	*/
 /*	$NetBSD: uipc_socket.c,v 1.21 1996/02/04 02:17:52 christos Exp $	*/
 
 /*
@@ -733,34 +733,47 @@ m_getuio(struct mbuf **mp, int atomic, long space, struct uio *uio)
 {
 	struct mbuf *m, *top = NULL;
 	struct mbuf **nextp = &top;
-	u_long len, mlen, alen;
-	int align = atomic ? roundup(max_hdr, sizeof(long)) : 0;
+	u_long len, mlen;
+	size_t resid = uio->uio_resid;
 	int error;
 
 	do {
-		/* How much data we want to put in this mbuf? */
-		len = ulmin(uio->uio_resid, space);
-		/* How much space are we allocating for that data? */
-		alen = align + len;
-		if (top == NULL && alen <= MHLEN) {
-			m = m_gethdr(M_WAIT, MT_DATA);
+		if (top == NULL) {
+			MGETHDR(m, M_WAIT, MT_DATA);
 			mlen = MHLEN;
 		} else {
-			m = m_clget(NULL, M_WAIT, ulmin(alen, MAXMCLBYTES));
-			mlen = m->m_ext.ext_size;
-			if (top != NULL)
-				m->m_flags &= ~M_PKTHDR;
+			MGET(m, M_WAIT, MT_DATA);
+			mlen = MLEN;
 		}
-
 		/* chain mbuf together */
 		*nextp = m;
 		nextp = &m->m_next;
 
-		/* put the data at the end of the buffer */
-		if (len < mlen)
-			m_align(m, len);
-		else
-			len = mlen;
+		resid = ulmin(resid, space);
+		if (resid >= MINCLSIZE) {
+			MCLGETL(m, M_NOWAIT, ulmin(resid, MAXMCLBYTES));
+			if ((m->m_flags & M_EXT) == 0)
+				MCLGETL(m, M_NOWAIT, MCLBYTES);
+			if ((m->m_flags & M_EXT) == 0)
+				goto nopages;
+			mlen = m->m_ext.ext_size;
+			len = ulmin(mlen, resid);
+			/*
+			 * For datagram protocols, leave room
+			 * for protocol headers in first mbuf.
+			 */
+			if (atomic && m == top && len < mlen - max_hdr)
+				m->m_data += max_hdr;
+		} else {
+nopages:
+			len = ulmin(mlen, resid);
+			/*
+			 * For datagram protocols, leave room
+			 * for protocol headers in first mbuf.
+			 */
+			if (atomic && m == top && len < mlen - max_hdr)
+				m_align(m, len);
+		}
 
 		error = uiomove(mtod(m, caddr_t), len, uio);
 		if (error) {
@@ -769,15 +782,14 @@ m_getuio(struct mbuf **mp, int atomic, long space, struct uio *uio)
 		}
 
 		/* adjust counters */
+		resid = uio->uio_resid;
 		space -= len;
 		m->m_len = len;
 		top->m_pkthdr.len += len;
-		align = 0;
 
 		/* Is there more space and more data? */
-	} while (space > 0 && uio->uio_resid > 0);
+	} while (space > 0 && resid > 0);
 
-	KASSERT(top != NULL);
 	*mp = top;
 	return 0;
 }
@@ -1580,12 +1592,9 @@ somove(struct socket *so, int wait)
 	/*
 	 * By splicing sockets connected to localhost, userland might create a
 	 * loop.  Dissolve splicing with error if loop is detected by counter.
-	 *
-	 * If we deal with looped broadcast/multicast packet we bail out with
-	 * no error to suppress splice termination.
 	 */
 	if ((m->m_flags & M_PKTHDR) &&
-	    ((m->m_pkthdr.ph_loopcnt++ >= M_MAXLOOP) ||
+	    ((m->m_pkthdr.ph_loopcnt >= M_MAXLOOP) ||
 	    ((m->m_flags & M_LOOP) && (m->m_flags & (M_BCAST|M_MCAST))))) {
 		error = ELOOP;
 		goto release;
@@ -1725,6 +1734,8 @@ somove(struct socket *so, int wait)
 		} else if (oobmark) {
 			o = m_split(m, oobmark, wait);
 			if (o) {
+				if (m->m_flags & M_PKTHDR)
+					m->m_pkthdr.ph_loopcnt++;
 				solock_shared(sosp);
 				error = pru_send(sosp, m, NULL, NULL);
 				sounlock_shared(sosp);
@@ -1781,6 +1792,8 @@ somove(struct socket *so, int wait)
 
 	mtx_leave(&sosp->so_snd.sb_mtx);
 	mtx_leave(&so->so_rcv.sb_mtx);
+	if (m->m_flags & M_PKTHDR)
+		m->m_pkthdr.ph_loopcnt++;
 	solock_shared(sosp);
 	error = pru_send(sosp, m, NULL, NULL);
 	sounlock_shared(sosp);

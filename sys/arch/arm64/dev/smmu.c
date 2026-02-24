@@ -1,4 +1,4 @@
-/* $OpenBSD: smmu.c,v 1.24 2025/08/24 19:49:16 patrick Exp $ */
+/* $OpenBSD: smmu.c,v 1.29 2026/01/06 11:57:33 patrick Exp $ */
 /*
  * Copyright (c) 2008-2009,2014-2016 Dale Rahn <drahn@dalerahn.com>
  * Copyright (c) 2021 Patrick Wildt <patrick@blueri.se>
@@ -565,8 +565,7 @@ smmu_device_map(void *cookie, uint32_t sid, bus_dma_tag_t dmat)
 	if (dom->sd_dmat == NULL) {
 		dom->sd_dmat = malloc(sizeof(*dom->sd_dmat),
 		    M_DEVBUF, M_WAITOK);
-		memcpy(dom->sd_dmat, sc->sc_dmat,
-		    sizeof(*dom->sd_dmat));
+		memcpy(dom->sd_dmat, dmat, sizeof(*dom->sd_dmat));
 		dom->sd_dmat->_cookie = dom;
 		dom->sd_dmat->_dmamap_create = smmu_dmamap_create;
 		dom->sd_dmat->_dmamap_destroy = smmu_dmamap_destroy;
@@ -575,7 +574,6 @@ smmu_device_map(void *cookie, uint32_t sid, bus_dma_tag_t dmat)
 		dom->sd_dmat->_dmamap_load_uio = smmu_dmamap_load_uio;
 		dom->sd_dmat->_dmamap_load_raw = smmu_dmamap_load_raw;
 		dom->sd_dmat->_dmamap_unload = smmu_dmamap_unload;
-		dom->sd_dmat->_flags |= BUS_DMA_COHERENT;
 	}
 
 	return dom->sd_dmat;
@@ -853,6 +851,15 @@ smmu_reserve_region(void *cookie, uint32_t sid, bus_addr_t addr,
 	dom = smmu_domain_lookup(sc, sid);
 	if (dom == NULL)
 		return;
+
+	/*
+	 * Some reserved regions, like PCI BARs, might not be inside our VA map.
+	 * If it lies outside completely: skip it; if partially: clamp it.
+	 */
+	if (addr > dom->sd_iovamap->ex_end)
+		return;
+	if (addr + size > dom->sd_iovamap->ex_end)
+		size = (dom->sd_iovamap->ex_end - addr) + 1;
 
 	extent_alloc_region(dom->sd_iovamap, addr, size,
 	    EX_WAITOK | EX_CONFLICTOK);
@@ -1371,7 +1378,7 @@ smmu_dmamap_create(bus_dma_tag_t t, bus_size_t size, int nsegments,
 	/* Allocate IOVA, and a guard page at the end. */
 	mtx_enter(&dom->sd_iova_mtx);
 	error = extent_alloc_with_descr(dom->sd_iovamap, len + PAGE_SIZE,
-	    PAGE_SIZE, 0, 0, EX_NOWAIT, &sms->sms_er, &dva);
+	    64 * 1024, 0, 0, EX_NOWAIT, &sms->sms_er, &dva);
 	mtx_leave(&dom->sd_iova_mtx);
 	if (error) {
 		sc->sc_dmat->_dmamap_destroy(sc->sc_dmat, map);
@@ -1651,6 +1658,7 @@ smmu_v3_attach(struct smmu_softc *sc)
 		sc->sc_ipa_bits = min(sc->sc_ipa_bits, 39);
 	}
 
+	mtx_init(&sc->v3.sc_cmdq_mtx, IPL_VM);
 	sc->v3.sc_cmdq.sq_sdm = smmu_dmamem_alloc(sc->sc_dmat,
 	     (1ULL << sc->v3.sc_cmdq.sq_size_log2) * 2 * sizeof(uint64_t),
 	     (1ULL << sc->v3.sc_cmdq.sq_size_log2) * 2 * sizeof(uint64_t));
@@ -1993,7 +2001,7 @@ smmu_v3_domain_create(struct smmu_domain *dom)
 	vaddr_t l0va;
 	uint32_t iovabits;
 
-	if (dom->sd_sid >= (1 << sc->v3.sc_sidsize))
+	if (dom->sd_sid >= (1ULL << sc->v3.sc_sidsize))
 		return EINVAL;
 
 	if (dom->sd_stage != 1)
@@ -2127,6 +2135,8 @@ smmu_v3_sync(struct smmu_softc *sc)
 	bus_size_t off;
 	int i;
 
+	MUTEX_ASSERT_LOCKED(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
@@ -2182,11 +2192,14 @@ smmu_v3_cfgi_all(struct smmu_softc *sc)
 	uint32_t prod;
 	bus_size_t off;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
 	    SMMU_V3_Q_WRP(sq, sq->sq_cons) != SMMU_V3_Q_WRP(sq, sq->sq_prod)) {
 		printf("%s: CMDQ ran out of space\n", sc->sc_dev.dv_xname);
+		mtx_leave(&sc->v3.sc_cmdq_mtx);
 		return;
 	}
 
@@ -2208,6 +2221,8 @@ smmu_v3_cfgi_all(struct smmu_softc *sc)
 	smmu_v3_write_4(sc, SMMU_V3_CMDQ_PROD, sq->sq_prod);
 
 	smmu_v3_sync(sc);
+
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }
 
 void
@@ -2219,11 +2234,14 @@ smmu_v3_cfgi_cd(struct smmu_domain *dom)
 	uint32_t prod;
 	bus_size_t off;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
 	    SMMU_V3_Q_WRP(sq, sq->sq_cons) != SMMU_V3_Q_WRP(sq, sq->sq_prod)) {
 		printf("%s: CMDQ ran out of space\n", sc->sc_dev.dv_xname);
+		mtx_leave(&sc->v3.sc_cmdq_mtx);
 		return;
 	}
 
@@ -2246,6 +2264,8 @@ smmu_v3_cfgi_cd(struct smmu_domain *dom)
 	smmu_v3_write_4(sc, SMMU_V3_CMDQ_PROD, sq->sq_prod);
 
 	smmu_v3_sync(sc);
+
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }
 
 void
@@ -2257,11 +2277,14 @@ smmu_v3_cfgi_ste(struct smmu_domain *dom)
 	uint32_t prod;
 	bus_size_t off;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
 	    SMMU_V3_Q_WRP(sq, sq->sq_cons) != SMMU_V3_Q_WRP(sq, sq->sq_prod)) {
 		printf("%s: CMDQ ran out of space\n", sc->sc_dev.dv_xname);
+		mtx_leave(&sc->v3.sc_cmdq_mtx);
 		return;
 	}
 
@@ -2284,6 +2307,8 @@ smmu_v3_cfgi_ste(struct smmu_domain *dom)
 	smmu_v3_write_4(sc, SMMU_V3_CMDQ_PROD, sq->sq_prod);
 
 	smmu_v3_sync(sc);
+
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }
 
 void
@@ -2294,11 +2319,14 @@ smmu_v3_tlbi_all(struct smmu_softc *sc, uint64_t op)
 	uint32_t prod;
 	bus_size_t off;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
 	    SMMU_V3_Q_WRP(sq, sq->sq_cons) != SMMU_V3_Q_WRP(sq, sq->sq_prod)) {
 		printf("%s: CMDQ ran out of space\n", sc->sc_dev.dv_xname);
+		mtx_leave(&sc->v3.sc_cmdq_mtx);
 		return;
 	}
 
@@ -2320,6 +2348,8 @@ smmu_v3_tlbi_all(struct smmu_softc *sc, uint64_t op)
 	smmu_v3_write_4(sc, SMMU_V3_CMDQ_PROD, sq->sq_prod);
 
 	smmu_v3_sync(sc);
+
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }
 
 void
@@ -2331,11 +2361,14 @@ smmu_v3_tlbi_asid(struct smmu_domain *dom)
 	uint32_t prod;
 	bus_size_t off;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
 	    SMMU_V3_Q_WRP(sq, sq->sq_cons) != SMMU_V3_Q_WRP(sq, sq->sq_prod)) {
 		printf("%s: CMDQ ran out of space\n", sc->sc_dev.dv_xname);
+		mtx_leave(&sc->v3.sc_cmdq_mtx);
 		return;
 	}
 
@@ -2360,6 +2393,8 @@ smmu_v3_tlbi_asid(struct smmu_domain *dom)
 	smmu_v3_write_4(sc, SMMU_V3_CMDQ_PROD, sq->sq_prod);
 
 	smmu_v3_sync(sc);
+
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }
 
 void
@@ -2371,11 +2406,14 @@ smmu_v3_tlbi_va(struct smmu_domain *dom, vaddr_t va)
 	uint32_t prod;
 	bus_size_t off;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
+
 	/* TODO: Handle this more properly. */
 	sq->sq_cons = smmu_v3_read_4(sc, SMMU_V3_CMDQ_CONS);
 	if (SMMU_V3_Q_IDX(sq, sq->sq_cons) == SMMU_V3_Q_IDX(sq, sq->sq_prod) &&
 	    SMMU_V3_Q_WRP(sq, sq->sq_cons) != SMMU_V3_Q_WRP(sq, sq->sq_prod)) {
 		printf("%s: CMDQ ran out of space\n", sc->sc_dev.dv_xname);
+		mtx_leave(&sc->v3.sc_cmdq_mtx);
 		return;
 	}
 
@@ -2399,6 +2437,10 @@ smmu_v3_tlbi_va(struct smmu_domain *dom, vaddr_t va)
 	    SMMU_V3_Q_WRP(sq, prod) | SMMU_V3_Q_IDX(sq, prod);
 	membar_sync();
 	smmu_v3_write_4(sc, SMMU_V3_CMDQ_PROD, sq->sq_prod);
+
+	/* callee is responsible for smmu_v3_tlb_sync_context() */
+
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }
 
 void
@@ -2406,5 +2448,7 @@ smmu_v3_tlb_sync_context(struct smmu_domain *dom)
 {
 	struct smmu_softc *sc = dom->sd_sc;
 
+	mtx_enter(&sc->v3.sc_cmdq_mtx);
 	smmu_v3_sync(sc);
+	mtx_leave(&sc->v3.sc_cmdq_mtx);
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd.c,v 1.178 2025/03/24 20:01:03 nicm Exp $ */
+/* $OpenBSD: cmd.c,v 1.181 2026/01/06 10:17:29 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -221,6 +221,7 @@ struct cmd {
 
 	char			 *file;
 	u_int			  line;
+	int			  parse_flags;
 
 	TAILQ_ENTRY(cmd)	  qentry;
 };
@@ -413,6 +414,13 @@ cmd_get_source(struct cmd *cmd, const char **file, u_int *line)
 		*line = cmd->line;
 }
 
+/* Get parse flags for command. */
+int
+cmd_get_parse_flags(struct cmd *cmd)
+{
+	return (cmd->parse_flags);
+}
+
 /* Look for an alias for a command. */
 char *
 cmd_get_alias(const char *name)
@@ -497,7 +505,7 @@ ambiguous:
 /* Parse a single command from an argument vector. */
 struct cmd *
 cmd_parse(struct args_value *values, u_int count, const char *file, u_int line,
-    char **cause)
+    int parse_flags, char **cause)
 {
 	const struct cmd_entry	*entry;
 	struct cmd		*cmd;
@@ -526,6 +534,7 @@ cmd_parse(struct args_value *values, u_int count, const char *file, u_int line,
 	cmd = xcalloc(1, sizeof *cmd);
 	cmd->entry = entry;
 	cmd->args = args;
+	cmd->parse_flags = parse_flags;
 
 	if (file != NULL)
 		cmd->file = xstrdup(file);
@@ -668,11 +677,16 @@ cmd_list_copy(const struct cmd_list *cmdlist, int argc, char **argv)
 
 /* Get a command list as a string. */
 char *
-cmd_list_print(const struct cmd_list *cmdlist, int escaped)
+cmd_list_print(const struct cmd_list *cmdlist, int flags)
 {
 	struct cmd	*cmd, *next;
 	char		*buf, *this;
 	size_t		 len;
+	const char	*separator;
+	int		 escaped = flags & CMD_LIST_PRINT_ESCAPED;
+	int		 no_groups = flags & CMD_LIST_PRINT_NO_GROUPS;
+	const char	*single_separator = escaped ? " \\; " : " ; ";
+	const char	*double_separator = escaped ? " \\;\\; " : " ;; ";
 
 	len = 1;
 	buf = xcalloc(1, len);
@@ -687,17 +701,11 @@ cmd_list_print(const struct cmd_list *cmdlist, int escaped)
 
 		next = TAILQ_NEXT(cmd, qentry);
 		if (next != NULL) {
-			if (cmd->group != next->group) {
-				if (escaped)
-					strlcat(buf, " \\;\\; ", len);
-				else
-					strlcat(buf, " ;; ", len);
-			} else {
-				if (escaped)
-					strlcat(buf, " \\; ", len);
-				else
-					strlcat(buf, " ; ", len);
-			}
+			if (!no_groups && cmd->group != next->group)
+				separator = double_separator;
+			else
+				separator = single_separator;
+			strlcat(buf, separator, len);
 		}
 
 		free(this);

@@ -1,4 +1,4 @@
-/* $OpenBSD: agintc.c,v 1.63 2025/07/06 12:22:31 dlg Exp $ */
+/* $OpenBSD: agintc.c,v 1.65 2025/12/15 12:59:24 dlg Exp $ */
 /*
  * Copyright (c) 2007, 2009, 2011, 2017 Dale Rahn <drahn@dalerahn.com>
  * Copyright (c) 2018 Mark Kettenis <kettenis@openbsd.org>
@@ -20,6 +20,8 @@
  * This is a device driver for the GICv3/GICv4 IP from ARM as specified
  * in IHI0069C, an example of this hardware is the GIC 500.
  */
+
+#include "xcall.h"
 
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -1428,6 +1430,10 @@ agintc_ipi_handler(void *v)
 			agintc_ipi_ddb(v);
 		if (ISSET(reasons, 1 << ARM_IPI_HALT))
 			agintc_ipi_halt(v);
+#if NXCALL > 0
+		if (ISSET(reasons, 1 << ARM_IPI_XCALL))
+			arm_cpu_xcall_dispatch();
+#endif
 	}
 
 	return (1);

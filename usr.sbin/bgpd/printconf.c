@@ -1,4 +1,4 @@
-/*	$OpenBSD: printconf.c,v 1.182 2025/03/10 14:11:38 claudio Exp $	*/
+/*	$OpenBSD: printconf.c,v 1.184 2026/02/04 13:49:23 claudio Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -365,12 +365,6 @@ print_set(struct filter_set_head *set)
 			printf("origin ");
 			print_origin(s->action.origin);
 			break;
-		case ACTION_RTLABEL_ID:
-		case ACTION_PFTABLE_ID:
-		case ACTION_SET_NEXTHOP_REF:
-			/* not possible */
-			printf("king bula saiz: config broken");
-			break;
 		}
 	}
 	printf("}");
@@ -670,18 +664,11 @@ print_originsets(struct prefixset_head *psh)
 {
 	struct prefixset	*ps;
 	struct roa		*roa;
-	struct bgpd_addr	 addr;
 
 	SIMPLEQ_FOREACH(ps, psh, entry) {
 		printf("origin-set \"%s\" {", ps->name);
 		RB_FOREACH(roa, roa_tree, &ps->roaitems) {
-			printf("\n\t");
-			addr.aid = roa->aid;
-			addr.v6 = roa->prefix.inet6;
-			printf("%s/%u", log_addr(&addr), roa->prefixlen);
-			if (roa->prefixlen != roa->maxlen)
-				printf(" maxlen %u", roa->maxlen);
-			printf(" source-as %u", roa->asnum);
+			printf("\n\t%s", log_roa(roa));
 		}
 		printf("\n}\n\n");
 	}

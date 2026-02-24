@@ -1,4 +1,4 @@
-/* $OpenBSD: tty-keys.c,v 1.194 2025/09/01 07:58:09 nicm Exp $ */
+/* $OpenBSD: tty-keys.c,v 1.203 2026/02/23 09:08:07 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -59,6 +59,7 @@ static int	tty_keys_device_attributes2(struct tty *, const char *, size_t,
 		    size_t *);
 static int	tty_keys_extended_device_attributes(struct tty *, const char *,
 		    size_t, size_t *);
+static int	tty_keys_palette(struct tty *, const char *, size_t, size_t *);
 
 /* A key tree entry. */
 struct tty_key {
@@ -804,6 +805,17 @@ tty_keys_next(struct tty *tty)
 		goto partial_key;
 	}
 
+	/* Is this a palette response? */
+	switch (tty_keys_palette(tty, buf, len, &size)) {
+	case 0:		/* yes */
+		key = KEYC_UNKNOWN;
+		goto complete_key;
+	case -1:	/* no, or not valid */
+		break;
+	case 1:		/* partial */
+		goto partial_key;
+	}
+
 	/* Is this a mouse key press? */
 	switch (tty_keys_mouse(tty, buf, len, &size, &m)) {
 	case 0:		/* yes */
@@ -897,9 +909,15 @@ first_key:
 	 * used. termios should have a better idea.
 	 */
 	bspace = tty->tio.c_cc[VERASE];
-	if (bspace != _POSIX_VDISABLE && key == bspace) {
-		log_debug("%s: key %#llx is backspace", c->name, key);
-		key = KEYC_BSPACE;
+	if (bspace != _POSIX_VDISABLE) {
+		if (key == bspace) {
+			log_debug("%s: key %#llx is BSpace", c->name, key);
+			key = KEYC_BSPACE;
+		}
+		if (key == (bspace|KEYC_META)) {
+			log_debug("%s: key %#llx is M-BSpace", c->name, key);
+			key = KEYC_BSPACE|KEYC_META;
+		}
 	}
 
 	/*
@@ -938,7 +956,8 @@ partial_key:
 	if (delay == 0)
 		delay = 1;
 	if ((tty->flags & (TTY_WAITFG|TTY_WAITBG) ||
-	    (tty->flags & TTY_ALL_REQUEST_FLAGS) != TTY_ALL_REQUEST_FLAGS)) {
+	    (tty->flags & TTY_ALL_REQUEST_FLAGS) != TTY_ALL_REQUEST_FLAGS) ||
+	    !TAILQ_EMPTY(&c->input_requests)) {
 		log_debug("%s: increasing delay for active query", c->name);
 		if (delay < 500)
 			delay = 500;
@@ -1289,12 +1308,11 @@ tty_keys_mouse(struct tty *tty, const char *buf, size_t len, size_t *size,
 static int
 tty_keys_clipboard(struct tty *tty, const char *buf, size_t len, size_t *size)
 {
-	struct client		*c = tty->client;
-	struct window_pane	*wp;
-	size_t			 end, terminator = 0, needed;
-	char			*copy, *out;
-	int			 outlen;
-	u_int			 i;
+	struct client				*c = tty->client;
+	size_t					 end, terminator = 0, needed;
+	char					*copy, *out, clip = 0;
+	int					 outlen;
+	struct input_request_clipboard_data	 cd;
 
 	*size = 0;
 
@@ -1342,7 +1360,14 @@ tty_keys_clipboard(struct tty *tty, const char *buf, size_t len, size_t *size)
 	/* Adjust end so that it points to the start of the terminator. */
 	end -= terminator - 1;
 
-	/* Get the second argument. */
+	/*
+	 * Save which clipboard was used from the second argument. If more than
+	 * one is specified (should not happen), ignore the argument.
+	 */
+	if (end >= 2 && buf[0] != ';' && buf[1] == ';')
+		clip = buf[0];
+
+	/* Skip the second argument. */
 	while (end != 0 && *buf != ';') {
 		buf++;
 		end--;
@@ -1352,12 +1377,6 @@ tty_keys_clipboard(struct tty *tty, const char *buf, size_t len, size_t *size)
 	buf++;
 	end--;
 
-	/* If we did not request this, ignore it. */
-	if (~tty->flags & TTY_OSC52QUERY)
-		return (0);
-	tty->flags &= ~TTY_OSC52QUERY;
-	evtimer_del(&tty->clipboard_timer);
-
 	/* It has to be a string so copy it. */
 	copy = xmalloc(end + 1);
 	memcpy(copy, buf, end);
@@ -1365,29 +1384,34 @@ tty_keys_clipboard(struct tty *tty, const char *buf, size_t len, size_t *size)
 
 	/* Convert from base64. */
 	needed = (end / 4) * 3;
+	if (needed == 0) {
+		free(copy);
+		return (0);
+	}
 	out = xmalloc(needed);
-	if ((outlen = b64_pton(copy, out, len)) == -1) {
+	if ((outlen = b64_pton(copy, out, needed)) == -1) {
 		free(out);
 		free(copy);
 		return (0);
 	}
 	free(copy);
-
-	/* Create a new paste buffer and forward to panes. */
 	log_debug("%s: %.*s", __func__, outlen, out);
-	if (c->flags & CLIENT_CLIPBOARDBUFFER) {
-		paste_add(NULL, out, outlen);
-		c->flags &= ~CLIENT_CLIPBOARDBUFFER;
-	}
-	for (i = 0; i < c->clipboard_npanes; i++) {
-		wp = window_pane_find_by_id(c->clipboard_panes[i]);
-		if (wp != NULL)
-			input_reply_clipboard(wp->event, out, outlen, "\033\\");
-	}
-	free(c->clipboard_panes);
-	c->clipboard_panes = NULL;
-	c->clipboard_npanes = 0;
 
+	/* Set reply if any. */
+	cd.buf = out;
+	cd.len = outlen;
+	cd.clip = clip;
+	input_request_reply(c, INPUT_REQUEST_CLIPBOARD, &cd);
+
+	/* Create a buffer if requested. */
+	if (tty->flags & TTY_OSC52QUERY) {
+		paste_add(NULL, out, outlen);
+		out = NULL;
+		evtimer_del(&tty->clipboard_timer);
+		tty->flags &= ~TTY_OSC52QUERY;
+	}
+
+	free(out);
 	return (0);
 }
 
@@ -1600,8 +1624,10 @@ tty_keys_extended_device_attributes(struct tty *tty, const char *buf,
 	}
 	if (i == (sizeof tmp) - 1)
 		return (-1);
-	tmp[i - 1] = '\0';
 	*size = 5 + i;
+	if (i == 0)
+		return (0);
+	tmp[i - 1] = '\0';
 
 	/* Add terminal features. */
 	if (strncmp(tmp, "iTerm2 ", 7) == 0)
@@ -1674,12 +1700,15 @@ tty_keys_colours(struct tty *tty, const char *buf, size_t len, size_t *size,
 	}
 	if (i == (sizeof tmp) - 1)
 		return (-1);
+	*size = 6 + i;
+	if (i == 0)
+		return (0);
 	if (tmp[i - 1] == '\033')
 		tmp[i - 1] = '\0';
 	else
 		tmp[i] = '\0';
-	*size = 6 + i;
 
+	/* Work out the colour. */
 	n = colour_parseX11(tmp);
 	if (n != -1 && buf[3] == '0') {
 		if (c != NULL)
@@ -1696,6 +1725,73 @@ tty_keys_colours(struct tty *tty, const char *buf, size_t len, size_t *size,
 		*bg = n;
 		tty->flags &= ~TTY_WAITBG;
 	}
+
+	return (0);
+}
+
+/* Handle OSC 4 palette colour responses. */
+static int
+tty_keys_palette(struct tty *tty, const char *buf, size_t len, size_t *size)
+{
+	struct client			 *c = tty->client;
+	u_int				  i;
+	char				  tmp[128], *endptr;
+	int				  idx;
+	struct input_request_palette_data pd;
+
+	*size = 0;
+
+	/* First three bytes are always \033]4. */
+	if (buf[0] != '\033')
+		return (-1);
+	if (len == 1)
+		return (1);
+	if (buf[1] != ']')
+		return (-1);
+	if (len == 2)
+		return (1);
+	if (buf[2] != '4')
+		return (-1);
+	if (len == 3)
+		return (1);
+	if (buf[3] != ';')
+		return (-1);
+	if (len == 4)
+		return (1);
+
+	/* Copy the rest up to \033\ or \007. */
+	for (i = 0; i < (sizeof tmp) - 1; i++) {
+		if (4 + i == len)
+			return (1);
+		if (buf[4 + i - 1] == '\033' && buf[4 + i] == '\\')
+			break;
+		if (buf[4 + i] == '\007')
+			break;
+		tmp[i] = buf[4 + i];
+	}
+	if (i == (sizeof tmp) - 1)
+		return (-1);
+	*size = 5 + i;
+	if (i == 0)
+		return (0);
+	if (tmp[i - 1] == '\033')
+		tmp[i - 1] = '\0';
+	else
+		tmp[i] = '\0';
+
+	/* Parse index. */
+	idx = strtol(tmp, &endptr, 10);
+	if (*endptr != ';')
+		return (-1);
+	if (idx < 0 || idx > 255)
+		return (-1);
+
+	/* Work out the colour. */
+	pd.c = colour_parseX11(endptr + 1);
+	if (pd.c == -1)
+		return (0);
+	pd.idx = idx;
+	input_request_reply(c, INPUT_REQUEST_PALETTE, &pd);
 
 	return (0);
 }

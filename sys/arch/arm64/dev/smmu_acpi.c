@@ -1,4 +1,4 @@
-/* $OpenBSD: smmu_acpi.c,v 1.10 2025/08/24 19:49:16 patrick Exp $ */
+/* $OpenBSD: smmu_acpi.c,v 1.14 2026/01/24 16:07:09 kettenis Exp $ */
 /*
  * Copyright (c) 2021 Patrick Wildt <patrick@blueri.se>
  *
@@ -188,7 +188,8 @@ smmu_acpi_foundqcom(struct aml_node *node, void *arg)
 	if (strcmp(dev, "QCOM0409") == 0 || /* SC8180X/XP */
 	    strcmp(dev, "QCOM0609") == 0 || /* SC8280XP */
 	    strcmp(dev, "QCOM0809") == 0 || /* SC7180 */
-	    strcmp(dev, "QCOM0C09") == 0) /* X1E80100 */
+	    strcmp(dev, "QCOM0C09") == 0 || /* X1E80100 */
+	    strcmp(dev, "QCOM0E09") == 0) /* QSC6490 */
 		sc->sc_is_qcom = 1;
 
 	return 0;
@@ -219,8 +220,23 @@ smmu_v3_acpi_attach(struct smmu_acpi_softc *asc, struct acpi_iort_node *node)
 		return ENXIO;
 	}
 
-	if (ACPI_IORT_SMMU_V3_COHACC_OVERRIDE(smmu->flags))
+	if (ACPI_IORT_SMMU_V3_COHACC_OVERRIDE(smmu->flags)) {
+		bus_dma_tag_t dmat = malloc(sizeof(*sc->sc_dmat), M_DEVBUF,
+		    M_WAITOK | M_ZERO);
+		memcpy(dmat, sc->sc_dmat, sizeof(*dmat));
+		dmat->_flags |= BUS_DMA_COHERENT;
+		sc->sc_dmat = dmat;
 		sc->sc_coherent = 1;
+	}
+
+	/* Check for QCOM devices to enable quirk. */
+	aml_find_node(acpi_softc->sc_root, "_HID", smmu_acpi_foundqcom, sc);
+
+	/* FIXME: Don't configure on QCOM until its runtime use is fixed. */
+	if (sc->sc_is_qcom) {
+		printf(": disabled\n");
+		return ENXIO;
+	}
 
 	if (smmu_v3_attach(sc) != 0)
 		return ENXIO;
@@ -229,24 +245,24 @@ smmu_v3_acpi_attach(struct smmu_acpi_softc *asc, struct acpi_iort_node *node)
 		asc->v3.sc_eih = acpi_intr_establish(smmu->event,
 		    LR_EXTIRQ_MODE, IPL_TTY, smmu_v3_event_irq,
 		    sc, sc->sc_dev.dv_xname);
-	if (asc->v3.sc_eih == NULL)
-		return ENXIO;
-
 	if (smmu->gerr)
 		asc->v3.sc_gih = acpi_intr_establish(smmu->gerr,
 		    LR_EXTIRQ_MODE, IPL_TTY, smmu_v3_gerr_irq,
 		    sc, sc->sc_dev.dv_xname);
-	if (asc->v3.sc_gih == NULL)
-		return ENXIO;
-
 	if (sc->v3.sc_has_pri) {
 		if (smmu->pri)
 			asc->v3.sc_pih = acpi_intr_establish(smmu->pri,
 			    LR_EXTIRQ_MODE, IPL_TTY, smmu_v3_priq_irq,
 			    sc, sc->sc_dev.dv_xname);
-		if (asc->v3.sc_pih == NULL)
-			return ENXIO;
 	}
+
+	if (asc->v3.sc_eih == NULL || asc->v3.sc_gih == NULL ||
+	   (sc->v3.sc_has_pri && asc->v3.sc_pih == NULL))
+		printf("%s: couldn't establish all interrupts:%s%s%s\n",
+		    sc->sc_dev.dv_xname,
+		    asc->v3.sc_eih == NULL ? " event" : "",
+		    asc->v3.sc_gih == NULL ? " gerr" : "",
+		    asc->v3.sc_pih == NULL ? " pri" : "");
 
 	return 0;
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: acpivar.h,v 1.138 2025/09/20 17:43:28 kettenis Exp $	*/
+/*	$OpenBSD: acpivar.h,v 1.140 2026/01/10 16:12:36 kettenis Exp $	*/
 /*
  * Copyright (c) 2005 Thorsten Lockert <tholo@sigmasoft.com>
  *
@@ -42,6 +42,11 @@ extern int acpi_debug;
 #define dprintf(x...)
 #define dnprintf(n,x...)
 #endif
+
+#define ACPI_UUID(a, b, c, d, e) \
+    { (a), (a) >> 8, (a) >> 16, (a) >> 24, \
+      (b), (b) >> 8, (c), (c) >> 8, (d) >> 8, (d), \
+      (e) >> 40, (e) >> 32, (e) >> 24, (e) >> 16, (e) >> 8, (e) }
 
 extern int acpi_hasprocfvs;
 extern int acpi_haspci;
@@ -313,6 +318,8 @@ void	 acpi_unmap(struct acpi_mem_map *);
 int	 acpi_bus_space_map(bus_space_tag_t, bus_addr_t, bus_size_t, int,
 	     bus_space_handle_t *);
 void	 acpi_bus_space_unmap(bus_space_tag_t, bus_space_handle_t, bus_size_t);
+
+struct aml_node *acpi_pci_match(struct device *, struct pci_attach_args *);
 
 struct	 bios_attach_args;
 int	 acpi_probe(struct device *, struct cfdata *, struct bios_attach_args *);

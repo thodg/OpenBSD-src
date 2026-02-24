@@ -1,4 +1,4 @@
-/*	$OpenBSD: output_json.c,v 1.52 2025/03/10 14:08:25 claudio Exp $ */
+/*	$OpenBSD: output_json.c,v 1.60 2026/02/13 18:27:40 claudio Exp $ */
 
 /*
  * Copyright (c) 2020 Claudio Jeker <claudio@openbsd.org>
@@ -903,6 +903,15 @@ json_rib_mem(struct rde_memstats *stats)
 	    stats->rib_cnt * sizeof(struct rib_entry), UINT64_MAX);
 	json_rib_mem_element("prefix", stats->prefix_cnt,
 	    stats->prefix_cnt * sizeof(struct prefix), UINT64_MAX);
+	json_rib_mem_element("adjout_prefix", stats->adjout_prefix_cnt,
+	    stats->adjout_prefix_size, UINT64_MAX);
+	json_rib_mem_element("adjout_attr", stats->adjout_attr_cnt,
+	    stats->adjout_attr_cnt * sizeof(struct adjout_attr),
+	    stats->adjout_attr_refs);
+	json_rib_mem_element("pend_attr", stats->pend_attr_cnt,
+	    stats->pend_attr_cnt * sizeof(struct pend_attr), UINT64_MAX);
+	json_rib_mem_element("pend_prefix", stats->pend_prefix_cnt,
+	    stats->pend_prefix_cnt * sizeof(struct pend_prefix), UINT64_MAX);
 	json_rib_mem_element("rde_aspath", stats->path_cnt,
 	    stats->path_cnt * sizeof(struct rde_aspath),
 	    stats->path_refs);
@@ -918,10 +927,23 @@ json_rib_mem(struct rde_memstats *stats)
 	    stats->attr_data, UINT64_MAX);
 	json_rib_mem_element("total", UINT64_MAX,
 	    pts + stats->prefix_cnt * sizeof(struct prefix) +
+	    stats->adjout_prefix_cnt * sizeof(struct adjout_prefix) +
+	    stats->adjout_attr_cnt * sizeof(struct adjout_attr) +
+	    stats->pend_prefix_cnt * sizeof(struct pend_prefix) +
+	    stats->pend_attr_cnt * sizeof(struct pend_attr) +
 	    stats->rib_cnt * sizeof(struct rib_entry) +
 	    stats->path_cnt * sizeof(struct rde_aspath) +
 	    stats->aspath_size + stats->attr_cnt * sizeof(struct attr) +
 	    stats->attr_data, UINT64_MAX);
+	json_do_end();
+
+	json_do_object("filters", 0);
+	json_rib_mem_element("filter", stats->filter_cnt,
+	    stats->filter_size, stats->filter_refs);
+	json_rib_mem_element("filter_set", stats->filter_set_cnt,
+	    stats->filter_set_size, stats->filter_set_refs);
+	json_rib_mem_element("total", UINT64_MAX,
+	    stats->filter_size + stats->filter_set_size, UINT64_MAX);
 	json_do_end();
 
 	json_do_object("sets", 0);
@@ -933,6 +955,17 @@ json_rib_mem(struct rde_memstats *stats)
 	    UINT64_MAX);
 	json_rib_mem_element("total", UINT64_MAX,
 	    stats->aset_size + stats->pset_size, UINT64_MAX);
+	json_do_end();
+
+	json_do_object("evloop", 0);
+	json_do_uint("count", stats->rde_event_loop_count);
+	json_do_uint("loop_usec", stats->rde_event_loop_usec);
+	json_do_uint("io_usec", stats->rde_event_io_usec);
+	json_do_uint("peer_usec", stats->rde_event_peer_usec);
+	json_do_uint("adjout_usec", stats->rde_event_adjout_usec);
+	json_do_uint("ribdump_usec", stats->rde_event_ribdump_usec);
+	json_do_uint("nexthop_usec", stats->rde_event_nexthop_usec);
+	json_do_uint("update_usec", stats->rde_event_update_usec);
 	json_do_end();
 }
 

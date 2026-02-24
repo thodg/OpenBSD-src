@@ -1,4 +1,4 @@
-.\"	$OpenBSD: python-module.5,v 1.19 2025/09/17 22:11:55 sthen Exp $
+.\"	$OpenBSD: python-module.5,v 1.23 2026/02/06 13:54:52 sthen Exp $
 .\"
 .\" Copyright (c) 2008 Marc Espie
 .\"
@@ -24,7 +24,7 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.Dd $Mdocdate: September 17 2025 $
+.Dd $Mdocdate: February 6 2026 $
 .Dt PYTHON-MODULE 5
 .Os
 .Sh NAME
@@ -106,10 +106,24 @@ If the port provides a
 file, check the "build-backend" line in the [build-system] section.
 .Nm
 currently supports
-flit, flit_core, flit_scm, hatchling, hatch-vcs,
-jupyter_packaging, maturin, mesonpy,
-pbr, pdm, poetry-core, setuptools, setuptools_scm, setuptools-rust,
-and uv_build.
+flit,
+flit_core,
+flit_scm,
+hatch-vcs,
+hatchling,
+jupyter_packaging,
+maturin,
+mesonpy,
+pbr,
+pdm,
+poetry-core,
+poetry-dynamic-versioning,
+scikit-build-core,
+setuptools,
+setuptools-rust,
+setuptools_scm,
+and
+uv_build.
 In cases where an uncommon backend is used, or where the build backend is
 distributed with the software itself,
 .Ev MODPY_PYBUILD
@@ -130,12 +144,16 @@ adds the backend to
 .Ev MODPY_BUILD_DEPENDS ,
 and sets
 .Ev MODPY_PYTEST .
+The build is run in
+.Ev MODPY_BUILD_DIR ,
+defaulting to
+.Ev WRKSRC .
 .Pp
 Some checks are done to warn during "make fake" if
 .Ev MODPY_PYBUILD
 appears to be set incorrectly.
 .Pp
-Python 2 and some older Python 3 ports using setuptools still set
+Python 2 ports using setuptools set
 .Ev MODPY_SETUPTOOLS
 to Yes, which appends to
 .Ev MODPY_BUILD_DEPENDS
@@ -151,9 +169,6 @@ Extra arguments to the build and install commands can be passed via
 .Ev MODPY_DISTUTILS_BUILDARGS
 and
 .Ev MODPY_DISTUTILS_INSTALLARGS .
-These ports can often be converted to
-.Ev MODPY_PYBUILD
-with some small changes to the port.
 .Ev MODPY_SETUPTOOLS
 should not be used for new ports.
 .Pp

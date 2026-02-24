@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcpbench.c,v 1.73 2024/12/30 21:19:29 bluhm Exp $	*/
+/*	$OpenBSD: tcpbench.c,v 1.76 2025/12/06 09:48:30 phessler Exp $	*/
 
 /*
  * Copyright (c) 2008 Damien Miller <djm@mindrot.org>
@@ -1028,6 +1028,7 @@ map_tos(char *s, int *val)
 		{ "netcontrol",		IPTOS_PREC_NETCONTROL },
 		{ "reliability",	IPTOS_RELIABILITY },
 		{ "throughput",		IPTOS_THROUGHPUT },
+		{ "va",			IPTOS_DSCP_VA },
 		{ NULL,			-1 },
 	};
 
@@ -1209,7 +1210,7 @@ main(int argc, char **argv)
 				err(1, "setrtable");
 			break;
 		case 'n':
-			nconn = strtonum(optarg, 0, 65535, &errstr);
+			nconn = strtonum(optarg, 1, 65535, &errstr);
 			if (errstr != NULL)
 				errx(1, "number of connections is %s: %s",
 				    errstr, optarg);

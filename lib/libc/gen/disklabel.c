@@ -53,7 +53,7 @@ getdiskbyname(const char *name)
 	char	*buf;
 	char	*db_array[2] = { _PATH_DISKTAB, 0 };
 	char	*cp, *cq;
-	char	part, psize[3], pbsize[3],
+	char	psize[3], pbsize[3],
 		pfsize[3], poffset[3], ptype[3];
 	int	partnum, maxpartnum = 0;
 
@@ -126,7 +126,7 @@ getdiskbyname(const char *name)
 			maxpartnum = partnum;
 		}
 	}
-	dp->d_npartitions = maxpartnum;
+	dp->d_npartitions = maxpartnum + 1;
 	dp->d_magic = DISKMAGIC;
 	dp->d_magic2 = DISKMAGIC;
 	free(buf);

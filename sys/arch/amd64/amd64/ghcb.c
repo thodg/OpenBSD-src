@@ -1,4 +1,4 @@
-/*	$OpenBSD: ghcb.c,v 1.6 2025/09/17 18:37:44 sf Exp $	*/
+/*	$OpenBSD: ghcb.c,v 1.8 2026/02/16 15:06:03 hshoexer Exp $	*/
 
 /*
  * Copyright (c) 2024, 2025 Hans-Joerg Hoexer <hshoexer@genua.de>
@@ -53,13 +53,29 @@ paddr_t ghcb_paddr;
 /*
  * ghcb_clear
  *
- * Clear GHCB by setting to all 0.
+ * Clear GHCB valid bitmap to all 0.  After that, the GHCB does
+ * not contain a valid request.
  * Used by host and guest.
  */
 void
 ghcb_clear(struct ghcb_sa *ghcb)
 {
-	memset(ghcb, 0, sizeof(*ghcb));
+	memset(&ghcb->valid_bitmap, 0, sizeof(ghcb->valid_bitmap));
+}
+
+/*
+ * ghcb_empty
+ *
+ * If the GHCB is all clear, it contains no requests.
+ * Used by host only.
+ */
+int
+ghcb_empty(struct ghcb_sa *ghcb)
+{
+	static const uint8_t bm_allzero[GHCB_VB_SZ];
+
+	return (memcmp(&bm_allzero, &ghcb->valid_bitmap,
+           sizeof(bm_allzero)) == 0);
 }
 
 /*
@@ -271,7 +287,7 @@ _ghcb_mem_rw(vaddr_t addr, int valsz, void *val, bool read)
 	struct ghcb_sync	 syncout, syncin;
 	struct ghcb_sa		*ghcb;
 	unsigned long		 s;
-	struct ghcb_extra_regs	 ghcb_regs;
+	struct ghcb_extra_regs	 ghcb_regs, *pregs = NULL;
 
 	KASSERT(val != NULL);
 
@@ -334,14 +350,14 @@ _ghcb_mem_rw(vaddr_t addr, int valsz, void *val, bool read)
 		panic("invalid hypervisor response");
 	}
 
-	memset(&ghcb_regs, 0, sizeof(ghcb_regs));
-
 	if (read) {
+		memset(&ghcb_regs, 0, sizeof(ghcb_regs));
 		ghcb_regs.data = val;
 		ghcb_regs.data_sz = size;
-
-		ghcb_sync_in(NULL, &ghcb_regs, ghcb, &syncin);
+		pregs = &ghcb_regs;
 	}
+
+	ghcb_sync_in(NULL, pregs, ghcb, &syncin);
 
 	intr_restore(s);
 }

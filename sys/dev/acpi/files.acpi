@@ -1,4 +1,4 @@
-#	$OpenBSD: files.acpi,v 1.76 2025/08/03 09:23:19 kettenis Exp $
+#	$OpenBSD: files.acpi,v 1.80 2026/01/29 23:02:35 kettenis Exp $
 #
 # Config file and device description for machine-independent ACPI code.
 # Included by ports that need it.
@@ -53,6 +53,11 @@ file	dev/acpi/acpiec.c		acpiec
 device	acpige
 attach	acpige at acpi
 file	dev/acpi/acpige.c		acpige
+
+# Generic Buttons device
+device	acpihid
+attach	acpihid at acpi
+file	dev/acpi/acpihid.c		acpihid
 
 # Thermal Zone
 device	acpitz
@@ -187,6 +192,10 @@ file	dev/acpi/com_acpi.c		com_acpi
 attach	pluart at acpi with pluart_acpi
 file	dev/acpi/pluart_acpi.c		pluart_acpi
 
+# Qualcomm UART
+attach	qcuart at acpi with qcuart_acpi
+file	dev/acpi/qcuart_acpi.c		qcuart_acpi
+
 # SD Host Controller
 attach	sdhc at acpi with sdhc_acpi
 file	dev/acpi/sdhc_acpi.c		sdhc_acpi
@@ -211,6 +220,10 @@ file	dev/acpi/dwgpio.c		dwgpio
 # Synopsys DesignWare I2C controller
 attach	dwiic at acpi with dwiic_acpi
 file	dev/acpi/dwiic_acpi.c		dwiic_acpi
+
+# Intel LPSS SPI controller
+attach	ispi at acpi with ispi_acpi
+file	dev/acpi/ispi_acpi.c		ispi_acpi
 
 # Chromebook keyboard backlight
 device	acpicbkbd
@@ -260,9 +273,9 @@ attach	bse at acpi with bse_acpi
 file	dev/acpi/if_bse_acpi.c		bse_acpi
 
 # Intel HID event and 5-button array
-device	acpihid
-attach	acpihid at acpi
-file	dev/acpi/acpihid.c		acpihid
+device	inthid
+attach	inthid at acpi
+file	dev/acpi/inthid.c		inthid
 
 # Freescale i.MX I2C controller
 attach	imxiic at acpi with imxiic_acpi

@@ -1,4 +1,4 @@
-/*	$OpenBSD: bgpd.c,v 1.283 2025/04/24 20:24:12 claudio Exp $ */
+/*	$OpenBSD: bgpd.c,v 1.287 2026/02/04 11:41:11 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -45,7 +45,6 @@ void		sighdlr(int);
 __dead void	usage(void);
 int		main(int, char *[]);
 pid_t		start_child(enum bgpd_process, char *, int, int, int);
-int		send_filterset(struct imsgbuf *, struct filter_set_head *);
 int		reconfigure(const char *, struct bgpd_config *);
 int		send_config(struct bgpd_config *);
 int		dispatch_imsg(struct imsgbuf *, int, struct bgpd_config *);
@@ -118,7 +117,7 @@ usage(void)
 #define PFD_SOCK_ROUTE		3
 #define PFD_SOCK_PFKEY		4
 #define PFD_CONNECT_START	5
-#define MAX_TIMEOUT		(3600 * 1000)
+#define MAX_TIMEOUT		3600
 
 int	 cmd_opts;
 
@@ -131,7 +130,7 @@ main(int argc, char *argv[])
 	struct peer		*p;
 	struct pollfd		*pfd = NULL;
 	struct connect_elm	*ce;
-	time_t			 timeout;
+	monotime_t		 timeout;
 	pid_t			 se_pid = 0, rde_pid = 0, rtr_pid = 0, pid;
 	const char		*conffile;
 	char			*saved_argv0;
@@ -337,7 +336,10 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 		}
 		memset(pfd, 0, sizeof(struct pollfd) * pfd_elms);
 
-		timeout = mrt_timeout(conf->mrt);
+		timeout = monotime_add(getmonotime(),
+		    monotime_from_sec(MAX_TIMEOUT));
+
+		timeout = mrt_timeout(conf->mrt, timeout);
 
 		pfd[PFD_SOCK_ROUTE].fd = rfd;
 		pfd[PFD_SOCK_ROUTE].events = POLLIN;
@@ -357,9 +359,11 @@ BROKEN	if (pledge("stdio rpath wpath cpath fattr unix route recvfd sendfd",
 				fatalx("polli pfd overflow");
 		}
 
-		if (timeout < 0 || timeout > MAX_TIMEOUT)
-			timeout = MAX_TIMEOUT;
-		if (poll(pfd, npfd, timeout) == -1) {
+		timeout = monotime_sub(timeout, getmonotime());
+		if (!monotime_valid(timeout))
+			timeout = monotime_clear();
+
+		if (poll(pfd, npfd, monotime_to_msec(timeout)) == -1) {
 			if (errno != EINTR) {
 				log_warn("poll error");
 				quit = 1;
@@ -560,18 +564,6 @@ start_child(enum bgpd_process p, char *argv0, int fd, int debug, int verbose)
 }
 
 int
-send_filterset(struct imsgbuf *i, struct filter_set_head *set)
-{
-	struct filter_set	*s;
-
-	TAILQ_FOREACH(s, set, entry)
-		if (imsg_compose(i, IMSG_FILTER_SET, 0, 0, -1, s,
-		    sizeof(struct filter_set)) == -1)
-			return (-1);
-	return (0);
-}
-
-int
 reconfigure(const char *conffile, struct bgpd_config *conf)
 {
 	struct bgpd_config	*new_conf;
@@ -680,7 +672,7 @@ send_config(struct bgpd_config *conf)
 			if (imsg_compose(ibuf_rde, IMSG_FLOWSPEC_ADD, 0, 0, -1,
 			    f->flow, FLOWSPEC_SIZE + f->flow->len) == -1)
 				return (-1);
-			if (send_filterset(ibuf_rde, &f->attrset) == -1)
+			if (imsg_send_filterset(ibuf_rde, &f->attrset) == -1)
 				return (-1);
 			if (imsg_compose(ibuf_rde, IMSG_FLOWSPEC_DONE, 0, 0, -1,
 			    NULL, 0) == -1)
@@ -789,7 +781,7 @@ send_config(struct bgpd_config *conf)
 	/* filters for the RDE */
 	while ((r = TAILQ_FIRST(conf->filters)) != NULL) {
 		TAILQ_REMOVE(conf->filters, r, entry);
-		if (send_filterset(ibuf_rde, &r->set) == -1)
+		if (imsg_send_filterset(ibuf_rde, &r->set) == -1)
 			return (-1);
 		if (imsg_compose(ibuf_rde, IMSG_RECONF_FILTER, 0, 0, -1,
 		    r, sizeof(struct filter_rule)) == -1)
@@ -814,7 +806,7 @@ send_config(struct bgpd_config *conf)
 			return (-1);
 
 		/* export targets */
-		if (send_filterset(ibuf_rde, &vpn->export) == -1)
+		if (imsg_send_filterset(ibuf_rde, &vpn->export) == -1)
 			return (-1);
 		if (imsg_compose(ibuf_rde, IMSG_RECONF_VPN_EXPORT, 0, 0,
 		    -1, NULL, 0) == -1)
@@ -822,7 +814,7 @@ send_config(struct bgpd_config *conf)
 		filterset_free(&vpn->export);
 
 		/* import targets */
-		if (send_filterset(ibuf_rde, &vpn->import) == -1)
+		if (imsg_send_filterset(ibuf_rde, &vpn->import) == -1)
 			return (-1);
 		if (imsg_compose(ibuf_rde, IMSG_RECONF_VPN_IMPORT, 0, 0,
 		    -1, NULL, 0) == -1)
@@ -1178,7 +1170,7 @@ send_network(int type, struct network_config *net, struct filter_set_head *h)
 	/* networks that get deleted don't need to send the filter set */
 	if (type == IMSG_NETWORK_REMOVE)
 		return (0);
-	if (send_filterset(ibuf_rde, h) == -1)
+	if (imsg_send_filterset(ibuf_rde, h) == -1)
 		return (-1);
 	if (imsg_compose(ibuf_rde, IMSG_NETWORK_DONE, 0, 0, -1, NULL, 0) == -1)
 		return (-1);
@@ -1404,14 +1396,14 @@ bgpd_rtr_conn_setup(struct rtr_config *r)
 		if (setsockopt(ce->fd, IPPROTO_IP, IP_TOS, &pre, sizeof(pre)) ==
 		    -1) {
 			log_warn("rtr %s: setsockopt IP_TOS", r->descr);
-			return;
+			goto fail;
 		}
 		break;
 	case AID_INET6:
 		if (setsockopt(ce->fd, IPPROTO_IPV6, IPV6_TCLASS, &pre,
 		    sizeof(pre)) == -1) {
-			log_warn("rtr %s: setsockopt IP_TOS", r->descr);
-			return;
+			log_warn("rtr %s: setsockopt IPV6_TCLASS", r->descr);
+			goto fail;
 		}
 		break;
 	}
@@ -1419,7 +1411,7 @@ bgpd_rtr_conn_setup(struct rtr_config *r)
 	if (setsockopt(ce->fd, IPPROTO_TCP, TCP_NODELAY, &nodelay,
 	    sizeof(nodelay)) == -1) {
 		log_warn("rtr %s: setsockopt TCP_NODELAY", r->descr);
-		return;
+		goto fail;
 	}
 
 	if (tcp_md5_set(ce->fd, &r->auth, &r->remote_addr) == -1)

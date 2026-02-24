@@ -1,4 +1,4 @@
-/*	$OpenBSD: main.c,v 1.300 2025/10/17 08:09:21 job Exp $ */
+/*	$OpenBSD: main.c,v 1.304 2026/01/20 16:49:03 tb Exp $ */
 /*
  * Copyright (c) 2021 Claudio Jeker <claudio@openbsd.org>
  * Copyright (c) 2019 Kristaps Dzonsons <kristaps@bsd.lv>
@@ -500,11 +500,11 @@ queue_add_from_tal(struct tal *tal)
 		return;
 	}
 
-	/* steal the pkey from the tal structure */
-	data = tal->pkey;
-	tal->pkey = NULL;
+	/* steal the spki from the tal structure */
+	data = tal->spki;
+	tal->spki = NULL;
 	entityq_add(NULL, nfile, RTYPE_CER, DIR_UNKNOWN, repo, data,
-	    tal->pkeysz, tal->id, tal->id, NULL);
+	    tal->spkisz, tal->id, tal->id, NULL);
 }
 
 /*
@@ -694,8 +694,6 @@ entity_process(struct ibuf *b, struct validation_data *vd, struct stats *st)
 			repo_stat_inc(rp, talid, type, STYPE_INVALID);
 		roa_free(roa);
 		break;
-	case RTYPE_GBR:
-		break;
 	case RTYPE_ASPA:
 		io_read_buf(b, &ok, sizeof(ok));
 		if (ok == 0) {
@@ -816,7 +814,6 @@ sum_stats(const struct repo *rp, const struct repotalstats *in, void *arg)
 	out->aspas_invalid += in->aspas_invalid;
 	out->brks += in->brks;
 	out->crls += in->crls;
-	out->gbrs += in->gbrs;
 	out->taks += in->taks;
 	out->vrps += in->vrps;
 	out->vrps_uniqs += in->vrps_uniqs;
@@ -1488,9 +1485,15 @@ main(int argc, char *argv[])
 	 */
 
 	close(procfd);
+	msgbuf_free(procq);
 	close(rsyncfd);
+	msgbuf_free(rsyncq);
 	close(httpfd);
+	msgbuf_free(httpq);
 	close(rrdpfd);
+	msgbuf_free(rrdpq);
+	procq = rsyncq = httpq = rrdpq = NULL;
+	memset(queues, 0, sizeof(queues));
 
 	rc = 0;
 	for (;;) {
@@ -1553,6 +1556,8 @@ main(int argc, char *argv[])
 		timespecadd(&stats.system_time, &ts, &stats.system_time);
 	}
 
+	vd.buildtime = get_current_time();
+
 	/* change working directory to the output directory */
 	if (fchdir(outdirfd) == -1)
 		err(1, "fchdir output dir");
@@ -1601,7 +1606,6 @@ main(int argc, char *argv[])
 	    stats.repo_tal_stats.mfts, stats.repo_tal_stats.mfts_fail,
 	    stats.repo_tal_stats.mfts_gap);
 	printf("Certificate revocation lists: %u\n", stats.repo_tal_stats.crls);
-	printf("Ghostbuster records: %u\n", stats.repo_tal_stats.gbrs);
 	printf("Trust Anchor Keys: %u\n", stats.repo_tal_stats.taks);
 	printf("Repositories: %u\n", stats.repos);
 	printf("New files moved into validated cache: %u\n",

@@ -1,4 +1,4 @@
-/* $OpenBSD: intr.c,v 1.34 2025/09/14 15:09:36 kettenis Exp $ */
+/* $OpenBSD: intr.c,v 1.36 2025/12/15 12:59:24 dlg Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -15,6 +15,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include "xcall.h"
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/timetc.h>
@@ -27,6 +29,8 @@
 #include <machine/intr.h>
 
 #include <dev/ofw/openfirm.h>
+
+CTASSERT(SOFTINTR_XCALL < 32);
 
 int arm_intr_get_parent(int);
 uint32_t arm_intr_map_msi(int, uint64_t *);
@@ -695,12 +699,12 @@ arm_do_pending_intr(int pcpl)
 {
 	struct cpu_info *ci = curcpu();
 	u_long oldirqstate;
+	uint32_t ipending;
 
 	oldirqstate = intr_disable();
 
 #define DO_SOFTINT(si, ipl) \
-	if ((ci->ci_ipending & arm_smask[pcpl]) &	\
-	    SI_TO_IRQBIT(si)) {				\
+	if (ipending & SI_TO_IRQBIT(si)) {		\
 		ci->ci_ipending &= ~SI_TO_IRQBIT(si);	\
 		arm_intr_func.setipl(ipl);		\
 		intr_restore(oldirqstate);		\
@@ -709,9 +713,22 @@ arm_do_pending_intr(int pcpl)
 	}
 
 	do {
+		ipending = ci->ci_ipending & arm_smask[pcpl];
 		DO_SOFTINT(SOFTINTR_TTY, IPL_SOFTTTY);
 		DO_SOFTINT(SOFTINTR_NET, IPL_SOFTNET);
 		DO_SOFTINT(SOFTINTR_CLOCK, IPL_SOFTCLOCK);
+
+#ifdef MULTIPROCESSOR
+#if NXCALL > 0
+		if (ISSET(ipending, SI_TO_IRQBIT(SOFTINTR_XCALL))) {
+			CLR(ci->ci_ipending, SI_TO_IRQBIT(SOFTINTR_XCALL));
+			arm_intr_func.setipl(IPL_SOFTCLOCK);
+			intr_restore(oldirqstate);
+			cpu_xcall_dispatch(ci);
+			oldirqstate = intr_disable();
+		}
+#endif
+#endif
 	} while (ci->ci_ipending & arm_smask[pcpl]);
 
 	/* Don't use splx... we are here already! */
@@ -750,8 +767,14 @@ arm_init_smask(void)
 
 	for (i = IPL_NONE; i <= IPL_HIGH; i++)  {
 		arm_smask[i] = 0;
-		if (i < IPL_SOFTCLOCK)
+		if (i < IPL_SOFTCLOCK) {
 			arm_smask[i] |= SI_TO_IRQBIT(SOFTINTR_CLOCK);
+#ifdef MULTIPROCESSOR
+#if NXCALL > 0
+			arm_smask[i] |= SI_TO_IRQBIT(SOFTINTR_XCALL);
+#endif
+#endif
+		}
 		if (i < IPL_SOFTNET)
 			arm_smask[i] |= SI_TO_IRQBIT(SOFTINTR_NET);
 		if (i < IPL_SOFTTTY)
@@ -921,6 +944,7 @@ intr_disable_wakeup(void)
 		arm_intr_func.disable_wakeup();
 }
 
+#ifdef MULTIPROCESSOR
 /*
  * IPI implementation
  */
@@ -939,3 +963,4 @@ arm_no_send_ipi(struct cpu_info *ci, int id)
 {
 	panic("arm_send_ipi() called: no ipi function");
 }
+#endif /* MULTIPROCESSOR */

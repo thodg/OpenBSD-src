@@ -1,4 +1,4 @@
-/* $OpenBSD: clientloop.h,v 1.38 2024/05/17 06:42:04 jsg Exp $ */
+/* $OpenBSD: clientloop.h,v 1.40 2025/12/22 01:17:31 djm Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -75,6 +75,8 @@ void client_expect_confirm(struct ssh *, int, const char *,
 #define SSHMUX_COMMAND_STOP		6	/* Disable mux but not conn */
 #define SSHMUX_COMMAND_CANCEL_FWD	7	/* Cancel forwarding(s) */
 #define SSHMUX_COMMAND_PROXY		8	/* Open new connection */
+#define SSHMUX_COMMAND_CONNINFO		9	/* Show connection information */
+#define SSHMUX_COMMAND_CHANINFO		10	/* Show channels information */
 
 void	muxserver_listen(struct ssh *);
 int	muxclient(const char *);

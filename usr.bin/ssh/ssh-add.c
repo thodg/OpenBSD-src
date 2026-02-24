@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-add.c,v 1.181 2025/09/29 03:17:54 djm Exp $ */
+/* $OpenBSD: ssh-add.c,v 1.185 2026/02/11 17:01:34 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -47,8 +47,8 @@
 #include <pwd.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdarg.h>
+#include <string.h>
 #include <unistd.h>
 #include <limits.h>
 #include <time.h>
@@ -594,8 +594,8 @@ load_resident_keys(int agent_fd, const char *skprovider, int qflag,
 		if ((fp = sshkey_fingerprint(key,
 		    fingerprint_hash, SSH_FP_DEFAULT)) == NULL)
 			fatal_f("sshkey_fingerprint failed");
-		if ((r = ssh_add_identity_constrained(agent_fd, key, "",
-		    lifetime, confirm, skprovider,
+		if ((r = ssh_add_identity_constrained(agent_fd, key,
+		    key->sk_application, lifetime, confirm, skprovider,
 		    dest_constraints, ndest_constraints)) != 0) {
 			error("Unable to add key %s %s",
 			    sshkey_type(key), fp);
@@ -640,34 +640,6 @@ do_file(int agent_fd, int deleting, int key_only, int cert_only,
 			return -1;
 	}
 	return 0;
-}
-
-/* Append string 's' to a NULL-terminated array of strings */
-static void
-stringlist_append(char ***listp, const char *s)
-{
-	size_t i = 0;
-
-	if (*listp == NULL)
-		*listp = xcalloc(2, sizeof(**listp));
-	else {
-		for (i = 0; (*listp)[i] != NULL; i++)
-			; /* count */
-		*listp = xrecallocarray(*listp, i + 1, i + 2, sizeof(**listp));
-	}
-	(*listp)[i] = xstrdup(s);
-}
-
-static void
-stringlist_free(char **list)
-{
-	size_t i = 0;
-
-	if (list == NULL)
-		return;
-	for (i = 0; list[i] != NULL; i++)
-		free(list[i]);
-	free(list);
 }
 
 static void
@@ -834,9 +806,6 @@ main(int argc, char **argv)
 	/* Ensure that fds 0, 1 and 2 are open or directed to /dev/null */
 	sanitise_stdfd();
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
 	log_init(__progname, log_level, log_facility, 1);
 
 	setvbuf(stdout, NULL, _IOLBF, 0);

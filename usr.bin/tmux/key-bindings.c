@@ -1,4 +1,4 @@
-/* $OpenBSD: key-bindings.c,v 1.154 2025/08/14 07:15:40 nicm Exp $ */
+/* $OpenBSD: key-bindings.c,v 1.161 2026/02/10 08:28:53 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -48,6 +48,8 @@
 #define DEFAULT_PANE_MENU \
 	" '#{?#{m/r:(copy|view)-mode,#{pane_mode}},Go To Top,}' '<' {send -X history-top}" \
 	" '#{?#{m/r:(copy|view)-mode,#{pane_mode}},Go To Bottom,}' '>' {send -X history-bottom}" \
+	" ''" \
+	" '#{?#{&&:#{buffer_size},#{!:#{pane_in_mode}}},Paste #[underscore]#{=/9/...:buffer_sample},}' 'p' {paste-buffer}" \
 	" ''" \
 	" '#{?mouse_word,Search For #[underscore]#{=/9/...:mouse_word},}' 'C-r' {if -F '#{?#{m/r:(copy|view)-mode,#{pane_mode}},0,1}' 'copy-mode -t='; send -Xt= search-backward -- \"#{q:mouse_word}\"}" \
 	" '#{?mouse_word,Type #[underscore]#{=/9/...:mouse_word},}' 'C-y' {copy-mode -q; send-keys -l -- \"#{q:mouse_word}\"}" \
@@ -295,11 +297,11 @@ key_bindings_remove_table(const char *name)
 	table = key_bindings_get_table(name, 0);
 	if (table != NULL) {
 		RB_REMOVE(key_tables, &key_tables, table);
+		TAILQ_FOREACH(c, &clients, entry) {
+			if (c->keytable == table)
+				server_client_set_key_table(c, NULL);
+		}
 		key_bindings_unref_table(table);
-	}
-	TAILQ_FOREACH(c, &clients, entry) {
-		if (c->keytable == table)
-			server_client_set_key_table(c, NULL);
 	}
 }
 
@@ -439,12 +441,13 @@ key_bindings_init(void)
 
 		/* Mouse button 1 down on pane. */
 		"bind -n MouseDown1Pane { select-pane -t=; send -M }",
+		"bind -n C-MouseDown1Pane { swap-pane -s@ }",
 
 		/* Mouse button 1 drag on pane. */
 		"bind -n MouseDrag1Pane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -M } }",
 
 		/* Mouse wheel up on pane. */
-		"bind -n WheelUpPane { if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -e } }",
+		"bind -n WheelUpPane { if -F '#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}' { send -M } { copy-mode -e } }",
 
 		/* Mouse button 2 down on pane. */
 		"bind -n MouseDown2Pane { select-pane -t=; if -F '#{||:#{pane_in_mode},#{mouse_any_flag}}' { send -M } { paste -p } }",
@@ -460,6 +463,7 @@ key_bindings_init(void)
 
 		/* Mouse button 1 down on status line. */
 		"bind -n MouseDown1Status { switch-client -t= }",
+		"bind -n C-MouseDown1Status { swap-window -t@ }",
 
 		/* Mouse wheel down on status line. */
 		"bind -n WheelDownStatus { next-window }",
@@ -480,9 +484,9 @@ key_bindings_init(void)
 		"bind -n M-MouseDown3Pane { display-menu -t= -xM -yM -T '#[align=centre]#{pane_index} (#{pane_id})' " DEFAULT_PANE_MENU " }",
 
 		/* Mouse on scrollbar. */
-		"bind -n MouseDown1ScrollbarUp { copy-mode -u }",
-		"bind -n MouseDown1ScrollbarDown { copy-mode -d }",
-		"bind -n MouseDrag1ScrollbarSlider { copy-mode -S }",
+		"bind -n MouseDown1ScrollbarUp { if -Ft= '#{pane_in_mode}' { send -X page-up } {copy-mode -u } }",
+		"bind -n MouseDown1ScrollbarDown { if -Ft= '#{pane_in_mode}' { send -X page-down } {copy-mode -d } }",
+		"bind -n MouseDrag1ScrollbarSlider { if -Ft= '#{pane_in_mode}' { send -X scroll-to-mouse } { copy-mode -S } }",
 
 		/* Copy mode (emacs) keys. */
 		"bind -Tcopy-mode C-Space { send -X begin-selection }",
@@ -493,6 +497,8 @@ key_bindings_init(void)
 		"bind -Tcopy-mode C-b { send -X cursor-left }",
 		"bind -Tcopy-mode C-g { send -X clear-selection }",
 		"bind -Tcopy-mode C-k { send -X copy-pipe-end-of-line-and-cancel }",
+		"bind -Tcopy-mode C-l { send -X cursor-centre-vertical }",
+		"bind -Tcopy-mode M-l { send -X cursor-centre-horizontal }",
 		"bind -Tcopy-mode C-n { send -X cursor-down }",
 		"bind -Tcopy-mode C-p { send -X cursor-up }",
 		"bind -Tcopy-mode C-r { command-prompt -T search -ip'(search up)' -I'#{pane_search_string}' { send -X search-backward-incremental -- '%%' } }",

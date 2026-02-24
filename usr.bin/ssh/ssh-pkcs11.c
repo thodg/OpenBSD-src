@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-pkcs11.c,v 1.74 2025/10/09 23:25:23 djm Exp $ */
+/* $OpenBSD: ssh-pkcs11.c,v 1.77 2026/02/14 00:18:34 jsg Exp $ */
 /*
  * Copyright (c) 2010 Markus Friedl.  All rights reserved.
  * Copyright (c) 2014 Pedro Martelletto. All rights reserved.
@@ -21,7 +21,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 
-#include <ctype.h>
 #include <string.h>
 #include <dlfcn.h>
 
@@ -927,8 +926,8 @@ pkcs11_fetch_ecdsa_pubkey(struct pkcs11_provider *p, CK_ULONG slotidx,
 		ossl_error("d2i_ASN1_OCTET_STRING failed");
 		goto fail;
 	}
-	attrp = octet->data;
-	if (o2i_ECPublicKey(&ec, &attrp, octet->length) == NULL) {
+	attrp = ASN1_STRING_get0_data(octet);
+	if (o2i_ECPublicKey(&ec, &attrp, ASN1_STRING_length(octet)) == NULL) {
 		ossl_error("o2i_ECPublicKey failed");
 		goto fail;
 	}
@@ -1865,7 +1864,7 @@ pkcs11_register_provider(char *provider_id, char *pin,
 	p = xcalloc(1, sizeof(*p));
 	p->name = xstrdup(provider_id);
 	p->handle = handle;
-	/* setup the pkcs11 callbacks */
+	/* set up the pkcs11 callbacks */
 	if ((rv = (*getfunctionlist)(&f)) != CKR_OK) {
 		error("C_GetFunctionList for provider %s failed: %lu",
 		    provider_id, rv);

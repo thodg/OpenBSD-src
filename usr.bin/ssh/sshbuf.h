@@ -1,4 +1,4 @@
-/*	$OpenBSD: sshbuf.h,v 1.32 2025/09/02 09:41:23 djm Exp $	*/
+/*	$OpenBSD: sshbuf.h,v 1.34 2025/12/29 23:52:09 djm Exp $	*/
 /*
  * Copyright (c) 2011 Damien Miller
  *
@@ -149,6 +149,24 @@ int	sshbuf_consume(struct sshbuf *buf, size_t len);
  */
 int	sshbuf_consume_end(struct sshbuf *buf, size_t len);
 
+/*
+ * Consume data from a parent buffer up to that of a child buffer (i.e.
+ * one created by sshbuf_fromb()).
+ *
+ * Intended to be used in a pattern like:
+ *
+ *     b = sshbuf_fromb(parent);
+ *     sshbuf_get_string(b, &foo, &foostr);
+ *     sshbuf_get_u32(b, &bar);
+ *     sshbuf_consume_upto_child(parent, b);
+ *
+ * After which, both "b" and "parent" will point to the same data.
+ *
+ * "child" must be a direct child of "buf" (i.e. neither an unrelated buffer
+ * nor a grandchild) which has consumed data past that of "buf".
+ */
+int	sshbuf_consume_upto_child(struct sshbuf *buf, const struct sshbuf *child);
+
 /* Extract or deposit some bytes */
 int	sshbuf_get(struct sshbuf *buf, void *v, size_t len);
 int	sshbuf_put(struct sshbuf *buf, const void *v, size_t len);
@@ -230,6 +248,10 @@ int	sshbuf_get_eckey(struct sshbuf *buf, EC_KEY *v);
 int	sshbuf_put_ec(struct sshbuf *buf, const EC_POINT *v, const EC_GROUP *g);
 int	sshbuf_put_eckey(struct sshbuf *buf, const EC_KEY *v);
 int	sshbuf_put_ec_pkey(struct sshbuf *buf, EVP_PKEY *pkey);
+
+/* Functions to extract or store various non-SSH wire encoded values */
+int	sshbuf_get_nulterminated_string(struct sshbuf *buf, size_t maxlen,
+	    char **valp, size_t *lenp);
 
 /* Dump the contents of the buffer in a human-readable format */
 void	sshbuf_dump(const struct sshbuf *buf, FILE *f);

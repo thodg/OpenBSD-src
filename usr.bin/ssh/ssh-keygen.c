@@ -1,4 +1,4 @@
-/* $OpenBSD: ssh-keygen.c,v 1.486 2025/10/09 23:26:47 djm Exp $ */
+/* $OpenBSD: ssh-keygen.c,v 1.489 2026/02/11 17:05:32 dtucker Exp $ */
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1994 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <paths.h>
 #include <pwd.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -34,6 +35,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <locale.h>
+#include <time.h>
 
 #include "xmalloc.h"
 #include "sshkey.h"
@@ -3295,9 +3297,6 @@ main(int argc, char **argv)
 	/* Ensure that fds 0, 1 and 2 are open or directed to /dev/null */
 	sanitise_stdfd();
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
 	log_init(argv[0], SYSLOG_LEVEL_INFO, SYSLOG_FACILITY_USER, 1);
 
 	setlocale(LC_CTYPE, "");
@@ -3640,6 +3639,15 @@ main(int argc, char **argv)
 	if (ca_key_path != NULL) {
 		if (cert_key_id == NULL)
 			fatal("Must specify key id (-I) when certifying");
+		if (cert_principals == NULL) {
+			/*
+			 * Ideally this would be a fatal(), but we need to
+			 * be able to generate such certificates for testing
+			 * even though they will be rejected.
+			 */
+			error("Warning: certificate will contain no "
+			    "principals (-n)");
+		}
 		for (i = 0; i < nopts; i++)
 			add_cert_option(opts[i]);
 		do_ca_sign(pw, ca_key_path, prefer_agent,

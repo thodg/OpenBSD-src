@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd-auth.c,v 1.9 2025/09/15 04:52:12 djm Exp $ */
+/* $OpenBSD: sshd-auth.c,v 1.12 2026/02/11 17:05:32 dtucker Exp $ */
 /*
  * SSH2 implementation:
  * Privilege Separation:
@@ -41,6 +41,7 @@
 #include <netdb.h>
 #include <paths.h>
 #include <pwd.h>
+#include <grp.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -556,10 +557,6 @@ main(int ac, char **av)
 	if (!rexeced_flag)
 		fatal("sshd-auth should not be executed directly");
 
-#ifdef WITH_OPENSSL
-	OpenSSL_add_all_algorithms();
-#endif
-
 	log_init(__progname,
 	    options.log_level == SYSLOG_LEVEL_NOT_SET ?
 	    SYSLOG_LEVEL_INFO : options.log_level,
@@ -708,9 +705,6 @@ main(int ac, char **av)
 	if ((loginmsg = sshbuf_new()) == NULL)
 		fatal("sshbuf_new loginmsg failed");
 	auth_debug_reset();
-
-	/* Enable challenge-response authentication for privilege separation */
-	privsep_challenge_enable();
 
 #ifdef GSSAPI
 	/* Cache supported mechanism OIDs for later use */

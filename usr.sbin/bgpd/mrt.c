@@ -1,4 +1,4 @@
-/*	$OpenBSD: mrt.c,v 1.127 2025/08/21 15:15:25 claudio Exp $ */
+/*	$OpenBSD: mrt.c,v 1.134 2026/02/17 14:06:44 claudio Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Claudio Jeker <claudio@openbsd.org>
@@ -46,7 +46,7 @@ static int	mrt_dump_hdr_se(struct ibuf **, struct peer *, uint16_t,
 		    uint16_t, uint32_t, int);
 static int	mrt_dump_hdr_rde(struct ibuf **, uint16_t type, uint16_t,
 		    uint32_t);
-static int	mrt_open(struct mrt *, time_t);
+static int	mrt_open(struct mrt *);
 
 #define RDEIDX		0
 #define SEIDX		1
@@ -527,8 +527,9 @@ mrt_dump_entry(struct mrt *mrt, struct prefix *p, uint16_t snum,
 	uint16_t	 subtype;
 	uint8_t		 dummy;
 
-	if (p->pt->aid != peer->remote_addr.aid &&
-	    p->pt->aid != AID_INET && p->pt->aid != AID_INET6)
+	if ((peer->remote_addr.aid != AID_UNSPEC &&
+	    p->pt->aid != peer->remote_addr.aid) ||
+	    (p->pt->aid != AID_INET && p->pt->aid != AID_INET6))
 		/* only able to dump pure IPv4/IPv6 */
 		return (0);
 
@@ -619,7 +620,7 @@ mrt_dump_entry_v2_rib(struct rib_entry *re, struct ibuf **nb, struct ibuf **apb,
 	*np = 0;
 	*app = 0;
 
-	TAILQ_FOREACH(p, &re->prefix_h, entry.list.rib) {
+	TAILQ_FOREACH(p, &re->prefix_h, rib_l) {
 		struct nexthop		*nexthop;
 		struct bgpd_addr	*nh;
 
@@ -709,7 +710,12 @@ mrt_dump_entry_v2(struct mrt *mrt, struct rib_entry *re, uint32_t snum)
 		 */
 		subtype = MRT_DUMP_V2_RIB_GENERIC;
 		apsubtype = MRT_DUMP_V2_RIB_GENERIC_ADDPATH;
-		aid2afi(re->prefix->aid, &afi, &safi);
+		if (aid2afi(re->prefix->aid, &afi, &safi) == -1) {
+			log_warnx("%s: bad AID", __func__);
+			ibuf_free(pbuf);
+			return (-1);
+		}
+
 
 		/* first add 3-bytes AFI/SAFI */
 		if (ibuf_add_n16(pbuf, afi) == -1)
@@ -911,7 +917,7 @@ mrt_dump_upcall(struct rib_entry *re, void *ptr)
 	 * dumps the table so we do the same. If only the active route should
 	 * be dumped p should be set to p = pt->active.
 	 */
-	TAILQ_FOREACH(p, &re->prefix_h, entry.list.rib) {
+	TAILQ_FOREACH(p, &re->prefix_h, rib_l) {
 		if (mrtbuf->type == MRT_TABLE_DUMP)
 			mrt_dump_entry(mrtbuf, p, mrtbuf->seqnum++,
 			    prefix_peer(p));
@@ -1120,11 +1126,13 @@ mrt_init(struct imsgbuf *rde, struct imsgbuf *se)
 }
 
 int
-mrt_open(struct mrt *mrt, time_t now)
+mrt_open(struct mrt *mrt)
 {
 	enum imsg_type	type;
+	time_t		now;
 	int		fd;
 
+	now = time(NULL);
 	if (strftime(MRT2MC(mrt)->file, sizeof(MRT2MC(mrt)->file),
 	    MRT2MC(mrt)->name, localtime(&now)) == 0) {
 		log_warnx("mrt_open: strftime conversion failed");
@@ -1150,25 +1158,28 @@ mrt_open(struct mrt *mrt, time_t now)
 	return (1);
 }
 
-time_t
-mrt_timeout(struct mrt_head *mrt)
+monotime_t
+mrt_timeout(struct mrt_head *mrt, monotime_t timeout)
 {
 	struct mrt	*m;
-	time_t		 now;
-	time_t		 timeout = -1;
+	monotime_t	 now, nextaction;
 
-	now = time(NULL);
+	now = getmonotime();
 	LIST_FOREACH(m, mrt, entry) {
 		if (m->state == MRT_STATE_RUNNING &&
 		    MRT2MC(m)->ReopenTimerInterval != 0) {
-			if (MRT2MC(m)->ReopenTimer <= now) {
-				mrt_open(m, now);
-				MRT2MC(m)->ReopenTimer =
-				    now + MRT2MC(m)->ReopenTimerInterval;
+			if (timer_nextisdue(&MRT2MC(m)->timer, now) !=
+			    NULL) {
+				mrt_open(m);
+				timer_set(&MRT2MC(m)->timer,
+				    Timer_Mrt_Reopen,
+				    MRT2MC(m)->ReopenTimerInterval);
 			}
-			if (timeout == -1 ||
-			    MRT2MC(m)->ReopenTimer - now < timeout)
-				timeout = MRT2MC(m)->ReopenTimer - now;
+			nextaction = timer_nextduein(&MRT2MC(m)->timer);
+			if (monotime_valid(nextaction)) {
+				if (monotime_cmp(nextaction, timeout) < 0)
+					timeout = nextaction;
+			}
 		}
 	}
 	return (timeout);
@@ -1178,17 +1189,16 @@ void
 mrt_reconfigure(struct mrt_head *mrt)
 {
 	struct mrt	*m, *xm;
-	time_t		 now;
 
-	now = time(NULL);
 	LIST_FOREACH_SAFE(m, mrt, entry, xm) {
 		if (m->state == MRT_STATE_OPEN ||
 		    m->state == MRT_STATE_REOPEN) {
-			if (mrt_open(m, now) == -1)
+			if (mrt_open(m) == -1)
 				continue;
 			if (MRT2MC(m)->ReopenTimerInterval != 0)
-				MRT2MC(m)->ReopenTimer =
-				    now + MRT2MC(m)->ReopenTimerInterval;
+				timer_set(&MRT2MC(m)->timer,
+				    Timer_Mrt_Reopen,
+				    MRT2MC(m)->ReopenTimerInterval);
 			m->state = MRT_STATE_RUNNING;
 		}
 		if (m->state == MRT_STATE_REMOVE) {
@@ -1196,6 +1206,7 @@ mrt_reconfigure(struct mrt_head *mrt)
 			    IMSG_MRT_CLOSE, 0, 0, -1, m, sizeof(struct mrt)) ==
 			    -1)
 				log_warn("mrt_reconfigure");
+			timer_remove_all(&MRT2MC(m)->timer);
 			LIST_REMOVE(m, entry);
 			free(m);
 			continue;
@@ -1207,19 +1218,17 @@ void
 mrt_handler(struct mrt_head *mrt)
 {
 	struct mrt	*m;
-	time_t		 now;
 
-	now = time(NULL);
 	LIST_FOREACH(m, mrt, entry) {
 		if (m->state == MRT_STATE_RUNNING &&
 		    (MRT2MC(m)->ReopenTimerInterval != 0 ||
 		     m->type == MRT_TABLE_DUMP ||
 		     m->type == MRT_TABLE_DUMP_MP ||
 		     m->type == MRT_TABLE_DUMP_V2)) {
-			if (mrt_open(m, now) == -1)
+			if (mrt_open(m) == -1)
 				continue;
-			MRT2MC(m)->ReopenTimer =
-			    now + MRT2MC(m)->ReopenTimerInterval;
+			timer_set(&MRT2MC(m)->timer, Timer_Mrt_Reopen,
+			    MRT2MC(m)->ReopenTimerInterval);
 		}
 	}
 }
@@ -1254,6 +1263,7 @@ mrt_mergeconfig(struct mrt_head *xconf, struct mrt_head *nconf)
 				fatal("mrt_mergeconfig");
 			memcpy(xm, m, sizeof(struct mrt_config));
 			xm->state = MRT_STATE_OPEN;
+			TAILQ_INIT(&MRT2MC(xm)->timer);
 			LIST_INSERT_HEAD(xconf, xm, entry);
 		} else {
 			/* MERGE */
@@ -1274,6 +1284,7 @@ mrt_mergeconfig(struct mrt_head *xconf, struct mrt_head *nconf)
 
 	/* free config */
 	while ((m = LIST_FIRST(nconf)) != NULL) {
+		timer_remove_all(&MRT2MC(m)->timer);
 		LIST_REMOVE(m, entry);
 		free(m);
 	}
