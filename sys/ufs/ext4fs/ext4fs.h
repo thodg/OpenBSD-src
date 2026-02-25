@@ -33,6 +33,7 @@ struct vfsconf;
 #define EXT4FS_LOG_MIN_BLOCK_SIZE	10
 #define EXT4FS_MAGIC			0xEF53
 #define EXT4FS_MOUNT_OPTS_MAX		64
+#define EXT4FS_MAXNAMLEN		255
 #define EXT4FS_SUPER_BLOCK_OFFSET	1024
 #define EXT4FS_SUPER_BLOCK_SIZE		1024
 #define EXT4FS_VOLUME_NAME_MAX		16
@@ -44,6 +45,10 @@ struct vfsconf;
 	  EXT4FS_INDIRECT_ADDR_IN_INODE) * sizeof(u_int32_t))
 
 #define	EXT4FS_NINDIR(fs)	((fs)->m_block_size / sizeof(u_int32_t))
+
+#define EXT4FS_LBLKNO(fs, offset)  ((offset) >> (fs)->m_block_size_shift)
+#define EXT4FS_BLKOFF(fs, offset)  ((offset) & ((fs)->m_block_size - 1))
+#define EXT4FS_FSBTODB(fs, b)      ((b) << (fs)->m_fs_block_to_disk_block)
 
 #define EXT4FS_CHECKSUM_TYPE_NONE	0x0000
 #define EXT4FS_CHECKSUM_TYPE_CRC32C	0x0001
@@ -500,6 +505,25 @@ struct ext4fs_dinode_256 {
   struct ext4fs_dinode dinode;
   u_int8_t extended_attributes[256 - sizeof(struct ext4fs_dinode)];
 };
+
+/* Directory entry file types */
+#define EXT4FS_FT_UNKNOWN	0
+#define EXT4FS_FT_REG_FILE	1
+#define EXT4FS_FT_DIR		2
+#define EXT4FS_FT_CHRDEV	3
+#define EXT4FS_FT_BLKDEV	4
+#define EXT4FS_FT_FIFO		5
+#define EXT4FS_FT_SOCK		6
+#define EXT4FS_FT_SYMLINK	7
+#define EXT4FS_FT_MAX		8
+
+struct ext4fs_directory {
+	u_int32_t e4d_ino;
+	u_int16_t e4d_reclen;
+	u_int8_t  e4d_namlen;
+	u_int8_t  e4d_type;
+	char      e4d_name[EXT4FS_MAXNAMLEN];
+} __attribute__((packed));
 
 struct ext4fs_feature {
 	int		f_mask;

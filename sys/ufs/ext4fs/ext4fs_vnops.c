@@ -13,18 +13,18 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
-//#include <sys/namei.h>
+#include <sys/namei.h>
 //#include <sys/resourcevar.h>
 //#include <sys/kernel.h>
 //#include <sys/file.h>
 //#include <sys/stat.h>
-//#include <sys/buf.h>
-//#include <sys/proc.h>
+#include <sys/buf.h>
+#include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
 //#include <sys/malloc.h>
 #include <sys/pool.h>
-//#include <sys/dirent.h>
+#include <sys/dirent.h>
 //#include <sys/fcntl.h>
 //#include <sys/lockf.h>
 //#include <sys/uio.h>
@@ -41,7 +41,116 @@
 
 #include <ufs/ext4fs/ext4fs.h>
 
-/* Stub implementations - all return EOPNOTSUPP for now */
+/* Convert ext4 directory entry file type to BSD dirent type */
+static const u_int8_t ext4fs_type_to_dt[EXT4FS_FT_MAX] = {
+	[EXT4FS_FT_UNKNOWN]	= DT_UNKNOWN,
+	[EXT4FS_FT_REG_FILE]	= DT_REG,
+	[EXT4FS_FT_DIR]		= DT_DIR,
+	[EXT4FS_FT_CHRDEV]	= DT_CHR,
+	[EXT4FS_FT_BLKDEV]	= DT_BLK,
+	[EXT4FS_FT_FIFO]	= DT_FIFO,
+	[EXT4FS_FT_SOCK]	= DT_SOCK,
+	[EXT4FS_FT_SYMLINK]	= DT_LNK,
+};
+
+/*
+ * Look up the physical block number for a given logical block number
+ * using the extent tree in the inode.
+ * Returns 0 on success with the physical block stored in *pblk.
+ */
+static int
+ext4fs_extent_pblk(struct inode *ip, u_int64_t lbn, u_int64_t *pblk)
+{
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ext4fs_extent_header *eh;
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct buf *bp = NULL;
+	u_int16_t entries, depth;
+	int error, found, i;
+
+	/* Start with the extent header in the inode */
+	eh = &din->i_extent_header;
+	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC)
+		return (EIO);
+
+	depth = letoh16(eh->eh_depth);
+	entries = letoh16(eh->eh_entries);
+
+	/* Walk down the extent tree */
+	while (depth > 0) {
+		struct ext4fs_extent_idx *idx;
+		u_int64_t child_blk;
+
+		/* Index node: find the child that covers lbn */
+		idx = (struct ext4fs_extent_idx *)(eh + 1);
+		found = -1;
+		for (i = 0; i < (int)entries; i++) {
+			if (letoh32(idx[i].ei_block) <= lbn)
+				found = i;
+			else
+				break;
+		}
+		if (found < 0) {
+			if (bp != NULL)
+				brelse(bp);
+			return (EIO);
+		}
+
+		/* Read the child node block */
+		child_blk = letoh32(idx[found].ei_leaf_lo);
+		child_blk |= (u_int64_t)letoh16(idx[found].ei_leaf_hi) << 32;
+
+		if (bp != NULL)
+			brelse(bp);
+
+		error = bread(ip->i_devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, child_blk),
+		    fs->m_block_size, &bp);
+		if (error) {
+			if (bp != NULL)
+				brelse(bp);
+			return (error);
+		}
+
+		eh = (struct ext4fs_extent_header *)bp->b_data;
+		if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
+			brelse(bp);
+			return (EIO);
+		}
+		depth = letoh16(eh->eh_depth);
+		entries = letoh16(eh->eh_entries);
+	}
+
+	/* Leaf node: search for the extent containing lbn */
+	{
+		struct ext4fs_extent *ext;
+		ext = (struct ext4fs_extent *)(eh + 1);
+		for (i = 0; i < (int)entries; i++) {
+			u_int32_t e_block = letoh32(ext[i].e_block);
+			u_int16_t e_len = letoh16(ext[i].e_len);
+
+			/* High bit of e_len marks uninitialized extents */
+			if (e_len > 32768)
+				e_len -= 32768;
+
+			if (lbn >= e_block && lbn < e_block + e_len) {
+				u_int64_t start = letoh32(ext[i].e_start_lo);
+				start |=
+				    (u_int64_t)letoh16(ext[i].e_start_hi) << 32;
+				*pblk = start + (lbn - e_block);
+				if (bp != NULL)
+					brelse(bp);
+				return (0);
+			}
+		}
+	}
+
+	if (bp != NULL)
+		brelse(bp);
+	return (EIO);
+}
+
+/* Stub implementations - remaining ops return EOPNOTSUPP */
 
 int ext4fs_lookup(void *);
 int ext4fs_create(void *);
@@ -110,9 +219,152 @@ const struct vops ext4fs_vops = {
 int
 ext4fs_lookup(void *v)
 {
-	(void)v;
-	printf("ext4fs_lookup: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_lookup_args *ap = v;
+	struct vnode *vdp = ap->a_dvp;
+	struct vnode **vpp = ap->a_vpp;
+	struct componentname *cnp = ap->a_cnp;
+	struct inode *dp = VTOI(vdp);
+	struct m_ext4fs *fs = dp->i_e4fs;
+	struct ext4fs_dinode *din = &dp->i_e4din->dinode;
+	struct ext4fs_directory *ep;
+	struct vnode *tdp;
+	struct buf *bp;
+	int flags = cnp->cn_flags;
+	int nameiop = cnp->cn_nameiop;
+	int lockparent = flags & LOCKPARENT;
+	ino_t foundino = 0;
+	off_t off, filesz;
+	u_int64_t lbn, pblk, blkoff;
+	u_int16_t reclen;
+	int error;
+
+	*vpp = NULL;
+
+	/* Check accessibility of directory */
+	if ((error = VOP_ACCESS(vdp, VEXEC, cnp->cn_cred, cnp->cn_proc)) != 0)
+		return (error);
+
+	if ((flags & ISLASTCN) && (vdp->v_mount->mnt_flag & MNT_RDONLY) &&
+	    (nameiop == DELETE || nameiop == RENAME))
+		return (EROFS);
+
+	/* Check the name cache */
+	if ((error = cache_lookup(vdp, vpp, cnp)) >= 0)
+		return (error);
+
+	/* Search directory for the name */
+	filesz = (off_t)letoh32(din->i_size_lo) |
+	    ((off_t)letoh32(din->i_size_hi) << 32);
+
+	for (off = 0; off < filesz; ) {
+		lbn = EXT4FS_LBLKNO(fs, off);
+
+		error = ext4fs_extent_pblk(dp, lbn, &pblk);
+		if (error)
+			return (error);
+
+		error = bread(dp->i_devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+		    fs->m_block_size, &bp);
+		if (error) {
+			brelse(bp);
+			return (error);
+		}
+
+		blkoff = EXT4FS_BLKOFF(fs, off);
+
+		while (blkoff < fs->m_block_size && off < filesz) {
+			ep = (struct ext4fs_directory *)
+			    ((char *)bp->b_data + blkoff);
+			reclen = letoh16(ep->e4d_reclen);
+
+			if (reclen == 0) {
+				brelse(bp);
+				return (EIO);
+			}
+
+			if (letoh32(ep->e4d_ino) != 0 &&
+			    ep->e4d_namlen == cnp->cn_namelen &&
+			    memcmp(cnp->cn_nameptr, ep->e4d_name,
+			    cnp->cn_namelen) == 0) {
+				foundino = letoh32(ep->e4d_ino);
+				dp->i_ino = foundino;
+				dp->i_reclen = reclen;
+				dp->i_offset = off;
+				brelse(bp);
+				goto found;
+			}
+
+			off += reclen;
+			blkoff += reclen;
+		}
+
+		brelse(bp);
+	}
+
+	/* Not found */
+	if ((nameiop == CREATE || nameiop == RENAME) && (flags & ISLASTCN)) {
+		if (vdp->v_mount->mnt_flag & MNT_RDONLY)
+			return (EROFS);
+		if ((error = VOP_ACCESS(vdp, VWRITE, cnp->cn_cred,
+		    cnp->cn_proc)) != 0)
+			return (error);
+		cnp->cn_flags |= SAVENAME;
+		if (!lockparent) {
+			VOP_UNLOCK(vdp);
+			cnp->cn_flags |= PDIRUNLOCK;
+		}
+		return (EJUSTRETURN);
+	}
+
+	if ((cnp->cn_flags & MAKEENTRY) && nameiop != CREATE)
+		cache_enter(vdp, *vpp, cnp);
+	return (ENOENT);
+
+found:
+	/*
+	 * Found the entry. Handle ".", "..", and normal names
+	 * following the same locking protocol as ext2fs.
+	 */
+
+	if (flags & ISDOTDOT) {
+		/* ".." - unlock parent, get child, optionally relock */
+		VOP_UNLOCK(vdp);
+		cnp->cn_flags |= PDIRUNLOCK;
+		error = VFS_VGET(vdp->v_mount, foundino, &tdp);
+		if (error) {
+			if (vn_lock(vdp, LK_EXCLUSIVE | LK_RETRY) == 0)
+				cnp->cn_flags &= ~PDIRUNLOCK;
+			return (error);
+		}
+		if (lockparent && (flags & ISLASTCN)) {
+			if ((error = vn_lock(vdp, LK_EXCLUSIVE)) != 0) {
+				vput(tdp);
+				return (error);
+			}
+			cnp->cn_flags &= ~PDIRUNLOCK;
+		}
+		*vpp = tdp;
+	} else if (dp->i_number == foundino) {
+		/* "." - return same vnode */
+		vref(vdp);
+		*vpp = vdp;
+	} else {
+		/* Normal entry */
+		error = VFS_VGET(vdp->v_mount, foundino, &tdp);
+		if (error)
+			return (error);
+		if (!lockparent || !(flags & ISLASTCN)) {
+			VOP_UNLOCK(vdp);
+			cnp->cn_flags |= PDIRUNLOCK;
+		}
+		*vpp = tdp;
+	}
+
+	/* Cache the result */
+	if (cnp->cn_flags & MAKEENTRY)
+		cache_enter(vdp, *vpp, cnp);
+	return (0);
 }
 
 int
@@ -135,16 +387,27 @@ int
 ext4fs_open(void *v)
 {
 	(void)v;
-	printf("ext4fs_open: not implemented\n");
-	return (EOPNOTSUPP);
+	return (0);
 }
 
 int
 ext4fs_access(void *v)
 {
-	(void)v;
-	printf("ext4fs_access: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_access_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	mode_t mode;
+	uid_t uid;
+	gid_t gid;
+
+	mode = letoh16(din->i_mode);
+	uid = letoh16(din->i_uid_lo) |
+	    ((uid_t)letoh16(din->i_uid_hi) << 16);
+	gid = letoh16(din->i_gid_lo) |
+	    ((gid_t)letoh16(din->i_gid_hi) << 16);
+
+	return (vaccess(vp->v_type, mode, uid, gid, ap->a_mode, ap->a_cred));
 }
 
 int
@@ -285,9 +548,95 @@ ext4fs_symlink(void *v)
 int
 ext4fs_readdir(void *v)
 {
-	(void)v;
-	printf("ext4fs_readdir: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_readdir_args *ap = v;
+	struct uio *uio = ap->a_uio;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ext4fs_directory *ep;
+	struct dirent dstd;
+	struct buf *bp;
+	off_t off, filesz;
+	u_int64_t lbn, pblk, blkoff;
+	u_int16_t reclen;
+	int error = 0;
+
+	if (vp->v_type != VDIR)
+		return (ENOTDIR);
+
+	filesz = (off_t)letoh32(din->i_size_lo) |
+	    ((off_t)letoh32(din->i_size_hi) << 32);
+	off = uio->uio_offset;
+
+	while (off < filesz && uio->uio_resid > 0) {
+		lbn = EXT4FS_LBLKNO(fs, off);
+
+		error = ext4fs_extent_pblk(ip, lbn, &pblk);
+		if (error)
+			break;
+
+		error = bread(ip->i_devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+		    fs->m_block_size, &bp);
+		if (error) {
+			brelse(bp);
+			break;
+		}
+
+		blkoff = EXT4FS_BLKOFF(fs, off);
+
+		while (blkoff < fs->m_block_size && off < filesz) {
+			ep = (struct ext4fs_directory *)
+			    ((char *)bp->b_data + blkoff);
+			reclen = letoh16(ep->e4d_reclen);
+
+			if (reclen == 0) {
+				error = EIO;
+				brelse(bp);
+				goto done;
+			}
+
+			if (letoh32(ep->e4d_ino) != 0) {
+				memset(&dstd, 0, sizeof(dstd));
+				dstd.d_fileno = letoh32(ep->e4d_ino);
+				dstd.d_namlen = ep->e4d_namlen;
+
+				if (ep->e4d_type < EXT4FS_FT_MAX)
+					dstd.d_type =
+					    ext4fs_type_to_dt[ep->e4d_type];
+				else
+					dstd.d_type = DT_UNKNOWN;
+
+				memcpy(dstd.d_name, ep->e4d_name,
+				    dstd.d_namlen);
+				dstd.d_name[dstd.d_namlen] = '\0';
+				dstd.d_reclen = DIRENT_SIZE(&dstd);
+				dstd.d_off = off + reclen;
+
+				if (dstd.d_reclen > uio->uio_resid) {
+					brelse(bp);
+					goto done;
+				}
+
+				error = uiomove(&dstd, dstd.d_reclen, uio);
+				if (error) {
+					brelse(bp);
+					goto done;
+				}
+			}
+
+			off += reclen;
+			blkoff += reclen;
+		}
+
+		brelse(bp);
+	}
+
+done:
+	uio->uio_offset = off;
+	*ap->a_eofflag = (off >= filesz);
+	return (error);
 }
 
 int
@@ -312,20 +661,6 @@ ext4fs_inactive(void *v)
 	if (prtactive && vp->v_usecount != 0)
 		vprint("ext4fs_inactive: pushing active", vp);
 #endif
-
-	printf("ext4fs_inactive: entry, vp=%p, ino=%llu, refcnt=%d\n",
-	    vp, (unsigned long long)ip->i_number, vp->v_usecount);
-
-	/*
-	 * DIAGNOSTIC: vop_inactive should be called with v_usecount == 1
-	 * (the last reference). If it's 0, something went wrong with
-	 * reference counting.
-	 */
-	if (vp->v_usecount == 0) {
-		printf("ext4fs_inactive: WARNING - vp->v_usecount is 0 for ino=%llu\n",
-		    (unsigned long long)ip->i_number);
-		printf("ext4fs_inactive: This indicates a reference counting bug!\n");
-	}
 
 	/*
 	 * Ignore inodes related to stale file handles.
@@ -383,13 +718,9 @@ out:
 	 * If we are done with the inode, reclaim it
 	 * so that it can be reused immediately.
 	 */
-	if (ip->i_e4din == NULL || letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
-		printf("ext4fs_inactive: vrecycle inode %llu\n",
-		    (unsigned long long)ip->i_number);
+	if (ip->i_e4din == NULL || letoh32(ip->i_e4din->dinode.i_dtime) != 0)
 		vrecycle(vp, ap->a_p);
-	}
 
-	printf("ext4fs_inactive: exit, ino=%llu\n", (unsigned long long)ip->i_number);
 	return (error);
 }
 
@@ -401,13 +732,8 @@ ext4fs_reclaim(void *v)
 	struct inode *ip = VTOI(vp);
 	int error;
 
-	printf("ext4fs_reclaim: entry, vp=%p, ino=%llu, refcnt=%d\n",
-	    vp, (unsigned long long)ip->i_number, vp->v_usecount);
-
-	if ((error = ufs_reclaim(vp)) != 0) {
-		printf("ext4fs_reclaim: ufs_reclaim failed with error %d\n", error);
+	if ((error = ufs_reclaim(vp)) != 0)
 		return (error);
-	}
 
 	if (ip->i_e4din != NULL)
 		pool_put(&ext4fs_dinode_pool, ip->i_e4din);
@@ -416,7 +742,6 @@ ext4fs_reclaim(void *v)
 
 	vp->v_data = NULL;
 
-	printf("ext4fs_reclaim: exit, ino=%llu\n", (unsigned long long)ip->i_number);
 	return (0);
 }
 
