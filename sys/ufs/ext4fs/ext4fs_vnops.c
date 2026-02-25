@@ -471,9 +471,70 @@ ext4fs_setattr(void *v)
 int
 ext4fs_read(void *v)
 {
-	(void)v;
-	printf("ext4fs_read: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_read_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct uio *uio = ap->a_uio;
+	struct buf *bp;
+	off_t filesz, bytesinfile;
+	u_int64_t lbn, pblk;
+	int error, blkoffset, xfersize, size;
+
+	if (vp->v_type == VDIR)
+		return (EISDIR);
+	if (uio->uio_offset < 0)
+		return (EINVAL);
+	if (uio->uio_resid == 0)
+		return (0);
+
+	filesz = (off_t)letoh32(din->i_size_lo) |
+	    ((off_t)letoh32(din->i_size_hi) << 32);
+
+	for (error = 0; uio->uio_resid > 0; ) {
+		bytesinfile = filesz - uio->uio_offset;
+		if (bytesinfile <= 0)
+			break;
+
+		lbn = EXT4FS_LBLKNO(fs, uio->uio_offset);
+		blkoffset = EXT4FS_BLKOFF(fs, uio->uio_offset);
+		size = fs->m_block_size;
+		xfersize = size - blkoffset;
+		xfersize = MIN(xfersize, uio->uio_resid);
+		xfersize = MIN(xfersize, bytesinfile);
+
+		error = ext4fs_extent_pblk(ip, lbn, &pblk);
+		if (error)
+			break;
+
+		error = bread(ip->i_devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+		    size, &bp);
+		if (error) {
+			brelse(bp);
+			break;
+		}
+
+		size -= bp->b_resid;
+		if (size < xfersize) {
+			if (size == 0) {
+				brelse(bp);
+				break;
+			}
+			xfersize = size;
+		}
+
+		error = uiomove((char *)bp->b_data + blkoffset, xfersize, uio);
+		brelse(bp);
+		if (error)
+			break;
+	}
+
+	if (!(vp->v_mount->mnt_flag & MNT_NOATIME))
+		ip->i_flag |= IN_ACCESS;
+
+	return (error);
 }
 
 int
