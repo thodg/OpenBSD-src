@@ -703,9 +703,23 @@ done:
 int
 ext4fs_readlink(void *v)
 {
-	(void)v;
-	printf("ext4fs_readlink: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_readlink_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	u_int64_t filesz;
+
+	filesz = (u_int64_t)letoh32(din->i_size_lo) |
+	    ((u_int64_t)letoh32(din->i_size_hi) << 32);
+
+	/* Fast symlink: target stored inline in i_block[] area */
+	if (filesz <= EXT4FS_SYMLINK_LEN_MAX &&
+	    !(letoh32(din->i_flags) & EXTFS_INODE_FLAG_EXTENTS)) {
+		return (uiomove((char *)din->i_block, filesz, ap->a_uio));
+	}
+
+	/* Slow symlink: target stored in data blocks */
+	return (VOP_READ(vp, ap->a_uio, 0, ap->a_cred));
 }
 
 int
