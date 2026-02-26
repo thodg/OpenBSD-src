@@ -59,7 +59,8 @@ static const u_int8_t ext4fs_type_to_dt[EXT4FS_FT_MAX] = {
  * Returns 0 on success with the physical block stored in *pblk.
  */
 static int
-ext4fs_extent_pblk(struct inode *ip, u_int64_t lbn, u_int64_t *pblk)
+ext4fs_extent_pblk(struct inode *ip, u_int64_t lbn, u_int64_t *pblk,
+    u_int64_t *ncontig)
 {
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct ext4fs_extent_header *eh;
@@ -138,6 +139,8 @@ ext4fs_extent_pblk(struct inode *ip, u_int64_t lbn, u_int64_t *pblk)
 				start |=
 				    (u_int64_t)letoh16(ext[i].e_start_hi) << 32;
 				*pblk = start + (lbn - e_block);
+				if (ncontig != NULL)
+					*ncontig = e_len - (lbn - e_block);
 				if (bp != NULL)
 					brelse(bp);
 				return (0);
@@ -259,7 +262,7 @@ ext4fs_lookup(void *v)
 	for (off = 0; off < filesz; ) {
 		lbn = EXT4FS_LBLKNO(fs, off);
 
-		error = ext4fs_extent_pblk(dp, lbn, &pblk);
+		error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
 		if (error)
 			return (error);
 
@@ -479,7 +482,7 @@ ext4fs_read(void *v)
 	struct uio *uio = ap->a_uio;
 	struct buf *bp;
 	off_t filesz, bytesinfile;
-	u_int64_t lbn, pblk;
+	u_int64_t lbn, pblk, ncontig;
 	int error, blkoffset, xfersize, size;
 
 	if (vp->v_type == VDIR)
@@ -499,14 +502,19 @@ ext4fs_read(void *v)
 
 		lbn = EXT4FS_LBLKNO(fs, uio->uio_offset);
 		blkoffset = EXT4FS_BLKOFF(fs, uio->uio_offset);
-		size = fs->m_block_size;
+
+		error = ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig);
+		if (error)
+			break;
+
+		/* Read up to ncontig blocks, capped at MAXPHYS */
+		size = ncontig * fs->m_block_size;
+		if (size > MAXPHYS)
+			size = MAXPHYS;
+
 		xfersize = size - blkoffset;
 		xfersize = MIN(xfersize, uio->uio_resid);
 		xfersize = MIN(xfersize, bytesinfile);
-
-		error = ext4fs_extent_pblk(ip, lbn, &pblk);
-		if (error)
-			break;
 
 		error = bread(ip->i_devvp,
 		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
@@ -633,7 +641,7 @@ ext4fs_readdir(void *v)
 	while (off < filesz && uio->uio_resid > 0) {
 		lbn = EXT4FS_LBLKNO(fs, off);
 
-		error = ext4fs_extent_pblk(ip, lbn, &pblk);
+		error = ext4fs_extent_pblk(ip, lbn, &pblk, NULL);
 		if (error)
 			break;
 
