@@ -1,16 +1,17 @@
-/* ext4fs_crc32c.c
- * CRC32C (Castagnoli) implementation for ext4fs
+/*
+ * Copyright (c) 2025 kmx.io.
  *
- * Copyright 2025 kmx.io <contact@kmx.io>
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
  *
- * Permission is hereby granted to use this software granted the above
- * copyright notice and this permission paragraph are included in all
- * copies and substantial portions of this software.
- *
- * THIS SOFTWARE IS PROVIDED "AS-IS" WITHOUT ANY GUARANTEE OF
- * PURPOSE AND PERFORMANCE. IN NO EVENT WHATSOEVER SHALL THE
- * AUTHOR BE CONSIDERED LIABLE FOR THE USE AND PERFORMANCE OF
- * THIS SOFTWARE.
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <sys/param.h>

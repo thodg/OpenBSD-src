@@ -1,14 +1,34 @@
-/* ext4fs
- * Copyright 2025 kmx.io <contact@kmx.io>
+/*
+ * Copyright (c) 2025 kmx.io.
+ * Copyright (c) 1997 Manuel Bouyer.
+ * Copyright (c) 1989, 1991, 1993, 1994
+ *	The Regents of the University of California.  All rights reserved.
  *
- * Permission is hereby granted to use this software granted the above
- * copyright notice and this permission paragraph are included in all
- * copies and substantial portions of this software.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED "AS-IS" WITHOUT ANY GUARANTEE OF
- * PURPOSE AND PERFORMANCE. IN NO EVENT WHATSOEVER SHALL THE
- * AUTHOR BE CONSIDERED LIABLE FOR THE USE AND PERFORMANCE OF
- * THIS SOFTWARE.
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * Modified for ext4fs by kmx.io.
  */
 #include <sys/param.h>
 #include <sys/systm.h>
@@ -377,11 +397,6 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		return (EINVAL);      /* XXX needs translation */
 	}
 
-	if (!ronly && (tmp & EXT4FS_FEATURE_RO_COMPAT_SUPPORTED)) {
-		printf("ext4fs: only read-only support right now\n");
-		return (EROFS);      /* XXX needs translation */
-	}
-
 	if (tmp & EXT4FS_FEATURE_INCOMPAT_RECOVER) {
 		printf("ext4fs: your file system says it needs"
 		       " recovery\n");
@@ -601,16 +616,66 @@ ext4fs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
 	return (0);
 }
 
-int
-ext4fs_sync(struct mount *mp, int waitfor, int stall, struct ucred *cred, struct proc *p)
+static int
+ext4fs_sync_vnode(struct vnode *vp, void *arg)
 {
-	(void)mp;
-	(void)waitfor;
-	(void)stall;
-	(void)cred;
-	(void)p;
-	printf("ext4fs_sync: not implemented\n");
-	return (EOPNOTSUPP);
+	struct ext4fs_sync_args *esa = arg;
+	struct inode *ip;
+	int error, s, skip;
+
+	if (vp->v_type == VNON)
+		return (0);
+
+	ip = VTOI(vp);
+	if (ip == NULL || ip->i_e4din == NULL)
+		return (0);
+
+	s = splbio();
+	skip = (ip->i_flag &
+	    (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE)) == 0 &&
+	    LIST_EMPTY(&vp->v_dirtyblkhd);
+	splx(s);
+
+	if (skip)
+		return (0);
+
+	if (vget(vp, LK_EXCLUSIVE | LK_NOWAIT))
+		return (0);
+
+	if ((error = VOP_FSYNC(vp, esa->cred, esa->waitfor, esa->p)) != 0)
+		esa->allerror = error;
+
+	vput(vp);
+	return (0);
+}
+
+int
+ext4fs_sync(struct mount *mp, int waitfor, int stall,
+    struct ucred *cred, struct proc *p)
+{
+	struct ufsmount *ump = VFSTOUFS(mp);
+	struct m_ext4fs *fs = ump->um_e4fs;
+	struct ext4fs_sync_args esa;
+	int error;
+
+	if (fs->m_read_only)
+		return (0);
+
+	esa.p = p;
+	esa.cred = cred;
+	esa.allerror = 0;
+	esa.waitfor = waitfor;
+
+	vfs_mount_foreach_vnode(mp, ext4fs_sync_vnode, &esa);
+
+	if (waitfor != MNT_LAZY) {
+		vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
+		if ((error = VOP_FSYNC(ump->um_devvp, cred, waitfor, p)))
+			esa.allerror = error;
+		VOP_UNLOCK(ump->um_devvp);
+	}
+
+	return (esa.allerror);
 }
 
 int

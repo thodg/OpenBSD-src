@@ -1,37 +1,58 @@
-/* ext4fs_vnops.c
- * Copyright 2025 kmx.io <contact@kmx.io>
+/*
+ * Copyright (c) 2025 kmx.io.
+ * Copyright (c) 1997 Manuel Bouyer.
+ * Copyright (c) 1982, 1986, 1989, 1993
+ *	The Regents of the University of California.  All rights reserved.
+ * (c) UNIX System Laboratories, Inc.
+ * All or some portions of this file are derived from material licensed
+ * to the University of California by American Telephone and Telegraph
+ * Co. or Unix System Laboratories, Inc. and are reproduced herein with
+ * the permission of UNIX System Laboratories, Inc.
  *
- * Permission is hereby granted to use this software granted the above
- * copyright notice and this permission paragraph are included in all
- * copies and substantial portions of this software.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED "AS-IS" WITHOUT ANY GUARANTEE OF
- * PURPOSE AND PERFORMANCE. IN NO EVENT WHATSOEVER SHALL THE
- * AUTHOR BE CONSIDERED LIABLE FOR THE USE AND PERFORMANCE OF
- * THIS SOFTWARE.
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * Modified for ext4fs by kmx.io.
  */
 
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/namei.h>
-//#include <sys/resourcevar.h>
-//#include <sys/kernel.h>
-//#include <sys/file.h>
-//#include <sys/stat.h>
+#include <sys/kernel.h>
+#include <sys/stat.h>
 #include <sys/buf.h>
 #include <sys/proc.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
-//#include <sys/malloc.h>
 #include <sys/pool.h>
 #include <sys/dirent.h>
-//#include <sys/fcntl.h>
-//#include <sys/lockf.h>
-//#include <sys/uio.h>
-//#include <sys/unistd.h>
-
-//#include <miscfs/specfs/specdev.h>
-//#include <miscfs/fifofs/fifo.h>
+#include <sys/fcntl.h>
+#include <sys/lockf.h>
+#include <sys/specdev.h>
+#include <sys/unistd.h>
+#include <sys/resourcevar.h>
+#include <sys/signalvar.h>
 
 #include <ufs/ufs/quota.h>
 #include <ufs/ufs/inode.h>
@@ -153,33 +174,98 @@ ext4fs_extent_pblk(struct inode *ip, u_int64_t lbn, u_int64_t *pblk,
 	return (EIO);
 }
 
+/*
+ * Write inode back to disk with checksum update.
+ */
+int
+ext4fs_update(struct inode *ip, int waitfor)
+{
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct buf *bp;
+	u_int32_t inode_group, inode_index, block_in_table, offset_in_block;
+	struct ext4fs_block_group_descriptor *gd;
+	u_int64_t inode_table_block;
+	daddr_t disk_block;
+	u_int32_t csum;
+	int error;
+
+	if (ITOV(ip)->v_mount->mnt_flag & MNT_RDONLY)
+		return (0);
+
+	EXT4FS_ITIMES(ip);
+
+	if ((ip->i_flag & IN_MODIFIED) == 0)
+		return (0);
+
+	ip->i_flag &= ~IN_MODIFIED;
+
+	/* Locate inode on disk */
+	inode_group = (ip->i_number - 1) / fs->m_inodes_per_group;
+	inode_index = (ip->i_number - 1) % fs->m_inodes_per_group;
+	block_in_table = inode_index / fs->m_inodes_per_block;
+	offset_in_block = (inode_index % fs->m_inodes_per_block) *
+	    fs->m_inode_size;
+
+	gd = &fs->m_gd[inode_group];
+	inode_table_block = letoh32(gd->bgd_inode_table_block_lo);
+	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+		inode_table_block |=
+		    (u_int64_t)letoh32(gd->bgd_inode_table_block_hi) << 32;
+
+	disk_block = (inode_table_block + block_in_table) <<
+	    fs->m_fs_block_to_disk_block;
+
+	error = bread(ip->i_devvp, disk_block, fs->m_block_size, &bp);
+	if (error) {
+		brelse(bp);
+		return (error);
+	}
+
+	/* Recompute inode checksum */
+	csum = ext4fs_inode_csum(fs, ip->i_e4din, ip->i_number);
+	ip->i_e4din->dinode.i_checksum_lo = htole16(csum & 0xFFFF);
+	ip->i_e4din->dinode.i_checksum_hi = htole16((csum >> 16) & 0xFFFF);
+
+	/* Copy inode to buffer */
+	memcpy((char *)bp->b_data + offset_in_block, ip->i_e4din,
+	    sizeof(struct ext4fs_dinode_256));
+
+	if (waitfor)
+		return (bwrite(bp));
+
+	bdwrite(bp);
+	return (0);
+}
+
 /* Stub implementations - remaining ops return EOPNOTSUPP */
 
-int ext4fs_lookup(void *);
+int ext4fs_access(void *);
+int ext4fs_advlock(void *);
+int ext4fs_bmap(void *);
+int ext4fs_chmod(struct vnode *, mode_t, struct ucred *);
+int ext4fs_chown(struct vnode *, uid_t, gid_t, struct ucred *);
 int ext4fs_create(void *);
+int ext4fs_fsync(void *);
+int ext4fs_getattr(void *);
+int ext4fs_inactive(void *);
+int ext4fs_link(void *);
+int ext4fs_lookup(void *);
+int ext4fs_mkdir(void *);
 int ext4fs_mknod(void *);
 int ext4fs_open(void *);
-int ext4fs_access(void *);
-int ext4fs_getattr(void *);
-int ext4fs_setattr(void *);
+int ext4fs_pathconf(void *);
+int ext4fs_print(void *);
 int ext4fs_read(void *);
-int ext4fs_write(void *);
-int ext4fs_fsync(void *);
-int ext4fs_remove(void *);
-int ext4fs_link(void *);
-int ext4fs_rename(void *);
-int ext4fs_mkdir(void *);
-int ext4fs_rmdir(void *);
-int ext4fs_symlink(void *);
 int ext4fs_readdir(void *);
 int ext4fs_readlink(void *);
-int ext4fs_inactive(void *);
 int ext4fs_reclaim(void *);
-int ext4fs_bmap(void *);
+int ext4fs_remove(void *);
+int ext4fs_rename(void *);
+int ext4fs_rmdir(void *);
+int ext4fs_setattr(void *);
 int ext4fs_strategy(void *);
-int ext4fs_print(void *);
-int ext4fs_pathconf(void *);
-int ext4fs_advlock(void *);
+int ext4fs_symlink(void *);
+int ext4fs_write(void *);
 
 const struct vops ext4fs_vops = {
 	.vop_lookup	= ext4fs_lookup,
@@ -464,11 +550,192 @@ ext4fs_getattr(void *v)
 }
 
 int
+ext4fs_chmod(struct vnode *vp, mode_t mode, struct ucred *cred)
+{
+	struct inode *ip = VTOI(vp);
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	uid_t uid;
+	gid_t gid;
+	u_int16_t cur_mode;
+	int error;
+
+	uid = letoh16(din->i_uid_lo) |
+	    ((uid_t)letoh16(din->i_uid_hi) << 16);
+	gid = letoh16(din->i_gid_lo) |
+	    ((gid_t)letoh16(din->i_gid_hi) << 16);
+
+	if (cred->cr_uid != uid && (error = suser_ucred(cred)))
+		return (error);
+	if (cred->cr_uid) {
+		if (vp->v_type != VDIR && (mode & S_ISTXT))
+			return (EFTYPE);
+		if (!groupmember(gid, cred) && (mode & ISGID))
+			return (EPERM);
+	}
+
+	cur_mode = letoh16(din->i_mode);
+	cur_mode &= ~ALLPERMS;
+	cur_mode |= (mode & ALLPERMS);
+	din->i_mode = htole16(cur_mode);
+	ip->i_flag |= IN_CHANGE;
+
+	if ((vp->v_flag & VTEXT) && (cur_mode & S_ISTXT) == 0)
+		(void)uvm_vnp_uncache(vp);
+
+	return (0);
+}
+
+int
+ext4fs_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred)
+{
+	struct inode *ip = VTOI(vp);
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	uid_t ouid;
+	gid_t ogid;
+	u_int16_t mode;
+	int error;
+
+	ouid = letoh16(din->i_uid_lo) |
+	    ((uid_t)letoh16(din->i_uid_hi) << 16);
+	ogid = letoh16(din->i_gid_lo) |
+	    ((gid_t)letoh16(din->i_gid_hi) << 16);
+
+	if (uid == (uid_t)VNOVAL)
+		uid = ouid;
+	if (gid == (gid_t)VNOVAL)
+		gid = ogid;
+
+	if ((cred->cr_uid != ouid || uid != ouid ||
+	    (gid != ogid && !groupmember(gid, cred))) &&
+	    (error = suser_ucred(cred)))
+		return (error);
+
+	din->i_uid_lo = htole16(uid & 0xFFFF);
+	din->i_uid_hi = htole16((uid >> 16) & 0xFFFF);
+	din->i_gid_lo = htole16(gid & 0xFFFF);
+	din->i_gid_hi = htole16((gid >> 16) & 0xFFFF);
+
+	if (ouid != uid || ogid != gid)
+		ip->i_flag |= IN_CHANGE;
+	if (ouid != uid && cred->cr_uid != 0) {
+		mode = letoh16(din->i_mode);
+		mode &= ~S_ISUID;
+		din->i_mode = htole16(mode);
+	}
+	if (ogid != gid && cred->cr_uid != 0) {
+		mode = letoh16(din->i_mode);
+		mode &= ~S_ISGID;
+		din->i_mode = htole16(mode);
+	}
+
+	return (0);
+}
+
+int
 ext4fs_setattr(void *v)
 {
-	(void)v;
-	printf("ext4fs_setattr: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_setattr_args *ap = v;
+	struct vattr *vap = ap->a_vap;
+	struct vnode *vp = ap->a_vp;
+	struct inode *ip = VTOI(vp);
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ucred *cred = ap->a_cred;
+	int error = 0;
+
+	if ((vap->va_type != VNON) || (vap->va_nlink != VNOVAL) ||
+	    (vap->va_fsid != VNOVAL) || (vap->va_fileid != VNOVAL) ||
+	    (vap->va_blocksize != VNOVAL) || (vap->va_rdev != VNOVAL) ||
+	    ((int)vap->va_bytes != VNOVAL) || (vap->va_gen != VNOVAL))
+		return (EINVAL);
+
+	if (vap->va_flags != VNOVAL) {
+		if (vp->v_mount->mnt_flag & MNT_RDONLY)
+			return (EROFS);
+		if ((error = suser_ucred(cred)))
+			return (error);
+		u_int32_t iflags = letoh32(din->i_flags);
+		iflags &= ~(EXTFS_INODE_FLAG_APPEND |
+		    EXTFS_INODE_FLAG_IMMUTABLE);
+		iflags |= (vap->va_flags & SF_APPEND) ?
+		    EXTFS_INODE_FLAG_APPEND : 0;
+		iflags |= (vap->va_flags & SF_IMMUTABLE) ?
+		    EXTFS_INODE_FLAG_IMMUTABLE : 0;
+		din->i_flags = htole32(iflags);
+		ip->i_flag |= IN_CHANGE;
+	}
+
+	if (vap->va_uid != (uid_t)VNOVAL ||
+	    vap->va_gid != (gid_t)VNOVAL) {
+		if (vp->v_mount->mnt_flag & MNT_RDONLY)
+			return (EROFS);
+		error = ext4fs_chown(vp, vap->va_uid, vap->va_gid, cred);
+		if (error)
+			return (error);
+	}
+
+	if (vap->va_size != VNOVAL) {
+		switch (vp->v_type) {
+		case VDIR:
+			return (EISDIR);
+		case VLNK:
+		case VREG:
+			if (vp->v_mount->mnt_flag & MNT_RDONLY)
+				return (EROFS);
+			break;
+		default:
+			break;
+		}
+		/* Cannot truncate (no block deallocation yet) */
+		off_t cursize = (off_t)letoh32(din->i_size_lo) |
+		    ((off_t)letoh32(din->i_size_hi) << 32);
+		if (vap->va_size != cursize)
+			return (EOPNOTSUPP);
+	}
+
+	if ((vap->va_vaflags & VA_UTIMES_CHANGE) ||
+	    vap->va_atime.tv_nsec != VNOVAL ||
+	    vap->va_mtime.tv_nsec != VNOVAL) {
+		if (vp->v_mount->mnt_flag & MNT_RDONLY)
+			return (EROFS);
+		uid_t uid = letoh16(din->i_uid_lo) |
+		    ((uid_t)letoh16(din->i_uid_hi) << 16);
+		if (cred->cr_uid != uid &&
+		    (error = suser_ucred(cred)) &&
+		    ((vap->va_vaflags & VA_UTIMES_NULL) == 0 ||
+		    (error = VOP_ACCESS(vp, VWRITE, cred, ap->a_p))))
+			return (error);
+		if (vap->va_mtime.tv_nsec != VNOVAL)
+			ip->i_flag |= IN_CHANGE | IN_UPDATE;
+		else if (vap->va_vaflags & VA_UTIMES_CHANGE)
+			ip->i_flag |= IN_CHANGE;
+		if (vap->va_atime.tv_nsec != VNOVAL)
+			ip->i_flag |= IN_ACCESS;
+		EXT4FS_ITIMES(ip);
+		if (vap->va_mtime.tv_nsec != VNOVAL) {
+			din->i_mtime =
+			    htole32((u_int32_t)vap->va_mtime.tv_sec);
+			din->i_mtime_extra =
+			    htole32(vap->va_mtime.tv_nsec << 2);
+		}
+		if (vap->va_atime.tv_nsec != VNOVAL) {
+			din->i_atime =
+			    htole32((u_int32_t)vap->va_atime.tv_sec);
+			din->i_atime_extra =
+			    htole32(vap->va_atime.tv_nsec << 2);
+		}
+		ip->i_flag |= IN_MODIFIED;
+		error = ext4fs_update(ip, 1);
+		if (error)
+			return (error);
+	}
+
+	if (vap->va_mode != (mode_t)VNOVAL) {
+		if (vp->v_mount->mnt_flag & MNT_RDONLY)
+			return (EROFS);
+		error = ext4fs_chmod(vp, vap->va_mode, cred);
+	}
+
+	return (error);
 }
 
 int
@@ -548,9 +815,100 @@ ext4fs_read(void *v)
 int
 ext4fs_write(void *v)
 {
-	(void)v;
-	printf("ext4fs_write: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_write_args *ap = v;
+	struct vnode *vp = ap->a_vp;
+	struct uio *uio = ap->a_uio;
+	struct inode *ip = VTOI(vp);
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct buf *bp;
+	off_t filesz;
+	u_int64_t lbn, pblk, ncontig;
+	int ioflag = ap->a_ioflag;
+	int blkoffset, xfersize;
+	int error;
+	size_t resid;
+	ssize_t overrun;
+
+	if (uio->uio_resid == 0)
+		return (0);
+
+	switch (vp->v_type) {
+	case VREG:
+		break;
+	case VLNK:
+		break;
+	case VDIR:
+		return (EOPNOTSUPP);
+	default:
+		panic("ext4fs_write: type");
+	}
+
+	filesz = (off_t)letoh32(din->i_size_lo) |
+	    ((off_t)letoh32(din->i_size_hi) << 32);
+
+	if (ioflag & IO_APPEND)
+		uio->uio_offset = filesz;
+
+	/* Cannot extend file (no block allocation yet) */
+	if (uio->uio_offset < 0)
+		return (EINVAL);
+	if (uio->uio_offset + uio->uio_resid > filesz)
+		return (EOPNOTSUPP);
+
+	if ((error = vn_fsizechk(vp, uio, ioflag, &overrun)))
+		return (error);
+
+	resid = uio->uio_resid;
+
+	for (error = 0; uio->uio_resid > 0; ) {
+		lbn = EXT4FS_LBLKNO(fs, uio->uio_offset);
+		blkoffset = EXT4FS_BLKOFF(fs, uio->uio_offset);
+		xfersize = fs->m_block_size - blkoffset;
+		if (uio->uio_resid < xfersize)
+			xfersize = uio->uio_resid;
+
+		error = ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig);
+		if (error)
+			break;
+
+		error = bread(ip->i_devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+		    fs->m_block_size, &bp);
+		if (error) {
+			brelse(bp);
+			break;
+		}
+
+		error = uiomove((char *)bp->b_data + blkoffset, xfersize,
+		    uio);
+
+		if (ioflag & IO_SYNC)
+			(void)bwrite(bp);
+		else if (xfersize + blkoffset == fs->m_block_size)
+			bawrite(bp);
+		else
+			bdwrite(bp);
+
+		if (error || xfersize == 0)
+			break;
+
+		ip->i_flag |= IN_CHANGE | IN_UPDATE;
+	}
+
+	/* Clear setuid/setgid bits on write by non-root */
+	if (resid > uio->uio_resid && ap->a_cred &&
+	    ap->a_cred->cr_uid != 0) {
+		u_int16_t mode = letoh16(din->i_mode);
+		mode &= ~(S_ISUID | S_ISGID);
+		din->i_mode = htole16(mode);
+	}
+
+	if (error == 0 && resid > uio->uio_resid && (ioflag & IO_SYNC))
+		error = ext4fs_update(ip, 1);
+
+	uio->uio_resid += overrun;
+	return (error);
 }
 
 int
@@ -563,7 +921,7 @@ ext4fs_fsync(void *v)
 		return (0);
 
 	vflushbuf(vp, ap->a_waitfor == MNT_WAIT);
-	return (0);
+	return (ext4fs_update(VTOI(vp), ap->a_waitfor == MNT_WAIT));
 }
 
 int
@@ -764,35 +1122,19 @@ ext4fs_inactive(void *v)
 	nlink = letoh16(ip->i_e4din->dinode.i_links_count);
 
 	/*
-	 * Handle file deletion: if nlink == 0, truncate and free the inode.
+	 * Handle file deletion: if nlink == 0, mark as deleted.
+	 * TODO: implement truncate and inode freeing.
 	 */
 	if (nlink == 0 && (vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
-		printf("ext4fs_inactive: inode %llu has nlink=0, needs deletion\n",
-		    (unsigned long long)ip->i_number);
-
-		/* TODO: implement truncate and inode freeing
-		 * For now, just set dtime to mark it as deleted
-		 */
-		printf("ext4fs_inactive: WARNING - truncate/free not implemented yet\n");
-
-		/* Mark inode as deleted by setting dtime */
-		/* This would require write support:
 		struct timespec ts;
 		getnanotime(&ts);
-		ip->i_e4din->dinode.i_dtime = htole32(ts.tv_sec);
+		ip->i_e4din->dinode.i_dtime =
+		    htole32((u_int32_t)ts.tv_sec);
 		ip->i_flag |= IN_CHANGE | IN_UPDATE;
-		*/
 	}
 
-	/*
-	 * Update inode if any flags are set.
-	 * TODO: implement ext4fs_update when write support is added
-	 */
-	if (ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE)) {
-		printf("ext4fs_inactive: inode %llu needs update (flags=0x%x)\n",
-		    (unsigned long long)ip->i_number, ip->i_flag);
-		/* ext4fs_update(ip, 0); */
-	}
+	if (ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE))
+		ext4fs_update(ip, 0);
 
 out:
 	VOP_UNLOCK(vp);
@@ -831,39 +1173,132 @@ ext4fs_reclaim(void *v)
 int
 ext4fs_bmap(void *v)
 {
-	(void)v;
-	printf("ext4fs_bmap: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_bmap_args *ap = v;
+	struct inode *ip = VTOI(ap->a_vp);
+	struct m_ext4fs *fs = ip->i_e4fs;
+	u_int64_t pblk, ncontig;
+	int error;
+
+	if (ap->a_vpp != NULL)
+		*ap->a_vpp = ip->i_devvp;
+	if (ap->a_bnp == NULL)
+		return (0);
+
+	error = ext4fs_extent_pblk(ip, (u_int64_t)ap->a_bn, &pblk, &ncontig);
+	if (error) {
+		*ap->a_bnp = -1;
+		return (error);
+	}
+
+	*ap->a_bnp = (daddr_t)EXT4FS_FSBTODB(fs, pblk);
+
+	if (ap->a_runp != NULL) {
+		int maxrun = MAXBSIZE / fs->m_block_size - 1;
+		*ap->a_runp = MIN((int)(ncontig - 1), maxrun);
+		if (*ap->a_runp < 0)
+			*ap->a_runp = 0;
+	}
+
+	return (0);
 }
 
 int
 ext4fs_strategy(void *v)
 {
-	(void)v;
-	printf("ext4fs_strategy: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_strategy_args *ap = v;
+	struct buf *bp = ap->a_bp;
+	struct vnode *vp = bp->b_vp;
+	struct inode *ip;
+	int error;
+	int s;
+
+	ip = VTOI(vp);
+	if (vp->v_type == VBLK || vp->v_type == VCHR)
+		panic("ext4fs_strategy: spec");
+
+	if (bp->b_blkno == bp->b_lblkno) {
+		error = VOP_BMAP(vp, bp->b_lblkno, NULL, &bp->b_blkno,
+		    NULL);
+		if (error) {
+			bp->b_error = error;
+			bp->b_flags |= B_ERROR;
+			s = splbio();
+			biodone(bp);
+			splx(s);
+			return (error);
+		}
+		if (bp->b_blkno == -1)
+			clrbuf(bp);
+	}
+	if (bp->b_blkno == -1) {
+		s = splbio();
+		biodone(bp);
+		splx(s);
+		return (0);
+	}
+	vp = ip->i_devvp;
+	bp->b_dev = vp->v_rdev;
+	VOP_STRATEGY(vp, bp);
+	return (0);
 }
 
 int
 ext4fs_print(void *v)
 {
-	(void)v;
-	printf("ext4fs_print: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_print_args *ap = v;
+	struct inode *ip = VTOI(ap->a_vp);
+
+	printf("tag VT_EXT4FS, ino %llu, on dev %d, %d",
+	    (unsigned long long)ip->i_number,
+	    major(ip->i_dev), minor(ip->i_dev));
+	printf(" flags 0x%x, effnlink %d\n",
+	    ip->i_flag, ip->i_effnlink);
+	return (0);
 }
 
 int
 ext4fs_pathconf(void *v)
 {
-	(void)v;
-	printf("ext4fs_pathconf: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_pathconf_args *ap = v;
+
+	switch (ap->a_name) {
+	case _PC_LINK_MAX:
+		*ap->a_retval = EXT4FS_LINK_MAX;
+		break;
+	case _PC_NAME_MAX:
+		*ap->a_retval = EXT4FS_MAXNAMLEN;
+		break;
+	case _PC_PATH_MAX:
+		*ap->a_retval = PATH_MAX;
+		break;
+	case _PC_PIPE_BUF:
+		*ap->a_retval = PIPE_BUF;
+		break;
+	case _PC_CHOWN_RESTRICTED:
+		*ap->a_retval = 1;
+		break;
+	case _PC_NO_TRUNC:
+		*ap->a_retval = 1;
+		break;
+	case _PC_TIMESTAMP_RESOLUTION:
+		*ap->a_retval = 1;
+		break;
+	default:
+		return (EINVAL);
+	}
+	return (0);
 }
 
 int
 ext4fs_advlock(void *v)
 {
-	(void)v;
-	printf("ext4fs_advlock: not implemented\n");
-	return (EOPNOTSUPP);
+	struct vop_advlock_args *ap = v;
+	struct inode *ip = VTOI(ap->a_vp);
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	off_t filesz;
+
+	filesz = (off_t)letoh32(din->i_size_lo) |
+	    ((off_t)letoh32(din->i_size_hi) << 32);
+	return (lf_advlock(&ip->i_lockf, filesz, ap->a_id, ap->a_op,
+	    ap->a_fl, ap->a_flags));
 }

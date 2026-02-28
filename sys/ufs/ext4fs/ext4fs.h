@@ -1,14 +1,34 @@
-/* ext4fs
- * Copyright 2025 kmx.io <contact@kmx.io>
+/*
+ * Copyright (c) 2025 kmx.io.
+ * Copyright (c) 1997 Manuel Bouyer.
+ * Copyright (c) 1982, 1986, 1989, 1993
+ *	The Regents of the University of California.  All rights reserved.
  *
- * Permission is hereby granted to use this software granted the above
- * copyright notice and this permission paragraph are included in all
- * copies and substantial portions of this software.
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
  *
- * THIS SOFTWARE IS PROVIDED "AS-IS" WITHOUT ANY GUARANTEE OF
- * PURPOSE AND PERFORMANCE. IN NO EVENT WHATSOEVER SHALL THE
- * AUTHOR BE CONSIDERED LIABLE FOR THE USE AND PERFORMANCE OF
- * THIS SOFTWARE.
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ *
+ * Modified for ext4fs by kmx.io.
  */
 #include <sys/param.h>
 #include <sys/types.h>
@@ -20,6 +40,7 @@
 #include <ufs/ext4fs/ext4fs_crc32c.h>
 
 struct fid;
+struct inode;
 struct nameidata;
 struct statfs;
 struct vfsconf;
@@ -33,6 +54,7 @@ struct vfsconf;
 #define EXT4FS_LOG_MIN_BLOCK_SIZE	10
 #define EXT4FS_MAGIC			0xEF53
 #define EXT4FS_MOUNT_OPTS_MAX		64
+#define EXT4FS_LINK_MAX			65000
 #define EXT4FS_MAXNAMLEN		255
 #define EXT4FS_SUPER_BLOCK_OFFSET	1024
 #define EXT4FS_SUPER_BLOCK_SIZE		1024
@@ -566,6 +588,40 @@ static const struct ext4fs_feature ext4fs_feature_ro_compat[] = {
   {EXT4FS_FEATURE_RO_COMPAT_PROJECT,       "project"},
 };
 
+#define EXT4FS_ITIMES(ip) do {						\
+	if ((ip)->i_flag & (IN_ACCESS | IN_CHANGE | IN_UPDATE)) {	\
+		struct timespec _ts;					\
+		(ip)->i_flag |= IN_MODIFIED;				\
+		getnanotime(&_ts);					\
+		if ((ip)->i_flag & IN_ACCESS) {				\
+			(ip)->i_e4din->dinode.i_atime =			\
+			    htole32((u_int32_t)_ts.tv_sec);		\
+			(ip)->i_e4din->dinode.i_atime_extra =		\
+			    htole32(_ts.tv_nsec << 2);			\
+		}							\
+		if ((ip)->i_flag & IN_UPDATE) {				\
+			(ip)->i_e4din->dinode.i_mtime =			\
+			    htole32((u_int32_t)_ts.tv_sec);		\
+			(ip)->i_e4din->dinode.i_mtime_extra =		\
+			    htole32(_ts.tv_nsec << 2);			\
+		}							\
+		if ((ip)->i_flag & IN_CHANGE) {				\
+			(ip)->i_e4din->dinode.i_ctime =			\
+			    htole32((u_int32_t)_ts.tv_sec);		\
+			(ip)->i_e4din->dinode.i_ctime_extra =		\
+			    htole32(_ts.tv_nsec << 2);			\
+		}							\
+		(ip)->i_flag &= ~(IN_ACCESS | IN_CHANGE | IN_UPDATE);	\
+	}								\
+} while (0)
+
+struct ext4fs_sync_args {
+	int	allerror;
+	int	waitfor;
+	struct proc *p;
+	struct ucred *cred;
+};
+
 extern struct pool ext4fs_inode_pool;
 extern struct pool ext4fs_dinode_pool;
 
@@ -610,6 +666,8 @@ int ext4fs_strategy(void *);
 int ext4fs_print(void *);
 int ext4fs_pathconf(void *);
 int ext4fs_advlock(void *);
+
+int ext4fs_update(struct inode *, int);
 
 u_int32_t ext4fs_sb_csum(struct ext4fs *);
 int ext4fs_sb_csum_verify(struct ext4fs *);
