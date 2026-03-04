@@ -32,11 +32,13 @@
  */
 #include <sys/param.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/mount.h>
 #include <sys/vnode.h>
 #include <sys/proc.h>
 #include <sys/ucred.h>
 
+#include <ufs/ufs/dinode.h>
 #include <ufs/ext4fs/ext4fs_crc32c.h>
 
 struct fid;
@@ -450,84 +452,6 @@ struct ext4fs_block_group_descriptor {
   // 0x40
 } __attribute__((packed));
 
-#define EXT4FS_EXTENT_HEADER_MAGIC  0xF30A
-
-struct ext4fs_extent_header {
-  u_int16_t eh_magic;
-  u_int16_t eh_entries;
-  u_int16_t eh_max;
-  u_int16_t eh_depth;
-  u_int32_t eh_generation;
-} __attribute__((packed));
-
-struct ext4fs_extent {
-  u_int32_t e_block;
-  u_int16_t e_len;
-  u_int16_t e_start_hi;
-  u_int32_t e_start_lo;
-} __attribute__((packed));
-
-struct ext4fs_extent_idx {
-  u_int32_t ei_block;
-  u_int32_t ei_leaf_lo;
-  u_int16_t ei_leaf_hi;
-  u_int16_t ei_unused;
-} __attribute__((packed));
-
-struct ext4fs_dinode {
-  u_int16_t i_mode;
-  u_int16_t i_uid_lo;
-  u_int32_t i_size_lo;
-  u_int32_t i_atime;
-  u_int32_t i_ctime;
-  // 0x10
-  u_int32_t i_mtime;
-  u_int32_t i_dtime;
-  u_int16_t i_gid_lo;
-  u_int16_t i_links_count;
-  u_int32_t i_blocks_lo;
-  // 0x20
-  u_int32_t i_flags;
-  u_int32_t i_version;
-  union {
-    u_int32_t i_block[15];
-    struct {
-      struct ext4fs_extent_header i_extent_header;
-      union {
-        struct ext4fs_extent i_extent[4];
-        struct ext4fs_extent_idx i_extent_idx[4];
-      };
-    };
-  };
-  u_int32_t i_nfs_generation;
-  u_int32_t i_extended_attributes_lo;
-  u_int32_t i_size_hi;
-  // 0x70
-  u_int32_t i_fragment_address;
-  u_int16_t i_blocks_hi;
-  u_int16_t i_extended_attributes_hi;
-  u_int16_t i_uid_hi;
-  u_int16_t i_gid_hi;
-  u_int16_t i_checksum_lo;
-  u_int16_t i_reserved_7e;
-  // 0x80
-  u_int16_t i_extra_isize;
-  u_int16_t i_checksum_hi;
-  u_int32_t i_ctime_extra;
-  u_int32_t i_mtime_extra;
-  u_int32_t i_atime_extra;
-  // 0x90
-  u_int32_t i_crtime;
-  u_int32_t i_crtime_extra;
-  u_int32_t i_version_hi;
-  u_int32_t i_project_id;
-  // 0xA0
-} __attribute__((packed));
-
-struct ext4fs_dinode_256 {
-  struct ext4fs_dinode dinode;
-  u_int8_t extended_attributes[256 - sizeof(struct ext4fs_dinode)];
-};
 
 /* Directory entry file types */
 #define EXT4FS_FT_UNKNOWN	0
@@ -546,6 +470,18 @@ struct ext4fs_directory {
 	u_int8_t  e4d_namlen;
 	u_int8_t  e4d_type;
 	char      e4d_name[EXT4FS_MAXNAMLEN];
+} __attribute__((packed));
+
+/* Directory block checksum tail (last 12 bytes of block when metadata_csum) */
+#define EXT4FS_DIR_TAIL_FT	0xDE
+#define EXT4FS_DIR_TAIL_SIZE	12
+
+struct ext4fs_directory_tail {
+	u_int32_t det_reserved_zero1;	/* must be 0 (fake inode = 0) */
+	u_int16_t det_rec_len;		/* always EXT4FS_DIR_TAIL_SIZE */
+	u_int8_t  det_reserved_zero2;	/* must be 0 (namlen = 0) */
+	u_int8_t  det_reserved_ft;	/* EXT4FS_DIR_TAIL_FT */
+	u_int32_t det_checksum;
 } __attribute__((packed));
 
 struct ext4fs_feature {
@@ -680,3 +616,49 @@ u_int32_t ext4fs_inode_csum(struct m_ext4fs *,
 	struct ext4fs_dinode_256 *, u_int32_t);
 int ext4fs_inode_csum_verify(struct m_ext4fs *,
 	struct ext4fs_dinode_256 *, u_int32_t);
+
+/* Directory entry size: 8 bytes header + name, rounded up to 4 */
+#define EXT4FS_DIRSIZ(namlen)	(((8 + (namlen)) + 3) & ~3)
+
+/* Convert inode mode to directory file type */
+static inline u_int8_t
+ext4fs_mode_to_ft(u_int16_t mode)
+{
+	switch (mode & S_IFMT) {
+	case S_IFREG:	return EXT4FS_FT_REG_FILE;
+	case S_IFDIR:	return EXT4FS_FT_DIR;
+	case S_IFCHR:	return EXT4FS_FT_CHRDEV;
+	case S_IFBLK:	return EXT4FS_FT_BLKDEV;
+	case S_IFIFO:	return EXT4FS_FT_FIFO;
+	case S_IFSOCK:	return EXT4FS_FT_SOCK;
+	case S_IFLNK:	return EXT4FS_FT_SYMLINK;
+	default:	return EXT4FS_FT_UNKNOWN;
+	}
+}
+
+/* Block allocation / free */
+int ext4fs_blkalloc(struct inode *, u_int64_t, u_int64_t *);
+void ext4fs_blkfree(struct inode *, u_int64_t);
+
+/* Inode allocation / free */
+int ext4fs_inode_alloc(struct inode *, mode_t, struct ucred *,
+	struct vnode **);
+void ext4fs_inode_free(struct inode *, ufsino_t, mode_t);
+
+/* Directory operations */
+int ext4fs_direnter(struct inode *, struct vnode *,
+	struct componentname *);
+int ext4fs_dirremove(struct vnode *, struct componentname *);
+int ext4fs_dirempty(struct inode *, ufsino_t, struct ucred *);
+int ext4fs_dirrewrite(struct inode *, struct inode *,
+	struct componentname *);
+
+/* Truncation */
+int ext4fs_truncate(struct inode *, off_t, int, struct ucred *);
+
+/* Size update */
+void ext4fs_setsize(struct inode *, u_int64_t);
+
+/* Superblock / BGD write-back */
+int ext4fs_bgd_write(struct m_ext4fs *, struct vnode *, u_int32_t);
+int ext4fs_sbwrite(struct mount *);

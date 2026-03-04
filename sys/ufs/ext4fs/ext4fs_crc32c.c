@@ -18,6 +18,7 @@
 #include <sys/types.h>
 #include <sys/systm.h>
 
+#include <ufs/ext4fs/ext4fs_dinode.h>
 #include <ufs/ext4fs/ext4fs.h>
 
 /*
@@ -302,6 +303,63 @@ ext4fs_inode_csum_verify(struct m_ext4fs *fs,
 	}
 
 	return 0;
+}
+
+/*
+ * Compute the CRC32C checksum of a block or inode bitmap.
+ *
+ * The checksum covers: group number (le32), then the bitmap data.
+ */
+u_int32_t
+ext4fs_bitmap_csum(struct m_ext4fs *fs, u_int32_t group,
+    void *bitmap, size_t size)
+{
+	u_int32_t crc, seed;
+	u_int32_t group_le;
+
+	if (!(fs->m_feature_ro_compat &
+	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM))
+		return 0;
+
+	seed = ext4fs_csum_seed(fs);
+	group_le = htole32(group);
+	crc = ext4fs_crc32c(seed, &group_le, sizeof(group_le));
+	crc = ext4fs_crc32c(crc, bitmap, size);
+
+	return ~crc;
+}
+
+/*
+ * Write the checksum tail at the end of a directory block.
+ *
+ * The tail is a 12-byte structure placed at block_size - 12.
+ * Checksum covers: UUID seed, inode number, inode generation, block data.
+ */
+void
+ext4fs_dir_set_csum(struct m_ext4fs *fs, u_int32_t ino, u_int32_t gen_le,
+    void *buf)
+{
+	struct ext4fs_directory_tail *tail;
+	u_int32_t crc, seed, ino_le;
+
+	if (!(fs->m_feature_ro_compat &
+	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM))
+		return;
+
+	tail = (struct ext4fs_directory_tail *)
+	    ((char *)buf + fs->m_block_size - EXT4FS_DIR_TAIL_SIZE);
+	tail->det_reserved_zero1 = 0;
+	tail->det_rec_len = htole16(EXT4FS_DIR_TAIL_SIZE);
+	tail->det_reserved_zero2 = 0;
+	tail->det_reserved_ft = EXT4FS_DIR_TAIL_FT;
+	tail->det_checksum = 0;
+
+	seed = ext4fs_csum_seed(fs);
+	ino_le = htole32(ino);
+	crc = ext4fs_crc32c(seed, &ino_le, sizeof(ino_le));
+	crc = ext4fs_crc32c(crc, &gen_le, sizeof(gen_le));
+	crc = ext4fs_crc32c(crc, buf, fs->m_block_size);
+	tail->det_checksum = htole32(~crc);
 }
 
 /*

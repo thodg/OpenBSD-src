@@ -16,3 +16,5 @@
 #include <sys/vnode.h>
 
 extern const struct vops ext4fs_vops;
+
+#define IS_EXT4_VNODE(vp)   ((vp)->v_tag == VT_EXT4FS)

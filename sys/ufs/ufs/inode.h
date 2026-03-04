@@ -43,6 +43,7 @@
 #include <ufs/ufs/dir.h>
 #include <ufs/ext2fs/ext2fs_dinode.h>
 #include <ufs/ext2fs/ext2fs_extents.h>
+#include <ufs/ext4fs/ext4fs_dinode.h>
 
 
 /*
@@ -227,6 +228,8 @@ struct inode_vtbl {
 #define	i_size			i_din1->di_size
 #define	i_uid			i_din1->di_uid
 #endif	/* _KERNEL */
+
+#define i_e4fs_nlink		i_e4din->dinode.i_links_count
 
 #define i_e2fs_mode		i_e2din->e2di_mode
 #define i_e2fs_size		i_e2din->e2di_size
