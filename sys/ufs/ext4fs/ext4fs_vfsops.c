@@ -772,24 +772,26 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 		    ino_in_group++) {
 			if (isclr(ibp, ino_in_group)) {
 				/* Found free inode */
-				setbit(ibp, ino_in_group);
 
 				/*
 				 * If this group's inode bitmap was
-				 * uninitialized, set the padding bits
-				 * (positions m_inodes_per_group..
-				 * m_block_size*8-1) to 1. e2fsck requires
-				 * these bits to be set when INODE_UNINIT
-				 * is cleared.
+				 * uninitialized, the on-disk bitmap
+				 * block may contain garbage. Zero it
+				 * first, then set padding bits and
+				 * the allocated bit.
 				 */
 				if (letoh16(gd->bgd_flags) &
 				    EXT4FS_BGD_FLAG_INODE_UNINIT) {
 					u_int32_t pbit;
+					memset(ibp, 0,
+					    fs->m_block_size);
 					for (pbit = fs->m_inodes_per_group;
 					    pbit < fs->m_block_size * 8;
 					    pbit++)
 						setbit(ibp, pbit);
 				}
+
+				setbit(ibp, ino_in_group);
 
 				/* Update inode bitmap checksum in BGD */
 				{

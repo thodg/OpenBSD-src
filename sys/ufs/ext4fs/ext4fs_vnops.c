@@ -348,16 +348,60 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 
 		bbp = (char *)bp->b_data;
 
+		/*
+		 * If BLOCK_UNINIT is set, the on-disk bitmap block
+		 * may contain garbage. Zero it and mark metadata
+		 * blocks (bitmaps, inode table) as used.
+		 */
+		if (letoh16(gd->bgd_flags) &
+		    EXT4FS_BGD_FLAG_BLOCK_UNINIT) {
+			u_int64_t grp_start = (u_int64_t)g *
+			    fs->m_blocks_per_group +
+			    fs->m_first_data_block;
+			u_int64_t bb, ib, itb;
+			u_int32_t it_blocks, mb;
+			memset(bbp, 0, fs->m_block_size);
+			/* Block bitmap */
+			bb = letoh32(gd->bgd_block_bitmap_block_lo);
+			if (bb >= grp_start &&
+			    bb < grp_start + fs->m_blocks_per_group)
+				setbit(bbp, bb - grp_start);
+			/* Inode bitmap */
+			ib = letoh32(gd->bgd_inode_bitmap_block_lo);
+			if (ib >= grp_start &&
+			    ib < grp_start + fs->m_blocks_per_group)
+				setbit(bbp, ib - grp_start);
+			/* Inode table */
+			itb = letoh32(gd->bgd_inode_table_block_lo);
+			it_blocks = (fs->m_inodes_per_group *
+			    fs->m_inode_size + fs->m_block_size - 1) /
+			    fs->m_block_size;
+			for (mb = 0; mb < it_blocks; mb++) {
+				u_int64_t b = itb + mb;
+				if (b >= grp_start &&
+				    b < grp_start +
+				    fs->m_blocks_per_group)
+					setbit(bbp, b - grp_start);
+			}
+			/* Padding beyond blocks_per_group */
+			{
+				u_int32_t pbit;
+				for (pbit = fs->m_blocks_per_group;
+				    pbit < fs->m_block_size * 8;
+				    pbit++)
+					setbit(bbp, pbit);
+			}
+			gd->bgd_flags = htole16(letoh16(
+			    gd->bgd_flags) &
+			    ~EXT4FS_BGD_FLAG_BLOCK_UNINIT);
+		}
+
 		/* Scan bitmap for free block */
 		for (blk_in_group = 0;
 		    blk_in_group < fs->m_blocks_per_group;
 		    blk_in_group++) {
 			if (isclr(bbp, blk_in_group)) {
 				setbit(bbp, blk_in_group);
-
-				/* Clear BLOCK_UNINIT if needed */
-				gd->bgd_flags = htole16(letoh16(gd->bgd_flags) &
-				    ~EXT4FS_BGD_FLAG_BLOCK_UNINIT);
 
 				/* Update block bitmap checksum in BGD */
 				{
@@ -1848,6 +1892,8 @@ ext4fs_rename(void *v)
 	int doingdirectory = 0, oldparent = 0, newparent = 0;
 	int error = 0;
 	u_int16_t nlink;
+	off_t saved_offset;
+	int saved_count;
 
 	/* Check for cross-device rename */
 	if ((fvp->v_mount != tdvp->v_mount) ||
@@ -1874,6 +1920,15 @@ abortit:
 	dp = VTOI(fdvp);
 	ip = VTOI(fvp);
 	din = &ip->i_e4din->dinode;
+
+	/*
+	 * Save source directory's offset/count from the lookup.
+	 * If fdvp == tdvp (same-directory rename), the target
+	 * lookup will overwrite these, so we restore them before
+	 * calling ext4fs_dirremove.
+	 */
+	saved_offset = dp->i_offset;
+	saved_count = dp->i_count;
 
 	nlink = letoh16(din->i_links_count);
 	if ((letoh32(din->i_flags) &
@@ -1952,8 +2007,10 @@ abortit:
 			goto bad;
 	}
 
-	/* Remove source entry */
+	/* Remove source entry - restore saved offset/count */
 	dp = VTOI(fdvp);
+	dp->i_offset = saved_offset;
+	dp->i_count = saved_count;
 	error = ext4fs_dirremove(fdvp, fcnp);
 	if (error)
 		goto bad;
@@ -2138,6 +2195,16 @@ ext4fs_mkdir(void *v)
 	if ((error = ext4fs_update(ip, 1)) != 0)
 		goto bad;
 
+	/* Verify nlink=2 was written */
+	{
+		u_int16_t verify_nlink =
+		    letoh16(ip->i_e4din->dinode.i_links_count);
+		if (verify_nlink != 2)
+			printf("ext4fs_mkdir: BUG ino=%u nlink=%u "
+			    "expected 2 after update\n",
+			    ip->i_number, verify_nlink);
+	}
+
 	/* Increment parent's link count for ".." */
 	nlink++;
 	dp->i_e4din->dinode.i_links_count = htole16(nlink);
@@ -2160,7 +2227,35 @@ ext4fs_mkdir(void *v)
 	if ((cnp->cn_flags & SAVESTART) == 0)
 		pool_put(&namei_pool, cnp->cn_pnbuf);
 	*ap->a_vpp = tvp;
-	printf("ext4fs_mkdir: returning 0 ino=%u\n", ip->i_number);
+
+	/* Final verification: re-read inode block and check nlink */
+	{
+		u_int32_t vg = (ip->i_number - 1) / fs->m_inodes_per_group;
+		u_int32_t vi = (ip->i_number - 1) % fs->m_inodes_per_group;
+		u_int32_t vbi = vi / fs->m_inodes_per_block;
+		u_int32_t voff = (vi % fs->m_inodes_per_block) *
+		    fs->m_inode_size;
+		struct ext4fs_block_group_descriptor *vgd = &fs->m_gd[vg];
+		u_int64_t vitb = letoh32(vgd->bgd_inode_table_block_lo);
+		daddr_t vdb = (vitb + vbi) <<
+		    fs->m_fs_block_to_disk_block;
+		struct buf *vbp;
+		if (bread(ip->i_devvp, vdb, fs->m_block_size, &vbp) == 0) {
+			struct ext4fs_dinode *vdp =
+			    (struct ext4fs_dinode *)
+			    ((char *)vbp->b_data + voff);
+			u_int16_t ondisk_nlink =
+			    letoh16(vdp->i_links_count);
+			if (ondisk_nlink != 2)
+				printf("ext4fs_mkdir: ONDISK BUG "
+				    "ino=%u nlink=%u expected 2\n",
+				    ip->i_number, ondisk_nlink);
+			brelse(vbp);
+		}
+	}
+
+	printf("ext4fs_mkdir: done ino=%u nlink=%u\n",
+	    ip->i_number, letoh16(din->i_links_count));
 	vput(dvp);
 	return (0);
 
