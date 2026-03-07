@@ -608,6 +608,7 @@ int ext4fs_update(struct inode *, int);
 u_int32_t ext4fs_sb_csum(struct ext4fs *);
 int ext4fs_sb_csum_verify(struct ext4fs *);
 u_int32_t ext4fs_csum_seed(struct m_ext4fs *);
+u_int32_t ext4fs_bitmap_csum(struct m_ext4fs *, u_int32_t, void *, size_t);
 u_int16_t ext4fs_bgd_csum(struct m_ext4fs *,
 	struct ext4fs_block_group_descriptor *, u_int32_t);
 int ext4fs_bgd_csum_verify(struct m_ext4fs *,

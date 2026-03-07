@@ -358,7 +358,7 @@ ext4fs_dir_set_csum(struct m_ext4fs *fs, u_int32_t ino, u_int32_t gen_le,
 	ino_le = htole32(ino);
 	crc = ext4fs_crc32c(seed, &ino_le, sizeof(ino_le));
 	crc = ext4fs_crc32c(crc, &gen_le, sizeof(gen_le));
-	crc = ext4fs_crc32c(crc, buf, fs->m_block_size);
+	crc = ext4fs_crc32c(crc, buf, fs->m_block_size - EXT4FS_DIR_TAIL_SIZE);
 	tail->det_checksum = htole32(~crc);
 }
 

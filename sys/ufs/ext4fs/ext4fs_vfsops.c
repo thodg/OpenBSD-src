@@ -774,6 +774,23 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 				/* Found free inode */
 				setbit(ibp, ino_in_group);
 
+				/*
+				 * If this group's inode bitmap was
+				 * uninitialized, set the padding bits
+				 * (positions m_inodes_per_group..
+				 * m_block_size*8-1) to 1. e2fsck requires
+				 * these bits to be set when INODE_UNINIT
+				 * is cleared.
+				 */
+				if (letoh16(gd->bgd_flags) &
+				    EXT4FS_BGD_FLAG_INODE_UNINIT) {
+					u_int32_t pbit;
+					for (pbit = fs->m_inodes_per_group;
+					    pbit < fs->m_block_size * 8;
+					    pbit++)
+						setbit(ibp, pbit);
+				}
+
 				/* Update inode bitmap checksum in BGD */
 				{
 					u_int32_t icsum =
@@ -825,6 +842,25 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 						    0xFFFF);
 				}
 
+				/* Update bg_itable_unused */
+				{
+					u_int32_t itu =
+					    letoh16(gd->bgd_inode_table_unused_lo);
+					u_int32_t first_unused =
+					    fs->m_inodes_per_group - itu;
+					if (ino_in_group >= first_unused) {
+						itu = fs->m_inodes_per_group -
+						    ino_in_group - 1;
+						gd->bgd_inode_table_unused_lo =
+						    htole16(itu & 0xFFFF);
+						if (fs->m_feature_incompat &
+						    EXT4FS_FEATURE_INCOMPAT_64BIT)
+							gd->bgd_inode_table_unused_hi =
+							    htole16((itu >> 16) &
+							    0xFFFF);
+					}
+				}
+
 				ext4fs_bgd_write(fs, pip->i_devvp, g);
 
 				/* Update superblock counters */
@@ -859,6 +895,8 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 				    htole16(4);
 				ip->i_e4din->dinode.i_extent_header.eh_depth =
 				    htole16(0);
+				ip->i_e4din->dinode.i_flags =
+				    htole32(EXTFS_INODE_FLAG_EXTENTS);
 
 				/* Set extra_isize */
 				ip->i_e4din->dinode.i_extra_isize =
@@ -916,6 +954,16 @@ ext4fs_inode_free(struct inode *pip, ufsino_t ino, mode_t mode)
 
 	ibp = (char *)bp->b_data;
 	clrbit(ibp, ino_in_group);
+
+	/* Update inode bitmap checksum in BGD */
+	{
+		u_int32_t icsum = ext4fs_bitmap_csum(fs, group, ibp,
+		    fs->m_block_size);
+		gd->bgd_inode_bitmap_checksum_lo = htole16(icsum & 0xFFFF);
+		if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+			gd->bgd_inode_bitmap_checksum_hi =
+			    htole16((icsum >> 16) & 0xFFFF);
+	}
 
 	error = bwrite(bp);
 	if (error)
