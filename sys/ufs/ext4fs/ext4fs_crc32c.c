@@ -305,26 +305,18 @@ ext4fs_inode_csum_verify(struct m_ext4fs *fs,
 	return 0;
 }
 
-/*
- * Compute the CRC32C checksum of a block or inode bitmap.
- *
- * The checksum covers: group number (le32), then the bitmap data.
- */
 u_int32_t
 ext4fs_bitmap_csum(struct m_ext4fs *fs, u_int32_t group,
     void *bitmap, size_t size)
 {
 	u_int32_t crc, seed;
-	u_int32_t group_le;
 
 	if (!(fs->m_feature_ro_compat &
 	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM))
 		return 0;
 
 	seed = ext4fs_csum_seed(fs);
-	group_le = htole32(group);
-	crc = ext4fs_crc32c(seed, &group_le, sizeof(group_le));
-	crc = ext4fs_crc32c(crc, bitmap, size);
+	crc = ext4fs_crc32c(seed, bitmap, size);
 
 	return ~crc;
 }

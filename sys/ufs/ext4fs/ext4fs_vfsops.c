@@ -445,6 +445,13 @@ ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 
 	dblk = (mfs->m_first_data_block + 1) << mfs->m_fs_block_to_disk_block;
 	for (i = 0; i < mfs->m_block_group_descriptor_blocks_count; i++) {
+		size_t off = (size_t)i * mfs->m_block_size;
+		size_t n = mfs->m_block_size;
+
+		/* Don't copy past end of m_gd allocation */
+		if (off + n > gd_size)
+			n = gd_size - off;
+
 		error = bread(devvp, dblk + (i << mfs->m_fs_block_to_disk_block),
 		    mfs->m_block_size, &bp);
 		if (error) {
@@ -453,8 +460,7 @@ ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 			mfs->m_gd = NULL;
 			return (error);
 		}
-		memcpy((char *)mfs->m_gd + i * mfs->m_block_size,
-		    bp->b_data, mfs->m_block_size);
+		memcpy((char *)mfs->m_gd + off, bp->b_data, n);
 		brelse(bp);
 	}
 
@@ -1230,8 +1236,8 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	struct ext4fs_dinode *dp = (struct ext4fs_dinode *)((char *)bp->b_data + offset_in_block);
 	
 	/* Allocate space for on-disk inode and copy it */
-	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK);
-	memcpy(ip->i_e4din, dp, sizeof(struct ext4fs_dinode_256));
+	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK|PR_ZERO);
+	memcpy(ip->i_e4din, dp, fs->m_inode_size);
 	brelse(bp);
 
 	/* Verify inode checksum, but skip for uninitialized (all-zero) slots */

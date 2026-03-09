@@ -250,18 +250,78 @@ ext4fs_update(struct inode *ip, int waitfor)
 		}
 	}
 
+	/*
+	 * Verify extent header integrity before writing.
+	 * If the inode uses extents (not a fast symlink), the magic
+	 * must be valid. Refuse to persist corruption.
+	 */
+	{
+		u_int16_t wr_mode = letoh16(ip->i_e4din->dinode.i_mode);
+		u_int32_t wr_flags = letoh32(ip->i_e4din->dinode.i_flags);
+		u_int16_t wr_magic =
+		    letoh16(ip->i_e4din->dinode.i_extent_header.eh_magic);
+		if (wr_mode != 0 &&
+		    (wr_flags & EXTFS_INODE_FLAG_EXTENTS) &&
+		    wr_magic != EXT4FS_EXTENT_HEADER_MAGIC) {
+			printf("ext4fs_update: REFUSING to write ino=%u "
+			    "with corrupt extent header! "
+			    "magic=0x%x mode=0%o flags=0x%x\n",
+			    ip->i_number, wr_magic, wr_mode, wr_flags);
+			brelse(bp);
+			return (EIO);
+		}
+	}
+
 	/* Recompute inode checksum */
 	csum = ext4fs_inode_csum(fs, ip->i_e4din, ip->i_number);
 	ip->i_e4din->dinode.i_checksum_lo = htole16(csum & 0xFFFF);
 	ip->i_e4din->dinode.i_checksum_hi = htole16((csum >> 16) & 0xFFFF);
 
 	/* Copy inode to buffer */
-	printf("ext4fs_update: ino=%u writing nlink=%u mode=0%o\n",
+	printf("ext4fs_update: ino=%u writing nlink=%u mode=0%o "
+	    "eh_magic=0x%x eh_entries=%u\n",
 	    ip->i_number,
 	    letoh16(ip->i_e4din->dinode.i_links_count),
-	    letoh16(ip->i_e4din->dinode.i_mode));
+	    letoh16(ip->i_e4din->dinode.i_mode),
+	    letoh16(ip->i_e4din->dinode.i_extent_header.eh_magic),
+	    letoh16(ip->i_e4din->dinode.i_extent_header.eh_entries));
 	memcpy((char *)bp->b_data + offset_in_block, ip->i_e4din,
-	    sizeof(struct ext4fs_dinode_256));
+	    fs->m_inode_size);
+
+	/*
+	 * After memcpy: verify we didn't corrupt any other inode
+	 * in this block. Check all slots for valid extent headers.
+	 */
+	{
+		int slot;
+		for (slot = 0; slot < fs->m_inodes_per_block; slot++) {
+			u_int32_t soff = slot * fs->m_inode_size;
+			struct ext4fs_dinode *sd =
+			    (struct ext4fs_dinode *)
+			    ((char *)bp->b_data + soff);
+			u_int16_t sm = letoh16(sd->i_mode);
+			u_int32_t sf = letoh32(sd->i_flags);
+			u_int16_t smag =
+			    letoh16(sd->i_extent_header.eh_magic);
+			if (sm != 0 &&
+			    (sf & EXTFS_INODE_FLAG_EXTENTS) &&
+			    smag != EXT4FS_EXTENT_HEADER_MAGIC) {
+				u_int32_t slot_ino = inode_group *
+				    fs->m_inodes_per_group +
+				    block_in_table *
+				    fs->m_inodes_per_block +
+				    slot + 1;
+				printf("ext4fs_update: CORRUPTION "
+				    "DETECTED after writing ino=%u! "
+				    "Slot %d (ino=%u) has bad "
+				    "magic=0x%x mode=0%o flags=0x%x "
+				    "offset=%u inode_size=%u\n",
+				    ip->i_number, slot, slot_ino,
+				    smag, sm, sf,
+				    offset_in_block, fs->m_inode_size);
+			}
+		}
+	}
 
 	printf("ext4fs_update: ino=%u bwrite waitfor=%d\n",
 	    ip->i_number, waitfor);
@@ -985,13 +1045,20 @@ ext4fs_lookup(void *v)
 		lbn = EXT4FS_LBLKNO(fs, off);
 
 		error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
-		if (error)
+		if (error) {
+			printf("ext4fs_lookup: extent_pblk error=%d "
+			    "ino=%u lbn=%llu\n", error,
+			    dp->i_number, (unsigned long long)lbn);
 			return (error);
+		}
 
 		error = bread(dp->i_devvp,
 		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
 		    fs->m_block_size, &bp);
 		if (error) {
+			printf("ext4fs_lookup: bread error=%d "
+			    "ino=%u pblk=%llu\n", error,
+			    dp->i_number, (unsigned long long)pblk);
 			brelse(bp);
 			return (error);
 		}
@@ -1004,6 +1071,10 @@ ext4fs_lookup(void *v)
 			reclen = letoh16(ep->e4d_reclen);
 
 			if (reclen == 0) {
+				printf("ext4fs_lookup: reclen=0 "
+				    "ino=%u off=%lld blkoff=%llu\n",
+				    dp->i_number, (long long)off,
+				    (unsigned long long)blkoff);
 				brelse(bp);
 				return (EIO);
 			}
