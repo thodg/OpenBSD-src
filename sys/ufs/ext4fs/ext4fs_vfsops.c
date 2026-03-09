@@ -152,7 +152,6 @@ ext4fs_init(struct vfsconf *vfsp)
 	pool_init(&ext4fs_dinode_pool, sizeof(struct ext4fs_dinode_256), 0,
 		  IPL_NONE, PR_WAITOK, "ext4dinopl", NULL);
 	if ((result = ufs_init(vfsp))) {
-		printf("ext4fs_init: ufs_init: %d\n", result);
 		return result;
 	}
 	return (0);
@@ -1142,8 +1141,6 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	dev_t dev;
 	int error;
 
-	printf("ext4fs_vget: ino=%llu\n", (unsigned long long)ino);
-
 	if (ino > (ufsino_t)-1)
 		panic("ext4fs_vget: alien ino_t %llu",
 		    (unsigned long long)ino);
@@ -1153,23 +1150,15 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	fs = ump->um_e4fs;
 
  retry:
-	printf("ext4fs_vget: ino=%llu ihashget\n", (unsigned long long)ino);
 	if ((*vpp = ufs_ihashget(dev, ino)) != NULL) {
-		printf("ext4fs_vget: ino=%llu found in hash\n",
-		    (unsigned long long)ino);
 		return (0);
 	}
 
 	/* Allocate a new vnode/inode. */
-	printf("ext4fs_vget: ino=%llu getnewvnode\n", (unsigned long long)ino);
 	if ((error = getnewvnode(VT_EXT4FS, mp, &ext4fs_vops, &vp)) != 0) {
-		printf("ext4fs_vget: ino=%llu getnewvnode error=%d\n",
-		    (unsigned long long)ino, error);
 		*vpp = NULL;
 		return (error);
 	}
-	printf("ext4fs_vget: ino=%llu getnewvnode done\n", (unsigned long long)ino);
-
 	ip = pool_get(&ext4fs_inode_pool, PR_WAITOK|PR_ZERO);
 	rrw_init_flags(&ip->i_lock, "inode", RWL_DUPOK | RWL_IS_VNODE);
 	vp->v_data = ip;
@@ -1185,10 +1174,7 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	 * for old data structures to be purged or for the contents of the
 	 * disk portion of this inode to be read.
 	 */
-	printf("ext4fs_vget: ino=%llu ihashins\n", (unsigned long long)ino);
 	error = ufs_ihashins(ip);
-	printf("ext4fs_vget: ino=%llu ihashins done error=%d\n",
-	    (unsigned long long)ino, error);
 
 	if (error) {
 		/*
@@ -1219,7 +1205,6 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	daddr_t disk_block = (inode_table_block + block_in_table) << fs->m_fs_block_to_disk_block;
 	error = bread(ump->um_devvp, disk_block, fs->m_block_size, &bp);
 	if (error) {
-		printf("ext4fs_vget: bread failed with error %d\n", error);
 		/*
 		 * The inode does not contain anything useful, so it would
 		 * be misleading to leave it on its hash chain. With mode
@@ -1245,8 +1230,6 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	    letoh16(ip->i_e4din->dinode.i_links_count) != 0 ||
 	    letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
 		if ((error = ext4fs_inode_csum_verify(fs, ip->i_e4din, ino)) != 0) {
-			printf("ext4fs_vget: inode %llu checksum failed\n",
-			    (unsigned long long)ino);
 			pool_put(&ext4fs_dinode_pool, ip->i_e4din);
 			ip->i_e4din = NULL;
 			vput(vp);
@@ -1300,8 +1283,6 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	vref(ip->i_devvp);
 
 	*vpp = vp;
-	printf("ext4fs_vget: ino=%llu done vtype=%d\n",
-	    (unsigned long long)ino, vp->v_type);
 	return (0);
 }
 

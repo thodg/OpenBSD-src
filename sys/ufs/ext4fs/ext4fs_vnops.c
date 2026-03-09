@@ -190,15 +190,12 @@ ext4fs_update(struct inode *ip, int waitfor)
 	u_int32_t csum;
 	int error;
 
-	printf("ext4fs_update: ino=%u flags=0x%x\n", ip->i_number, ip->i_flag);
-
 	if (ITOV(ip)->v_mount->mnt_flag & MNT_RDONLY)
 		return (0);
 
 	EXT4FS_ITIMES(ip);
 
 	if ((ip->i_flag & IN_MODIFIED) == 0) {
-		printf("ext4fs_update: ino=%u not modified, skip\n", ip->i_number);
 		return (0);
 	}
 
@@ -220,34 +217,10 @@ ext4fs_update(struct inode *ip, int waitfor)
 	disk_block = (inode_table_block + block_in_table) <<
 	    fs->m_fs_block_to_disk_block;
 
-	printf("ext4fs_update: ino=%u bread dblk=%lld\n",
-	    ip->i_number, (long long)disk_block);
 	error = bread(ip->i_devvp, disk_block, fs->m_block_size, &bp);
 	if (error) {
-		printf("ext4fs_update: ino=%u bread error=%d\n",
-		    ip->i_number, error);
 		brelse(bp);
 		return (error);
-	}
-
-	/* Sanity check: print first slot of block to detect corruption */
-	{
-		struct ext4fs_dinode *slot0 =
-		    (struct ext4fs_dinode *)bp->b_data;
-		u_int16_t s0mode = letoh16(slot0->i_mode);
-		u_int16_t s0magic = letoh16(slot0->i_extent_header.eh_magic);
-		u_int16_t s0nlink = letoh16(slot0->i_links_count);
-		printf("ext4fs_update: ino=%u dblk=%lld slot0="
-		    "mode=0%o nlink=%u magic=0x%x\n",
-		    ip->i_number, (long long)disk_block,
-		    s0mode, s0nlink, s0magic);
-		if (s0mode != 0 &&
-		    s0magic != EXT4FS_EXTENT_HEADER_MAGIC &&
-		    !(s0mode & S_IFLNK)) {
-			printf("ext4fs_update: CORRUPT slot0 in dblk=%lld"
-			    " while writing ino=%u\n",
-			    (long long)disk_block, ip->i_number);
-		}
 	}
 
 	/*
@@ -278,62 +251,15 @@ ext4fs_update(struct inode *ip, int waitfor)
 	ip->i_e4din->dinode.i_checksum_hi = htole16((csum >> 16) & 0xFFFF);
 
 	/* Copy inode to buffer */
-	printf("ext4fs_update: ino=%u writing nlink=%u mode=0%o "
-	    "eh_magic=0x%x eh_entries=%u\n",
-	    ip->i_number,
-	    letoh16(ip->i_e4din->dinode.i_links_count),
-	    letoh16(ip->i_e4din->dinode.i_mode),
-	    letoh16(ip->i_e4din->dinode.i_extent_header.eh_magic),
-	    letoh16(ip->i_e4din->dinode.i_extent_header.eh_entries));
 	memcpy((char *)bp->b_data + offset_in_block, ip->i_e4din,
 	    fs->m_inode_size);
 
-	/*
-	 * After memcpy: verify we didn't corrupt any other inode
-	 * in this block. Check all slots for valid extent headers.
-	 */
-	{
-		int slot;
-		for (slot = 0; slot < fs->m_inodes_per_block; slot++) {
-			u_int32_t soff = slot * fs->m_inode_size;
-			struct ext4fs_dinode *sd =
-			    (struct ext4fs_dinode *)
-			    ((char *)bp->b_data + soff);
-			u_int16_t sm = letoh16(sd->i_mode);
-			u_int32_t sf = letoh32(sd->i_flags);
-			u_int16_t smag =
-			    letoh16(sd->i_extent_header.eh_magic);
-			if (sm != 0 &&
-			    (sf & EXTFS_INODE_FLAG_EXTENTS) &&
-			    smag != EXT4FS_EXTENT_HEADER_MAGIC) {
-				u_int32_t slot_ino = inode_group *
-				    fs->m_inodes_per_group +
-				    block_in_table *
-				    fs->m_inodes_per_block +
-				    slot + 1;
-				printf("ext4fs_update: CORRUPTION "
-				    "DETECTED after writing ino=%u! "
-				    "Slot %d (ino=%u) has bad "
-				    "magic=0x%x mode=0%o flags=0x%x "
-				    "offset=%u inode_size=%u\n",
-				    ip->i_number, slot, slot_ino,
-				    smag, sm, sf,
-				    offset_in_block, fs->m_inode_size);
-			}
-		}
-	}
-
-	printf("ext4fs_update: ino=%u bwrite waitfor=%d\n",
-	    ip->i_number, waitfor);
 	if (waitfor) {
 		error = bwrite(bp);
-		printf("ext4fs_update: ino=%u bwrite done error=%d\n",
-		    ip->i_number, error);
 		return (error);
 	}
 
 	bdwrite(bp);
-	printf("ext4fs_update: ino=%u bdwrite done\n", ip->i_number);
 	return (0);
 }
 
@@ -395,8 +321,6 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 			bitmap_blk |= (u_int64_t)
 			    letoh32(gd->bgd_block_bitmap_block_hi) << 32;
 
-		printf("ext4fs_blkalloc: group=%u bitmap_blk=%llu bread\n",
-		    g, (unsigned long long)bitmap_blk);
 		error = bread(ip->i_devvp,
 		    (daddr_t)EXT4FS_FSBTODB(fs, bitmap_blk),
 		    fs->m_block_size, &bp);
@@ -404,8 +328,6 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 			brelse(bp);
 			continue;
 		}
-		printf("ext4fs_blkalloc: bread done\n");
-
 		bbp = (char *)bp->b_data;
 
 		/*
@@ -477,12 +399,9 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 						    (bcsum >> 16) & 0xFFFF);
 				}
 
-				printf("ext4fs_blkalloc: bwrite bitmap blk_in_group=%u\n",
-				    blk_in_group);
 				error = bwrite(bp);
 				if (error)
 					return (error);
-				printf("ext4fs_blkalloc: bwrite done\n");
 
 				/* Update BGD */
 				free_blocks--;
@@ -494,9 +413,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 					    htole16((free_blocks >> 16) &
 					    0xFFFF);
 
-				printf("ext4fs_blkalloc: bgd_write\n");
 				ext4fs_bgd_write(fs, ip->i_devvp, g);
-				printf("ext4fs_blkalloc: bgd_write done\n");
 
 				/* Update superblock counters */
 				fs->m_free_blocks_count--;
@@ -637,23 +554,13 @@ ext4fs_extent_insert(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
 	u_int16_t entries, maxe;
 	int i;
 
-	printf("ext4fs_extent_insert: lbn=%u pblk=%llu len=%u\n",
-	    lbn, (unsigned long long)pblk, len);
-
-	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
-		printf("ext4fs_extent_insert: bad magic %x\n",
-		    letoh16(eh->eh_magic));
+	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC)
 		return (EIO);
-	}
-	if (letoh16(eh->eh_depth) != 0) {
-		printf("ext4fs_extent_insert: depth=%u unsupported\n",
-		    letoh16(eh->eh_depth));
+	if (letoh16(eh->eh_depth) != 0)
 		return (EOPNOTSUPP);
-	}
 
 	entries = letoh16(eh->eh_entries);
 	maxe = letoh16(eh->eh_max);
-	printf("ext4fs_extent_insert: entries=%u maxe=%u\n", entries, maxe);
 
 	/* Try to merge with last extent */
 	if (entries > 0) {
@@ -674,7 +581,6 @@ ext4fs_extent_insert(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
 
 	/* Cannot merge - need a new entry */
 	if (entries >= maxe) {
-		printf("ext4fs_extent_insert: entries >= maxe\n");
 		return (ENOSPC);
 	}
 
@@ -739,22 +645,15 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 		goal = last_start + letoh16(last->e_len);
 	}
 
-	printf("ext4fs_buf_alloc: lbn=%llu blkalloc goal=%llu\n",
-	    (unsigned long long)lbn, (unsigned long long)goal);
 	error = ext4fs_blkalloc(ip, goal, &pblk);
 	if (error)
 		return (error);
-	printf("ext4fs_buf_alloc: blkalloc done pblk=%llu\n",
-	    (unsigned long long)pblk);
-
 	/* Insert extent */
 	error = ext4fs_extent_insert(ip, lbn, pblk, 1);
 	if (error) {
 		ext4fs_blkfree(ip, pblk);
 		return (error);
 	}
-	printf("ext4fs_buf_alloc: extent_insert done\n");
-
 	/* Update inode block count (i_blocks is in 512-byte sectors) */
 	i_blocks = letoh32(din->i_blocks_lo);
 	i_blocks += fs->m_block_size / DEV_BSIZE;
@@ -766,18 +665,12 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 	ip->i_flag |= IN_CHANGE | IN_UPDATE;
 
 	/* Get buffer for the new block */
-	printf("ext4fs_buf_alloc: getblk pblk=%llu dblk=%llu\n",
-	    (unsigned long long)pblk,
-	    (unsigned long long)EXT4FS_FSBTODB(fs, pblk));
 	*bpp = getblk(ip->i_devvp,
 	    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
 	    fs->m_block_size, 0, INFSLP);
-	printf("ext4fs_buf_alloc: getblk done\n");
-
 	if (flags & B_CLRBUF)
 		clrbuf(*bpp);
 
-	printf("ext4fs_buf_alloc: clrbuf done\n");
 	return (0);
 }
 
@@ -992,8 +885,6 @@ ext4fs_lookup(void *v)
 	struct componentname *cnp = ap->a_cnp;
 	struct inode *dp = VTOI(vdp);
 	struct m_ext4fs *fs = dp->i_e4fs;
-	printf("ext4fs_lookup: dir_ino=%u name=%.*s\n",
-	    dp->i_number, (int)cnp->cn_namelen, cnp->cn_nameptr);
 	struct ext4fs_dinode *din = &dp->i_e4din->dinode;
 	struct ext4fs_directory *ep;
 	struct vnode *tdp;
@@ -1018,7 +909,6 @@ ext4fs_lookup(void *v)
 
 	/* Check accessibility of directory */
 	if ((error = VOP_ACCESS(vdp, VEXEC, cnp->cn_cred, cnp->cn_proc)) != 0) {
-		printf("ext4fs_lookup: access denied error=%d\n", error);
 		return (error);
 	}
 
@@ -1027,12 +917,8 @@ ext4fs_lookup(void *v)
 		return (EROFS);
 
 	/* Check the name cache */
-	printf("ext4fs_lookup: cache_lookup\n");
-	if ((error = cache_lookup(vdp, vpp, cnp)) >= 0) {
-		printf("ext4fs_lookup: cache hit error=%d\n", error);
+	if ((error = cache_lookup(vdp, vpp, cnp)) >= 0)
 		return (error);
-	}
-	printf("ext4fs_lookup: cache miss, searching dir\n");
 
 	/* Search directory for the name */
 	filesz = (off_t)letoh32(din->i_size_lo) |
@@ -1046,9 +932,6 @@ ext4fs_lookup(void *v)
 
 		error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
 		if (error) {
-			printf("ext4fs_lookup: extent_pblk error=%d "
-			    "ino=%u lbn=%llu\n", error,
-			    dp->i_number, (unsigned long long)lbn);
 			return (error);
 		}
 
@@ -1056,14 +939,12 @@ ext4fs_lookup(void *v)
 		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
 		    fs->m_block_size, &bp);
 		if (error) {
-			printf("ext4fs_lookup: bread error=%d "
-			    "ino=%u pblk=%llu\n", error,
-			    dp->i_number, (unsigned long long)pblk);
 			brelse(bp);
 			return (error);
 		}
 
 		blkoff = EXT4FS_BLKOFF(fs, off);
+		prevoff = -1;
 
 		while (blkoff < fs->m_block_size && off < filesz) {
 			ep = (struct ext4fs_directory *)
@@ -1071,10 +952,6 @@ ext4fs_lookup(void *v)
 			reclen = letoh16(ep->e4d_reclen);
 
 			if (reclen == 0) {
-				printf("ext4fs_lookup: reclen=0 "
-				    "ino=%u off=%lld blkoff=%llu\n",
-				    dp->i_number, (long long)off,
-				    (unsigned long long)blkoff);
 				brelse(bp);
 				return (EIO);
 			}
@@ -1132,8 +1009,6 @@ ext4fs_lookup(void *v)
 	}
 
 	/* Not found */
-	printf("ext4fs_lookup: not found name=%.*s\n",
-	    (int)cnp->cn_namelen, cnp->cn_nameptr);
 	if ((nameiop == CREATE || nameiop == RENAME) && (flags & ISLASTCN)) {
 		if (vdp->v_mount->mnt_flag & MNT_RDONLY)
 			return (EROFS);
@@ -1161,7 +1036,6 @@ ext4fs_lookup(void *v)
 	return (ENOENT);
 
 found:
-	printf("ext4fs_lookup: found ino=%u\n", (unsigned)foundino);
 	if ((flags & ISLASTCN) && nameiop == LOOKUP)
 		dp->i_diroff = EXT4FS_LBLKNO(fs, dp->i_offset) *
 		    fs->m_block_size;
@@ -1234,16 +1108,11 @@ found:
 		*vpp = tdp;
 	} else if (dp->i_number == foundino) {
 		/* "." - return same vnode */
-		printf("ext4fs_lookup: dot\n");
 		vref(vdp);
 		*vpp = vdp;
 	} else {
-		printf("ext4fs_lookup: vget ino=%u\n", (unsigned)foundino);
-		if ((error = VFS_VGET(vdp->v_mount, foundino, &tdp)) != 0) {
-			printf("ext4fs_lookup: vget error=%d\n", error);
+		if ((error = VFS_VGET(vdp->v_mount, foundino, &tdp)) != 0)
 			return (error);
-		}
-		printf("ext4fs_lookup: vget done\n");
 		if (!lockparent || !(flags & ISLASTCN)) {
 			VOP_UNLOCK(vdp);
 			cnp->cn_flags |= PDIRUNLOCK;
@@ -1253,7 +1122,6 @@ found:
 
 	if (cnp->cn_flags & MAKEENTRY)
 		cache_enter(vdp, *vpp, cnp);
-	printf("ext4fs_lookup: returning 0\n");
 	return (0);
 }
 
@@ -1275,18 +1143,15 @@ ext4fs_makeinode(int mode, struct vnode *dvp, struct vnode **vpp,
 	if ((mode & S_IFMT) == 0)
 		mode |= S_IFREG;
 
-	printf("ext4fs_makeinode: inode_alloc mode=%o\n", mode);
+
 	error = ext4fs_inode_alloc(pdir, mode, cnp->cn_cred, &tvp);
 	if (error) {
-		printf("ext4fs_makeinode: inode_alloc error=%d\n", error);
 		pool_put(&namei_pool, cnp->cn_pnbuf);
 		return (error);
 	}
 
 	ip = VTOI(tvp);
 	din = &ip->i_e4din->dinode;
-	printf("ext4fs_makeinode: ino=%u\n", ip->i_number);
-
 	/* Set owner from cred and parent */
 	din->i_uid_lo = htole16(cnp->cn_cred->cr_uid & 0xFFFF);
 	din->i_uid_hi = htole16((cnp->cn_cred->cr_uid >> 16) & 0xFFFF);
@@ -1311,18 +1176,11 @@ ext4fs_makeinode(int mode, struct vnode *dvp, struct vnode **vpp,
 		din->i_mode = htole16(letoh16(din->i_mode) & ~ISGID);
 
 	/* Write inode to disk before directory entry */
-	printf("ext4fs_makeinode: update\n");
-	if ((error = ext4fs_update(ip, 1)) != 0) {
-		printf("ext4fs_makeinode: update error=%d\n", error);
+	if ((error = ext4fs_update(ip, 1)) != 0)
 		goto bad;
-	}
-	printf("ext4fs_makeinode: direnter\n");
 	error = ext4fs_direnter(ip, dvp, cnp);
-	if (error != 0) {
-		printf("ext4fs_makeinode: direnter error=%d\n", error);
+	if (error != 0)
 		goto bad;
-	}
-	printf("ext4fs_makeinode: done ino=%u\n", ip->i_number);
 
 	if ((cnp->cn_flags & SAVESTART) == 0)
 		pool_put(&namei_pool, cnp->cn_pnbuf);
@@ -1343,8 +1201,6 @@ int
 ext4fs_create(void *v)
 {
 	struct vop_create_args *ap = v;
-	printf("ext4fs_create: name=%.*s\n",
-	    (int)ap->a_cnp->cn_namelen, ap->a_cnp->cn_nameptr);
 	return (ext4fs_makeinode(
 	    MAKEIMODE(ap->a_vap->va_type, ap->a_vap->va_mode),
 	    ap->a_dvp, ap->a_vpp, ap->a_cnp));
@@ -1355,8 +1211,6 @@ ext4fs_mknod(void *v)
 {
 	struct vop_mknod_args *ap = v;
 	struct vnode **vpp = ap->a_vpp;
-	printf("ext4fs_mknod: name=%.*s\n",
-	    (int)ap->a_cnp->cn_namelen, ap->a_cnp->cn_nameptr);
 	struct vnode *tvp;
 	struct inode *ip;
 	int error;
@@ -1388,8 +1242,6 @@ ext4fs_mknod(void *v)
 int
 ext4fs_open(void *v)
 {
-	struct vop_open_args *ap = v;
-	printf("ext4fs_open: ino=%u\n", VTOI(ap->a_vp)->i_number);
 	return (0);
 }
 
@@ -1400,7 +1252,7 @@ ext4fs_access(void *v)
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
-	printf("ext4fs_access: ino=%u mode=0%o\n", ip->i_number, ap->a_mode);
+
 	mode_t mode;
 	uid_t uid;
 	gid_t gid;
@@ -1420,7 +1272,7 @@ ext4fs_getattr(void *v)
 	struct vop_getattr_args *ap = v;
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_getattr: ino=%u\n", ip->i_number);
+
 	struct ext4fs_dinode_256 *din = ip->i_e4din;
 	struct vattr *vap = ap->a_vap;
 
@@ -1469,7 +1321,7 @@ int
 ext4fs_chmod(struct vnode *vp, mode_t mode, struct ucred *cred)
 {
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_chmod: ino=%u mode=0%o\n", ip->i_number, mode);
+
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	uid_t uid;
 	gid_t gid;
@@ -1506,7 +1358,7 @@ int
 ext4fs_chown(struct vnode *vp, uid_t uid, gid_t gid, struct ucred *cred)
 {
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_chown: ino=%u uid=%u gid=%u\n", ip->i_number, uid, gid);
+
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	uid_t ouid;
 	gid_t ogid;
@@ -1558,7 +1410,7 @@ ext4fs_setattr(void *v)
 	struct inode *ip = VTOI(vp);
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct ucred *cred = ap->a_cred;
-	printf("ext4fs_setattr: ino=%u\n", ip->i_number);
+
 	int error = 0;
 
 	if ((vap->va_type != VNON) || (vap->va_nlink != VNOVAL) ||
@@ -1661,9 +1513,6 @@ ext4fs_read(void *v)
 	struct vop_read_args *ap = v;
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_read: ino=%u resid=%zu offset=%lld\n",
-	    ip->i_number, ap->a_uio->uio_resid,
-	    (long long)ap->a_uio->uio_offset);
 	struct m_ext4fs *fs = ip->i_e4fs;
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct uio *uio = ap->a_uio;
@@ -1750,9 +1599,6 @@ ext4fs_write(void *v)
 	size_t resid;
 	ssize_t overrun;
 
-	printf("ext4fs_write: ino=%u resid=%zu offset=%lld\n",
-	    ip->i_number, uio->uio_resid, (long long)uio->uio_offset);
-
 	if (uio->uio_resid == 0)
 		return (0);
 
@@ -1788,29 +1634,19 @@ ext4fs_write(void *v)
 		if (uio->uio_resid < xfersize)
 			xfersize = uio->uio_resid;
 
-		printf("ext4fs_write: lbn=%llu buf_alloc\n",
-		    (unsigned long long)lbn);
 		error = ext4fs_buf_alloc(ip, lbn, fs->m_block_size,
 		    ap->a_cred, &bp, B_CLRBUF);
 		if (error)
 			break;
-		printf("ext4fs_write: lbn=%llu uiomove\n",
-		    (unsigned long long)lbn);
-
 		error = uiomove((char *)bp->b_data + blkoffset, xfersize,
 		    uio);
 
-		printf("ext4fs_write: lbn=%llu bwrite\n",
-		    (unsigned long long)lbn);
 		if (ioflag & IO_SYNC)
 			(void)bwrite(bp);
 		else if (xfersize + blkoffset == fs->m_block_size)
 			bawrite(bp);
 		else
 			bdwrite(bp);
-		printf("ext4fs_write: lbn=%llu bwrite done\n",
-		    (unsigned long long)lbn);
-
 		if (error || xfersize == 0)
 			break;
 
@@ -1818,11 +1654,7 @@ ext4fs_write(void *v)
 		if (uio->uio_offset > filesz) {
 			ext4fs_setsize(ip, uio->uio_offset);
 			filesz = uio->uio_offset;
-			printf("ext4fs_write: lbn=%llu uvm_vnp_setsize\n",
-			    (unsigned long long)lbn);
 			uvm_vnp_setsize(vp, filesz);
-			printf("ext4fs_write: lbn=%llu uvm_vnp_setsize done\n",
-			    (unsigned long long)lbn);
 		}
 
 		ip->i_flag |= IN_CHANGE | IN_UPDATE;
@@ -1848,7 +1680,7 @@ ext4fs_fsync(void *v)
 {
 	struct vop_fsync_args *ap = v;
 	struct vnode *vp = ap->a_vp;
-	printf("ext4fs_fsync: ino=%u\n", VTOI(vp)->i_number);
+
 
 	if (vp->v_mount->mnt_flag & MNT_RDONLY)
 		return (0);
@@ -1864,9 +1696,6 @@ ext4fs_remove(void *v)
 	struct vnode *vp = ap->a_vp;
 	struct vnode *dvp = ap->a_dvp;
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_remove: ino=%u dir_ino=%u name=%.*s\n",
-	    ip->i_number, VTOI(dvp)->i_number,
-	    (int)ap->a_cnp->cn_namelen, ap->a_cnp->cn_nameptr);
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	u_int16_t nlink;
 	int error;
@@ -1899,9 +1728,6 @@ ext4fs_link(void *v)
 	struct vnode *vp = ap->a_vp;
 	struct componentname *cnp = ap->a_cnp;
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_link: ino=%u dir_ino=%u name=%.*s\n",
-	    ip->i_number, VTOI(dvp)->i_number,
-	    (int)cnp->cn_namelen, cnp->cn_nameptr);
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	u_int16_t nlink;
 	int error;
@@ -2288,9 +2114,7 @@ ext4fs_mkdir(void *v)
 
 	ext4fs_dir_set_csum(fs, ip->i_number,
 	    ip->i_e4din->dinode.i_nfs_generation, bp->b_data);
-	printf("ext4fs_mkdir: before bwrite\n");
 	error = bwrite(bp);
-	printf("ext4fs_mkdir: after bwrite error=%d\n", error);
 	if (error)
 		goto bad;
 
@@ -2301,16 +2125,6 @@ ext4fs_mkdir(void *v)
 	/* Write inode before directory entry */
 	if ((error = ext4fs_update(ip, 1)) != 0)
 		goto bad;
-
-	/* Verify nlink=2 was written */
-	{
-		u_int16_t verify_nlink =
-		    letoh16(ip->i_e4din->dinode.i_links_count);
-		if (verify_nlink != 2)
-			printf("ext4fs_mkdir: BUG ino=%u nlink=%u "
-			    "expected 2 after update\n",
-			    ip->i_number, verify_nlink);
-	}
 
 	/* Increment parent's link count for ".." */
 	nlink++;
@@ -2335,34 +2149,6 @@ ext4fs_mkdir(void *v)
 		pool_put(&namei_pool, cnp->cn_pnbuf);
 	*ap->a_vpp = tvp;
 
-	/* Final verification: re-read inode block and check nlink */
-	{
-		u_int32_t vg = (ip->i_number - 1) / fs->m_inodes_per_group;
-		u_int32_t vi = (ip->i_number - 1) % fs->m_inodes_per_group;
-		u_int32_t vbi = vi / fs->m_inodes_per_block;
-		u_int32_t voff = (vi % fs->m_inodes_per_block) *
-		    fs->m_inode_size;
-		struct ext4fs_block_group_descriptor *vgd = &fs->m_gd[vg];
-		u_int64_t vitb = letoh32(vgd->bgd_inode_table_block_lo);
-		daddr_t vdb = (vitb + vbi) <<
-		    fs->m_fs_block_to_disk_block;
-		struct buf *vbp;
-		if (bread(ip->i_devvp, vdb, fs->m_block_size, &vbp) == 0) {
-			struct ext4fs_dinode *vdp =
-			    (struct ext4fs_dinode *)
-			    ((char *)vbp->b_data + voff);
-			u_int16_t ondisk_nlink =
-			    letoh16(vdp->i_links_count);
-			if (ondisk_nlink != 2)
-				printf("ext4fs_mkdir: ONDISK BUG "
-				    "ino=%u nlink=%u expected 2\n",
-				    ip->i_number, ondisk_nlink);
-			brelse(vbp);
-		}
-	}
-
-	printf("ext4fs_mkdir: done ino=%u nlink=%u\n",
-	    ip->i_number, letoh16(din->i_links_count));
 	vput(dvp);
 	return (0);
 
@@ -2387,9 +2173,6 @@ ext4fs_rmdir(void *v)
 	struct componentname *cnp = ap->a_cnp;
 	struct inode *ip = VTOI(vp);
 	struct inode *dp = VTOI(dvp);
-	printf("ext4fs_rmdir: ino=%u dir_ino=%u name=%.*s\n",
-	    ip->i_number, dp->i_number,
-	    (int)cnp->cn_namelen, cnp->cn_nameptr);
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	u_int16_t nlink;
 	int error;
@@ -2439,9 +2222,6 @@ ext4fs_symlink(void *v)
 {
 	struct vop_symlink_args *ap = v;
 	struct vnode *dvp = ap->a_dvp;
-	printf("ext4fs_symlink: dir_ino=%u name=%.*s\n",
-	    VTOI(dvp)->i_number,
-	    (int)ap->a_cnp->cn_namelen, ap->a_cnp->cn_nameptr);
 	struct vattr *vap = ap->a_vap;
 	struct componentname *cnp = ap->a_cnp;
 	struct vnode **vpp = ap->a_vpp;
@@ -2496,7 +2276,7 @@ ext4fs_readdir(void *v)
 	struct uio *uio = ap->a_uio;
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_readdir: ino=%u\n", ip->i_number);
+
 	struct m_ext4fs *fs = ip->i_e4fs;
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct ext4fs_directory *ep;
@@ -2590,7 +2370,7 @@ ext4fs_readlink(void *v)
 	struct vop_readlink_args *ap = v;
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
-	printf("ext4fs_readlink: ino=%u\n", ip->i_number);
+
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	u_int64_t filesz;
 
@@ -2616,9 +2396,6 @@ ext4fs_direnter(struct inode *ip, struct vnode *dvp,
 {
 	struct inode *dp = VTOI(dvp);
 	struct m_ext4fs *fs = dp->i_e4fs;
-	printf("ext4fs_direnter: ino=%u dir_ino=%u name=%.*s\n",
-	    ip->i_number, dp->i_number,
-	    (int)cnp->cn_namelen, cnp->cn_nameptr);
 	struct ext4fs_dinode *ddin = &dp->i_e4din->dinode;
 	struct ext4fs_directory *ep, *nep;
 	struct buf *bp;
@@ -2632,9 +2409,6 @@ ext4fs_direnter(struct inode *ip, struct vnode *dvp,
 
 	filesz = (off_t)letoh32(ddin->i_size_lo) |
 	    ((off_t)letoh32(ddin->i_size_hi) << 32);
-
-	printf("ext4fs_direnter: filesz=%lld i_count=%d i_offset=%lld\n",
-	    (long long)filesz, dp->i_count, (long long)dp->i_offset);
 
 	if (dp->i_count == 0) {
 		/*
@@ -2684,9 +2458,7 @@ ext4fs_direnter(struct inode *ip, struct vnode *dvp,
 
 		ext4fs_dir_set_csum(fs, dp->i_number,
 		    dp->i_e4din->dinode.i_nfs_generation, bp->b_data);
-		printf("ext4fs_direnter: new block bwrite\n");
 		error = bwrite(bp);
-		printf("ext4fs_direnter: new block bwrite done error=%d\n", error);
 		if (error)
 			return (error);
 
@@ -2746,13 +2518,10 @@ ext4fs_direnter(struct inode *ip, struct vnode *dvp,
 
 	ext4fs_dir_set_csum(fs, dp->i_number,
 	    dp->i_e4din->dinode.i_nfs_generation, bp->b_data);
-	printf("ext4fs_direnter: compact bwrite\n");
 	error = bwrite(bp);
-	printf("ext4fs_direnter: compact bwrite done error=%d\n", error);
 	dp->i_flag |= IN_CHANGE | IN_UPDATE;
 	if (error == 0)
 		error = ext4fs_update(dp, 1);
-	printf("ext4fs_direnter: returning error=%d\n", error);
 	return (error);
 }
 
@@ -2928,8 +2697,6 @@ ext4fs_inactive(void *v)
 	struct inode *ip = VTOI(vp);
 	u_int16_t mode, nlink;
 	int error = 0;
-	printf("ext4fs_inactive: ino=%u flags=0x%x\n",
-	    ip->i_number, ip->i_flag);
 #ifdef DIAGNOSTIC
 	extern int prtactive;
 
@@ -2941,13 +2708,11 @@ ext4fs_inactive(void *v)
 	 * Ignore inodes related to stale file handles.
 	 */
 	if (ip->i_e4din == NULL) {
-		printf("ext4fs_inactive: ino=%u no din\n", ip->i_number);
 		goto out;
 	}
 
 	mode = letoh16(ip->i_e4din->dinode.i_mode);
 	if (mode == 0) {
-		printf("ext4fs_inactive: ino=%u mode=0\n", ip->i_number);
 		goto out;
 	}
 
@@ -2955,13 +2720,10 @@ ext4fs_inactive(void *v)
 	 * If the inode was deleted (dtime != 0), skip further processing.
 	 */
 	if (letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
-		printf("ext4fs_inactive: ino=%u already deleted\n", ip->i_number);
 		goto out;
 	}
 
 	nlink = letoh16(ip->i_e4din->dinode.i_links_count);
-	printf("ext4fs_inactive: ino=%u nlink=%u flags=0x%x\n",
-	    ip->i_number, nlink, ip->i_flag);
 
 	/*
 	 * Handle file deletion: if nlink == 0, truncate data,
@@ -2970,9 +2732,7 @@ ext4fs_inactive(void *v)
 	if (nlink == 0 && (vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
 		struct timespec ts;
 
-		printf("ext4fs_inactive: ino=%u truncating\n", ip->i_number);
 		(void)ext4fs_truncate(ip, 0, 0, NOCRED);
-		printf("ext4fs_inactive: ino=%u inode_free\n", ip->i_number);
 		ext4fs_inode_free(ip, ip->i_number, mode);
 
 		getnanotime(&ts);
@@ -2982,14 +2742,11 @@ ext4fs_inactive(void *v)
 	}
 
 	if (ip->i_flag & (IN_ACCESS | IN_CHANGE | IN_MODIFIED | IN_UPDATE)) {
-		printf("ext4fs_inactive: ino=%u calling update\n", ip->i_number);
 		ext4fs_update(ip, nlink == 0 ? 1 : 0);
 	}
 
 out:
-	printf("ext4fs_inactive: ino=%u unlock\n", ip->i_number);
 	VOP_UNLOCK(vp);
-	printf("ext4fs_inactive: ino=%u unlock done\n", ip->i_number);
 
 	/*
 	 * If we are done with the inode, reclaim it
@@ -2997,7 +2754,6 @@ out:
 	 * NOTE: after vrecycle, ip is freed (use-after-free danger).
 	 */
 	if (ip->i_e4din == NULL || letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
-		printf("ext4fs_inactive: ino=%u vrecycle\n", ip->i_number);
 		vrecycle(vp, ap->a_p);
 		/* ip is now freed - do NOT access ip after this point */
 		return (error);
@@ -3014,12 +2770,8 @@ ext4fs_reclaim(void *v)
 	struct inode *ip = VTOI(vp);
 	int error;
 
-	printf("ext4fs_reclaim: ino=%u\n", ip->i_number);
-	if ((error = ufs_reclaim(vp)) != 0) {
-		printf("ext4fs_reclaim: ufs_reclaim error=%d\n", error);
+	if ((error = ufs_reclaim(vp)) != 0)
 		return (error);
-	}
-	printf("ext4fs_reclaim: ufs_reclaim done\n");
 
 	if (ip->i_e4din != NULL)
 		pool_put(&ext4fs_dinode_pool, ip->i_e4din);
@@ -3028,7 +2780,6 @@ ext4fs_reclaim(void *v)
 
 	vp->v_data = NULL;
 
-	printf("ext4fs_reclaim: done\n");
 	return (0);
 }
 
@@ -3038,8 +2789,6 @@ ext4fs_bmap(void *v)
 	struct vop_bmap_args *ap = v;
 	struct inode *ip = VTOI(ap->a_vp);
 	struct m_ext4fs *fs = ip->i_e4fs;
-	printf("ext4fs_bmap: ino=%u lbn=%lld\n",
-	    ip->i_number, (long long)ap->a_bn);
 	u_int64_t pblk, ncontig;
 	int error;
 
@@ -3077,8 +2826,6 @@ ext4fs_strategy(void *v)
 	int s;
 
 	ip = VTOI(vp);
-	printf("ext4fs_strategy: ino=%u blkno=%lld\n",
-	    ip->i_number, (long long)bp->b_blkno);
 	if (vp->v_type == VBLK || vp->v_type == VCHR)
 		panic("ext4fs_strategy: spec");
 
@@ -3126,7 +2873,7 @@ int
 ext4fs_pathconf(void *v)
 {
 	struct vop_pathconf_args *ap = v;
-	printf("ext4fs_pathconf: name=%d\n", ap->a_name);
+
 
 	switch (ap->a_name) {
 	case _PC_LINK_MAX:
@@ -3161,7 +2908,7 @@ ext4fs_advlock(void *v)
 {
 	struct vop_advlock_args *ap = v;
 	struct inode *ip = VTOI(ap->a_vp);
-	printf("ext4fs_advlock: ino=%u op=%d\n", ip->i_number, ap->a_op);
+
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	off_t filesz;
 
