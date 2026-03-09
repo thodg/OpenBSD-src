@@ -1892,8 +1892,6 @@ ext4fs_rename(void *v)
 	int doingdirectory = 0, oldparent = 0, newparent = 0;
 	int error = 0;
 	u_int16_t nlink;
-	off_t saved_offset;
-	int saved_count;
 
 	/* Check for cross-device rename */
 	if ((fvp->v_mount != tdvp->v_mount) ||
@@ -1921,15 +1919,6 @@ abortit:
 	ip = VTOI(fvp);
 	din = &ip->i_e4din->dinode;
 
-	/*
-	 * Save source directory's offset/count from the lookup.
-	 * If fdvp == tdvp (same-directory rename), the target
-	 * lookup will overwrite these, so we restore them before
-	 * calling ext4fs_dirremove.
-	 */
-	saved_offset = dp->i_offset;
-	saved_count = dp->i_count;
-
 	nlink = letoh16(din->i_links_count);
 	if ((letoh32(din->i_flags) &
 	    (EXTFS_INODE_FLAG_IMMUTABLE | EXTFS_INODE_FLAG_APPEND))) {
@@ -1953,85 +1942,146 @@ abortit:
 		goto abortit;
 	}
 	VOP_UNLOCK(fvp);
+	vrele(fdvp);
 
 	/*
-	 * 1. If target exists, remove/rewrite it.
-	 * 2. If not, add new directory entry.
+	 * If ".." must be changed (ie the directory gets a new parent)
+	 * then the source directory must not be in the directory
+	 * hierarchy above the target.
 	 */
 	dp = VTOI(tdvp);
+	if (oldparent != dp->i_number)
+		newparent = dp->i_number;
+
 	xp = NULL;
 	if (tvp)
 		xp = VTOI(tvp);
 
-	if (tvp != NULL) {
+	/*
+	 * 2) If target doesn't exist, link the target to the source
+	 *    and unlink the source. Otherwise, rewrite the target
+	 *    directory entry to reference the source inode.
+	 */
+	if (xp == NULL) {
+		/*
+		 * Account for ".." in new directory.
+		 * When source and destination have the same
+		 * parent we don't fool with the link count.
+		 */
+		if (doingdirectory && newparent) {
+			u_int16_t pnlink = letoh16(
+			    dp->i_e4din->dinode.i_links_count);
+			pnlink++;
+			dp->i_e4din->dinode.i_links_count = htole16(pnlink);
+			dp->i_effnlink = pnlink;
+			dp->i_flag |= IN_CHANGE;
+			if ((error = ext4fs_update(dp, 1)) != 0)
+				goto bad;
+		}
+		error = ext4fs_direnter(ip, tdvp, tcnp);
+		if (error) {
+			if (doingdirectory && newparent) {
+				u_int16_t pnlink = letoh16(
+				    dp->i_e4din->dinode.i_links_count);
+				if (pnlink > 1)
+					pnlink--;
+				dp->i_e4din->dinode.i_links_count =
+				    htole16(pnlink);
+				dp->i_effnlink = pnlink;
+				dp->i_flag |= IN_CHANGE;
+				(void)ext4fs_update(dp, 1);
+			}
+			goto bad;
+		}
+		vput(tdvp);
+	} else {
 		/* Target exists - rewrite the entry */
 		error = ext4fs_dirrewrite(dp, ip, tcnp);
 		if (error)
 			goto bad;
 
-		if (xp) {
+		/*
+		 * If the target directory is in the same
+		 * directory as the source directory,
+		 * decrement the link count on the parent
+		 * of the target directory.
+		 */
+		if (doingdirectory && !newparent) {
+			u_int16_t pnlink = letoh16(
+			    dp->i_e4din->dinode.i_links_count);
+			if (pnlink > 1)
+				pnlink--;
+			dp->i_e4din->dinode.i_links_count = htole16(pnlink);
+			dp->i_effnlink = pnlink;
+			dp->i_flag |= IN_CHANGE;
+		}
+		vput(tdvp);
+
+		/*
+		 * Adjust the link count of the target to
+		 * reflect the dirrewrite above.
+		 */
+		{
 			u_int16_t xnlink =
 			    letoh16(xp->i_e4din->dinode.i_links_count);
-			if (doingdirectory && ITOV(xp)->v_type == VDIR) {
-				/* If target dir is not empty, fail */
+			if (xnlink > 0)
+				xnlink--;
+			if (doingdirectory) {
 				if (!ext4fs_dirempty(xp, dp->i_number,
 				    tcnp->cn_cred)) {
 					error = ENOTEMPTY;
-					goto bad;
+					vput(tvp);
+					goto out;
 				}
-				/* Remove ".." ref from parent */
-				u_int16_t pnlink = letoh16(
-				    dp->i_e4din->dinode.i_links_count);
-				if (pnlink > 1) {
-					pnlink--;
-					dp->i_e4din->dinode.i_links_count =
-					    htole16(pnlink);
-					dp->i_effnlink = pnlink;
-					dp->i_flag |= IN_CHANGE;
-				}
+				if (xnlink > 0)
+					xnlink--;
+				error = ext4fs_truncate(xp, 0, 0,
+				    tcnp->cn_cred);
 			}
-			if (xnlink > 0)
-				xnlink--;
 			xp->i_e4din->dinode.i_links_count = htole16(xnlink);
 			xp->i_effnlink = xnlink;
 			xp->i_flag |= IN_CHANGE;
-			if (doingdirectory && xnlink == 0)
-				ext4fs_truncate(xp, 0, 0, tcnp->cn_cred);
 		}
-		cache_purge(tvp);
-	} else {
-		/* Target doesn't exist - add entry */
-		dp = VTOI(tdvp);
-		error = ext4fs_direnter(ip, tdvp, tcnp);
-		if (error)
-			goto bad;
+		vput(tvp);
+		xp = NULL;
 	}
 
-	/* Remove source entry - restore saved offset/count */
-	dp = VTOI(fdvp);
-	dp->i_offset = saved_offset;
-	dp->i_count = saved_count;
-	error = ext4fs_dirremove(fdvp, fcnp);
-	if (error)
-		goto bad;
+	/*
+	 * 3) Unlink the source.
+	 * Re-lookup the source entry to get correct i_offset/i_count,
+	 * since the target lookup overwrites them (especially when
+	 * fdvp == tdvp, i.e., same-directory rename).
+	 */
+	fcnp->cn_flags &= ~MODMASK;
+	fcnp->cn_flags |= LOCKPARENT | LOCKLEAF;
+	if ((fcnp->cn_flags & SAVESTART) == 0)
+		panic("ext4fs_rename: lost from startdir");
+	(void) vfs_relookup(fdvp, &fvp, fcnp);
+	if (fvp != NULL) {
+		xp = VTOI(fvp);
+		dp = VTOI(fdvp);
+	} else {
+		if (doingdirectory)
+			panic("ext4fs_rename: lost dir entry");
+		vrele(ap->a_fvp);
+		return (0);
+	}
 
-	/* Decrement the bump we did earlier */
-	nlink = letoh16(ip->i_e4din->dinode.i_links_count);
-	if (nlink > 0)
-		nlink--;
-	ip->i_e4din->dinode.i_links_count = htole16(nlink);
-	ip->i_effnlink = nlink;
-	ip->i_flag |= IN_CHANGE;
-
-	/* If directory moved to new parent, update ".." */
-	if (doingdirectory) {
-		newparent = VTOI(tdvp)->i_number;
-		if (newparent != oldparent) {
+	if (xp != ip) {
+		if (doingdirectory)
+			panic("ext4fs_rename: lost dir entry");
+	} else {
+		/* If directory moved to new parent, update ".." */
+		if (doingdirectory && newparent) {
 			struct buf *dbp;
 			struct ext4fs_directory *dotdot;
 			u_int64_t dpblk;
 
-			/* Update ".." in moved directory */
+			dp->i_e4din->dinode.i_links_count = htole16(
+			    letoh16(dp->i_e4din->dinode.i_links_count) - 1);
+			dp->i_effnlink--;
+			dp->i_flag |= IN_CHANGE;
+
 			error = ext4fs_extent_pblk(ip, 0, &dpblk, NULL);
 			if (error == 0) {
 				error = bread(ip->i_devvp,
@@ -2042,67 +2092,53 @@ abortit:
 					    ((char *)dbp->b_data +
 					    letoh16(((struct ext4fs_directory *)
 					    dbp->b_data)->e4d_reclen));
-					dotdot->e4d_ino =
-					    htole32(newparent);
+					dotdot->e4d_ino = htole32(newparent);
 					ext4fs_dir_set_csum(ip->i_e4fs,
 					    ip->i_number,
-					    ip->i_e4din->dinode.i_nfs_generation,
+					    ip->i_e4din->dinode.
+					    i_nfs_generation,
 					    dbp->b_data);
 					bwrite(dbp);
 				} else
 					brelse(dbp);
 			}
+		}
 
-			/* Adjust parent link counts */
-			{
-				struct inode *odp = VTOI(fdvp);
-				u_int16_t onlink = letoh16(
-				    odp->i_e4din->dinode.i_links_count);
-				if (onlink > 1) {
-					onlink--;
-					odp->i_e4din->dinode.i_links_count =
-					    htole16(onlink);
-					odp->i_effnlink = onlink;
-					odp->i_flag |= IN_CHANGE;
-				}
-			}
-			{
-				struct inode *ndp = VTOI(tdvp);
-				u_int16_t nnlink = letoh16(
-				    ndp->i_e4din->dinode.i_links_count);
-				nnlink++;
-				ndp->i_e4din->dinode.i_links_count =
-				    htole16(nnlink);
-				ndp->i_effnlink = nnlink;
-				ndp->i_flag |= IN_CHANGE;
-				ext4fs_update(ndp, 1);
-			}
+		error = ext4fs_dirremove(fdvp, fcnp);
+		if (!error) {
+			nlink = letoh16(
+			    xp->i_e4din->dinode.i_links_count);
+			if (nlink > 0)
+				nlink--;
+			xp->i_e4din->dinode.i_links_count = htole16(nlink);
+			xp->i_effnlink = nlink;
+			xp->i_flag |= IN_CHANGE;
 		}
 	}
-
-	if (tvp)
-		vput(tvp);
-	vput(tdvp);
-	vrele(fdvp);
-	vrele(fvp);
-	return (0);
+	if (dp)
+		vput(fdvp);
+	if (xp)
+		vput(fvp);
+	vrele(ap->a_fvp);
+	return (error);
 
 bad:
-	/* Restore link count */
-	nlink = letoh16(ip->i_e4din->dinode.i_links_count);
-	if (nlink > 0 && doingdirectory)
-		nlink--;
-	if (nlink > 0)
-		nlink--;
-	ip->i_e4din->dinode.i_links_count = htole16(nlink);
-	ip->i_effnlink = nlink;
-	ip->i_flag |= IN_CHANGE;
-
-	if (tvp)
-		vput(tvp);
-	vput(tdvp);
-	vrele(fdvp);
-	vrele(fvp);
+	if (xp)
+		vput(ITOV(xp));
+	vput(ITOV(dp));
+out:
+	if (doingdirectory)
+		ip->i_flag &= ~IN_RENAME;
+	if (vn_lock(fvp, LK_EXCLUSIVE) == 0) {
+		nlink = letoh16(ip->i_e4din->dinode.i_links_count);
+		if (nlink > 0)
+			nlink--;
+		ip->i_e4din->dinode.i_links_count = htole16(nlink);
+		ip->i_effnlink = nlink;
+		ip->i_flag |= IN_CHANGE;
+		vput(fvp);
+	} else
+		vrele(fvp);
 	return (error);
 }
 

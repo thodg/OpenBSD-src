@@ -797,7 +797,7 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 				{
 					u_int32_t icsum =
 					    ext4fs_bitmap_csum(fs, g, ibp,
-					    fs->m_block_size);
+					    fs->m_inodes_per_group / 8);
 					gd->bgd_inode_bitmap_checksum_lo =
 					    htole16(icsum & 0xFFFF);
 					if (fs->m_feature_incompat &
@@ -960,7 +960,7 @@ ext4fs_inode_free(struct inode *pip, ufsino_t ino, mode_t mode)
 	/* Update inode bitmap checksum in BGD */
 	{
 		u_int32_t icsum = ext4fs_bitmap_csum(fs, group, ibp,
-		    fs->m_block_size);
+		    fs->m_inodes_per_group / 8);
 		gd->bgd_inode_bitmap_checksum_lo = htole16(icsum & 0xFFFF);
 		if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
 			gd->bgd_inode_bitmap_checksum_hi =
