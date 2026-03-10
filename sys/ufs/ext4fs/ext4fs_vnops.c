@@ -63,6 +63,18 @@
 #include <ufs/ext4fs/ext4fs.h>
 #include <ufs/ext4fs/ext4fs_crc32c.h>
 
+#define EXT4FS_CHECK_EHMAGIC(ip, where) do {				\
+	if ((ip)->i_number == 2 &&					\
+	    (letoh32((ip)->i_e4din->dinode.i_flags) &			\
+	    EXTFS_INODE_FLAG_EXTENTS) &&				\
+	    letoh16((ip)->i_e4din->dinode.i_extent_header.eh_magic)	\
+	    != EXT4FS_EXTENT_HEADER_MAGIC)				\
+		printf("ext4fs: ino=2 eh_magic CORRUPT at %s "		\
+		    "magic=0x%x\n", (where),				\
+		    letoh16((ip)->i_e4din->dinode.			\
+		    i_extent_header.eh_magic));				\
+} while (0)
+
 /* Convert ext4 directory entry file type to BSD dirent type */
 static const u_int8_t ext4fs_type_to_dt[EXT4FS_FT_MAX] = {
 	[EXT4FS_FT_UNKNOWN]	= DT_UNKNOWN,
@@ -233,6 +245,14 @@ ext4fs_update(struct inode *ip, int waitfor)
 		u_int32_t wr_flags = letoh32(ip->i_e4din->dinode.i_flags);
 		u_int16_t wr_magic =
 		    letoh16(ip->i_e4din->dinode.i_extent_header.eh_magic);
+		struct ext4fs_dinode *disk_dp = (struct ext4fs_dinode *)
+		    ((char *)bp->b_data + offset_in_block);
+		u_int16_t disk_magic =
+		    letoh16(disk_dp->i_extent_header.eh_magic);
+		if (ip->i_number <= 11)
+			printf("ext4fs_update: ino=%u mem_magic=0x%x "
+			    "disk_magic=0x%x mode=0%o\n",
+			    ip->i_number, wr_magic, disk_magic, wr_mode);
 		if (wr_mode != 0 &&
 		    (wr_flags & EXTFS_INODE_FLAG_EXTENTS) &&
 		    wr_magic != EXT4FS_EXTENT_HEADER_MAGIC) {
@@ -1725,7 +1745,9 @@ ext4fs_remove(void *v)
 		goto out;
 	}
 
+	EXT4FS_CHECK_EHMAGIC(VTOI(dvp), "remove:pre-dirremove");
 	error = ext4fs_dirremove(dvp, ap->a_cnp);
+	EXT4FS_CHECK_EHMAGIC(VTOI(dvp), "remove:post-dirremove");
 	if (error)
 		goto out;
 
@@ -1737,6 +1759,11 @@ ext4fs_remove(void *v)
 	ip->i_flag |= IN_CHANGE;
 
 out:
+	if (dvp == vp)
+		vrele(vp);
+	else
+		vput(vp);
+	vput(dvp);
 	return (error);
 }
 
@@ -2204,7 +2231,9 @@ ext4fs_rmdir(void *v)
 	}
 
 	/* Remove entry from parent */
+	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:pre-dirremove");
 	error = ext4fs_dirremove(dvp, cnp);
+	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:post-dirremove");
 	if (error)
 		goto out;
 
@@ -2224,7 +2253,9 @@ ext4fs_rmdir(void *v)
 	ip->i_flag |= IN_CHANGE;
 
 	/* Truncate directory contents */
+	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:pre-truncate");
 	error = ext4fs_truncate(ip, 0, 0, cnp->cn_cred);
+	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:post-truncate");
 
 	cache_purge(vp);
 
@@ -2752,7 +2783,9 @@ ext4fs_inactive(void *v)
 	if (nlink == 0 && (vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
 		struct timespec ts;
 
+		EXT4FS_CHECK_EHMAGIC(ip, "inactive:pre-truncate");
 		(void)ext4fs_truncate(ip, 0, 0, NOCRED);
+		EXT4FS_CHECK_EHMAGIC(ip, "inactive:post-truncate");
 		ext4fs_inode_free(ip, ip->i_number, mode);
 
 		getnanotime(&ts);

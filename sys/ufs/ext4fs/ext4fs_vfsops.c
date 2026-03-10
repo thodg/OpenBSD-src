@@ -803,6 +803,8 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 		 */
 		if (letoh16(gd->bgd_flags) &
 		    EXT4FS_BGD_FLAG_INODE_UNINIT) {
+			printf("ext4fs: INODE_UNINIT zeroing group %u\n",
+			    g);
 			memset(ibp, 0, fs->m_block_size);
 			for (pbit = fs->m_inodes_per_group;
 			    pbit < fs->m_block_size * 8; pbit++)
@@ -1258,6 +1260,15 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
 		itable_unused |= (u_int32_t)
 		    letoh16(gd->bgd_inode_table_unused_hi) << 16;
+	if (ino <= 11)
+		printf("ext4fs_vget: ino=%u grp=%u idx=%u "
+		    "flags=0x%x itu=%u ipg=%u "
+		    "eh_magic=0x%x mode=0%o\n",
+		    (u_int32_t)ino, inode_group, inode_index,
+		    bgd_flags, itable_unused,
+		    fs->m_inodes_per_group,
+		    letoh16(dp->i_extent_header.eh_magic),
+		    letoh16(dp->i_mode));
 	if ((bgd_flags & EXT4FS_BGD_FLAG_INODE_UNINIT) ||
 	    inode_index >= fs->m_inodes_per_group - itable_unused) {
 		memset(dp, 0, fs->m_inode_size);
