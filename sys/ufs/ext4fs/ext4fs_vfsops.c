@@ -1280,11 +1280,6 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 			error = ext4fs_inode_csum_verify(fs,
 			    ip->i_e4din, ino);
 			if (error) {
-				printf("ext4fs: ino %u csum fail "
-				    "extra_isize=%u mode=0%o\n",
-				    (u_int32_t)ino,
-				    letoh16(ip->i_e4din->dinode.i_extra_isize),
-				    letoh16(ip->i_e4din->dinode.i_mode));
 				pool_put(&ext4fs_dinode_pool,
 				    ip->i_e4din);
 				ip->i_e4din = NULL;

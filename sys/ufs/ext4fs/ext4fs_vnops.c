@@ -287,10 +287,8 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 	struct buf *bp, *dbp;
 	u_int64_t bitmap_blk, grp_start, bb, ib, itb;
 	u_int32_t group, ngroups, g, blk_in_group, free_blocks;
-	u_int32_t it_blocks, mb, pbit, rb, bcsum, ng;
-	u_int64_t nblocks;
+	u_int32_t it_blocks, mb, pbit, rb, bcsum;
 	u_int32_t *dind;
-	struct ext4fs_block_group_descriptor *ngd;
 	char *bbp;
 	int error, i, j, has_sb;
 
@@ -439,15 +437,6 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 		    blk_in_group < fs->m_blocks_per_group;
 		    blk_in_group++) {
 			if (isclr(bbp, blk_in_group)) {
-				printf("ext4fs_blkalloc: g=%u bit=%u "
-				    "blk=%llu flags=0x%x\n",
-				    g, blk_in_group,
-				    (unsigned long long)(
-				    (u_int64_t)g *
-				    fs->m_blocks_per_group +
-				    blk_in_group +
-				    fs->m_first_data_block),
-				    letoh16(gd->bgd_flags));
 				setbit(bbp, blk_in_group);
 
 				bcsum = ext4fs_bitmap_csum(fs, g, bbp,
@@ -488,30 +477,6 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 
 				*bnp = (u_int64_t)g * fs->m_blocks_per_group +
 				    blk_in_group + fs->m_first_data_block;
-
-				for (ng = 0; ng < fs->m_block_group_count;
-				    ng++) {
-					ngd = &fs->m_gd[ng];
-					itb = letoh32(
-					    ngd->bgd_inode_table_block_lo);
-					nblocks =
-					    (fs->m_inodes_per_group +
-					    fs->m_inodes_per_block - 1) /
-					    fs->m_inodes_per_block;
-					if (*bnp >= itb &&
-					    *bnp < itb + nblocks) {
-						printf("ext4fs_blkalloc: "
-						    "METADATA BLOCK %llu "
-						    "allocated as data! "
-						    "(inode_table of group %u"
-						    " = %llu..%llu)\n",
-						    (unsigned long long)*bnp,
-						    ng,
-						    (unsigned long long)itb,
-						    (unsigned long long)(itb +
-						    nblocks - 1));
-					}
-				}
 
 				return (0);
 			}
