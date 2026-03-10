@@ -284,11 +284,15 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 {
 	struct m_ext4fs *fs = ip->i_e4fs;
 	struct ext4fs_block_group_descriptor *gd;
-	struct buf *bp;
-	u_int64_t bitmap_blk;
-	u_int32_t group, ngroups, blk_in_group, free_blocks;
+	struct buf *bp, *dbp;
+	u_int64_t bitmap_blk, grp_start, bb, ib, itb;
+	u_int32_t group, ngroups, g, blk_in_group, free_blocks;
+	u_int32_t it_blocks, mb, pbit, rb, bcsum, ng;
+	u_int64_t nblocks;
+	u_int32_t *dind;
+	struct ext4fs_block_group_descriptor *ngd;
 	char *bbp;
-	int error, i;
+	int error, i, j, has_sb;
 
 	*bnp = 0;
 
@@ -305,7 +309,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 		group = (ip->i_number - 1) / fs->m_inodes_per_group;
 
 	for (i = 0; i < ngroups; i++) {
-		u_int32_t g = (group + i) % ngroups;
+		g = (group + i) % ngroups;
 		gd = &fs->m_gd[g];
 
 		free_blocks = letoh16(gd->bgd_free_blocks_count_lo);
@@ -337,12 +341,36 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 		 */
 		if (letoh16(gd->bgd_flags) &
 		    EXT4FS_BGD_FLAG_BLOCK_UNINIT) {
-			u_int64_t grp_start = (u_int64_t)g *
+			grp_start = (u_int64_t)g *
 			    fs->m_blocks_per_group +
 			    fs->m_first_data_block;
-			u_int64_t bb, ib, itb;
-			u_int32_t it_blocks, mb;
 			memset(bbp, 0, fs->m_block_size);
+			/*
+			 * Mark superblock, GDT, and reserved
+			 * GDT blocks for groups that have them.
+			 */
+			has_sb = 0;
+			if (!(fs->m_feature_ro_compat &
+			    EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER))
+				has_sb = 1;
+			else if (g == 0 || g == 1)
+				has_sb = 1;
+			else {
+				u_int32_t n;
+				for (n = 3; n <= g; n *= 3)
+					if (n == g) has_sb = 1;
+				for (n = 5; n <= g; n *= 5)
+					if (n == g) has_sb = 1;
+				for (n = 7; n <= g; n *= 7)
+					if (n == g) has_sb = 1;
+			}
+			if (has_sb) {
+				u_int32_t overhead = 1 +
+				    fs->m_block_group_descriptor_blocks_count +
+				    fs->m_reserved_bgdt_blocks;
+				for (mb = 0; mb < overhead; mb++)
+					setbit(bbp, mb);
+			}
 			/* Block bitmap */
 			bb = letoh32(gd->bgd_block_bitmap_block_lo);
 			if (bb >= grp_start &&
@@ -365,17 +393,45 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 				    fs->m_blocks_per_group)
 					setbit(bbp, b - grp_start);
 			}
-			/* Padding beyond blocks_per_group */
-			{
-				u_int32_t pbit;
-				for (pbit = fs->m_blocks_per_group;
-				    pbit < fs->m_block_size * 8;
-				    pbit++)
-					setbit(bbp, pbit);
+			for (pbit = fs->m_blocks_per_group;
+			    pbit < fs->m_block_size * 8; pbit++)
+				setbit(bbp, pbit);
+			/* Mark resize inode (inode 7) blocks */
+			if (fs->m_resize_dind_block != 0) {
+				if (fs->m_resize_dind_block >= grp_start &&
+				    fs->m_resize_dind_block <
+				    grp_start + fs->m_blocks_per_group)
+					setbit(bbp,
+					    fs->m_resize_dind_block -
+					    grp_start);
+
+				error = bread(ip->i_devvp,
+				    (daddr_t)EXT4FS_FSBTODB(fs,
+				    fs->m_resize_dind_block),
+				    fs->m_block_size, &dbp);
+				if (!error) {
+					dind = (u_int32_t *)dbp->b_data;
+					for (j = 0;
+					    j < fs->m_block_size / 4;
+					    j++) {
+						rb = letoh32(dind[j]);
+						if (rb == 0)
+							continue;
+						if (rb >= grp_start &&
+						    rb < grp_start +
+						    fs->m_blocks_per_group)
+							setbit(bbp,
+							    rb - grp_start);
+					}
+					brelse(dbp);
+				} else {
+					brelse(dbp);
+				}
 			}
 			gd->bgd_flags = htole16(letoh16(
 			    gd->bgd_flags) &
 			    ~EXT4FS_BGD_FLAG_BLOCK_UNINIT);
+			ext4fs_bgd_write(fs, ip->i_devvp, g);
 		}
 
 		/* Scan bitmap for free block */
@@ -383,21 +439,26 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 		    blk_in_group < fs->m_blocks_per_group;
 		    blk_in_group++) {
 			if (isclr(bbp, blk_in_group)) {
+				printf("ext4fs_blkalloc: g=%u bit=%u "
+				    "blk=%llu flags=0x%x\n",
+				    g, blk_in_group,
+				    (unsigned long long)(
+				    (u_int64_t)g *
+				    fs->m_blocks_per_group +
+				    blk_in_group +
+				    fs->m_first_data_block),
+				    letoh16(gd->bgd_flags));
 				setbit(bbp, blk_in_group);
 
-				/* Update block bitmap checksum in BGD */
-				{
-					u_int32_t bcsum =
-					    ext4fs_bitmap_csum(fs, g, bbp,
-					    fs->m_block_size);
-					gd->bgd_block_bitmap_checksum_lo =
-					    htole16(bcsum & 0xFFFF);
-					if (fs->m_feature_incompat &
-					    EXT4FS_FEATURE_INCOMPAT_64BIT)
-						gd->bgd_block_bitmap_checksum_hi
-						    = htole16(
-						    (bcsum >> 16) & 0xFFFF);
-				}
+				bcsum = ext4fs_bitmap_csum(fs, g, bbp,
+				    fs->m_block_size);
+				gd->bgd_block_bitmap_checksum_lo =
+				    htole16(bcsum & 0xFFFF);
+				if (fs->m_feature_incompat &
+				    EXT4FS_FEATURE_INCOMPAT_64BIT)
+					gd->bgd_block_bitmap_checksum_hi
+					    = htole16(
+					    (bcsum >> 16) & 0xFFFF);
 
 				error = bwrite(bp);
 				if (error)
@@ -428,17 +489,12 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 				*bnp = (u_int64_t)g * fs->m_blocks_per_group +
 				    blk_in_group + fs->m_first_data_block;
 
-				/* Sanity: check we're not allocating a
-				 * metadata block (inode table, bitmaps) */
-				{
-				    u_int32_t ng;
-				    for (ng = 0; ng < fs->m_block_group_count;
-				        ng++) {
-					struct ext4fs_block_group_descriptor
-					    *ngd = &fs->m_gd[ng];
-					u_int64_t itb =
-					    letoh32(ngd->bgd_inode_table_block_lo);
-					u_int64_t nblocks =
+				for (ng = 0; ng < fs->m_block_group_count;
+				    ng++) {
+					ngd = &fs->m_gd[ng];
+					itb = letoh32(
+					    ngd->bgd_inode_table_block_lo);
+					nblocks =
 					    (fs->m_inodes_per_group +
 					    fs->m_inodes_per_block - 1) /
 					    fs->m_inodes_per_block;
@@ -455,7 +511,6 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 						    (unsigned long long)(itb +
 						    nblocks - 1));
 					}
-				    }
 				}
 
 				return (0);
@@ -2753,11 +2808,9 @@ out:
 	 * so that it can be reused immediately.
 	 * NOTE: after vrecycle, ip is freed (use-after-free danger).
 	 */
-	if (ip->i_e4din == NULL || letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
+	if (ip->i_e4din == NULL ||
+	    letoh16(ip->i_e4din->dinode.i_mode) == 0)
 		vrecycle(vp, ap->a_p);
-		/* ip is now freed - do NOT access ip after this point */
-		return (error);
-	}
 
 	return (error);
 }

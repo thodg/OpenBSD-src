@@ -143,6 +143,22 @@ ext4fs_crc32c_le(u_int32_t crc, const void *buf, size_t len)
 u_int32_t
 ext4fs_csum_seed(struct m_ext4fs *fs)
 {
+	static int printed;
+
+	if (!printed) {
+		u_int32_t uuid_seed = ext4fs_crc32c(0,
+		    fs->m_sble.sb_uuid,
+		    sizeof(fs->m_sble.sb_uuid));
+		printf("ext4fs_csum_seed: incompat=0x%x "
+		    "csum_seed_flag=%d sb_seed=0x%08x "
+		    "uuid_seed=0x%08x\n",
+		    fs->m_feature_incompat,
+		    !!(fs->m_feature_incompat &
+		    EXT4FS_FEATURE_INCOMPAT_CSUM_SEED),
+		    fs->m_checksum_seed, uuid_seed);
+		printed = 1;
+	}
+
 	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_CSUM_SEED)
 		return ~fs->m_checksum_seed;
 

@@ -418,8 +418,11 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 int
 ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 {
+	struct ext4fs_dinode *rdp;
 	struct buf *bp;
 	daddr_t dblk;
+	u_int64_t ritb, rblk;
+	u_int32_t rgroup, rindex, roff;
 	size_t gd_size;
 	int error, i;
 
@@ -473,6 +476,27 @@ ext4fs_sbfill(struct vnode *devvp, struct m_ext4fs *mfs)
 			mfs->m_gd = NULL;
 			return (error);
 		}
+	}
+
+	/*
+	 * Read the resize inode (inode 7) to get its doubly-indirect
+	 * block pointer. Needed for BLOCK_UNINIT bitmap reconstruction.
+	 */
+	mfs->m_resize_dind_block = 0;
+	rgroup = (7 - 1) / mfs->m_inodes_per_group;
+	rindex = (7 - 1) % mfs->m_inodes_per_group;
+	ritb = letoh32(mfs->m_gd[rgroup].bgd_inode_table_block_lo);
+	rblk = ritb + (rindex * mfs->m_inode_size) / mfs->m_block_size;
+	roff = (rindex * mfs->m_inode_size) % mfs->m_block_size;
+	error = bread(devvp, (daddr_t)EXT4FS_FSBTODB(mfs, rblk),
+	    mfs->m_block_size, &bp);
+	if (error) {
+		brelse(bp);
+	} else {
+		rdp = (struct ext4fs_dinode *)
+		    ((char *)bp->b_data + roff);
+		mfs->m_resize_dind_block = letoh32(rdp->i_block[13]);
+		brelse(bp);
 	}
 
 	return (0);
@@ -711,10 +735,13 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 {
 	struct m_ext4fs *fs = pip->i_e4fs;
 	struct vnode *pvp = ITOV(pip);
-	struct buf *bp;
+	struct ext4fs_block_group_descriptor *gd;
+	struct buf *bp, *tbp;
 	struct inode *ip;
-	u_int32_t group, ngroups, ino_in_group;
-	u_int64_t bitmap_blk;
+	u_int32_t group, ngroups, ino_in_group, pbit, tb, it_blocks;
+	u_int32_t best, best_free, fi, g, free_inodes, icsum;
+	u_int32_t itu, first_unused, dirs;
+	u_int64_t bitmap_blk, itb;
 	ufsino_t ino;
 	char *ibp;
 	int error, i;
@@ -728,10 +755,10 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 
 	/* Pick starting group */
 	if ((mode & S_IFMT) == S_IFDIR) {
-		/* For directories, find group with most free inodes */
-		u_int32_t best = 0, best_free = 0;
+		best = 0;
+		best_free = 0;
 		for (i = 0; i < ngroups; i++) {
-			u_int32_t fi = letoh16(fs->m_gd[i].bgd_free_inodes_count_lo);
+			fi = letoh16(fs->m_gd[i].bgd_free_inodes_count_lo);
 			if (fi > best_free) {
 				best_free = fi;
 				best = i;
@@ -744,10 +771,8 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 
 	/* Scan groups starting from preferred */
 	for (i = 0; i < ngroups; i++) {
-		u_int32_t g = (group + i) % ngroups;
-		struct ext4fs_block_group_descriptor *gd = &fs->m_gd[g];
-		u_int32_t free_inodes;
-
+		g = (group + i) % ngroups;
+		gd = &fs->m_gd[g];
 		free_inodes = letoh16(gd->bgd_free_inodes_count_lo);
 		if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
 			free_inodes |=
@@ -772,55 +797,70 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 
 		ibp = (char *)bp->b_data;
 
+		/*
+		 * If INODE_UNINIT, the bitmap is stale. Zero it,
+		 * set padding bits, and zero all inode table blocks.
+		 */
+		if (letoh16(gd->bgd_flags) &
+		    EXT4FS_BGD_FLAG_INODE_UNINIT) {
+			memset(ibp, 0, fs->m_block_size);
+			for (pbit = fs->m_inodes_per_group;
+			    pbit < fs->m_block_size * 8; pbit++)
+				setbit(ibp, pbit);
+
+			itb = letoh32(gd->bgd_inode_table_block_lo);
+			it_blocks = fs->m_inode_table_blocks_per_group;
+			for (tb = 0; tb < it_blocks; tb++) {
+				error = bread(pip->i_devvp,
+				    (daddr_t)EXT4FS_FSBTODB(fs,
+				    itb + tb),
+				    fs->m_block_size, &tbp);
+				if (error) {
+					brelse(tbp);
+					continue;
+				}
+				memset(tbp->b_data, 0,
+				    fs->m_block_size);
+				error = bwrite(tbp);
+			}
+		}
+
 		/* Find free inode bit */
 		for (ino_in_group = 0; ino_in_group < fs->m_inodes_per_group;
 		    ino_in_group++) {
 			if (isclr(ibp, ino_in_group)) {
-				/* Found free inode */
-
-				/*
-				 * If this group's inode bitmap was
-				 * uninitialized, the on-disk bitmap
-				 * block may contain garbage. Zero it
-				 * first, then set padding bits and
-				 * the allocated bit.
-				 */
-				if (letoh16(gd->bgd_flags) &
-				    EXT4FS_BGD_FLAG_INODE_UNINIT) {
-					u_int32_t pbit;
-					memset(ibp, 0,
-					    fs->m_block_size);
-					for (pbit = fs->m_inodes_per_group;
-					    pbit < fs->m_block_size * 8;
-					    pbit++)
-						setbit(ibp, pbit);
-				}
-
 				setbit(ibp, ino_in_group);
 
-				/* Update inode bitmap checksum in BGD */
-				{
-					u_int32_t icsum =
-					    ext4fs_bitmap_csum(fs, g, ibp,
-					    fs->m_inodes_per_group / 8);
-					gd->bgd_inode_bitmap_checksum_lo =
-					    htole16(icsum & 0xFFFF);
-					if (fs->m_feature_incompat &
-					    EXT4FS_FEATURE_INCOMPAT_64BIT)
-						gd->bgd_inode_bitmap_checksum_hi
-						    = htole16(
-						    (icsum >> 16) & 0xFFFF);
+				icsum = ext4fs_bitmap_csum(fs, g, ibp,
+				    fs->m_inodes_per_group / 8);
+				gd->bgd_inode_bitmap_checksum_lo =
+				    htole16(icsum & 0xFFFF);
+				if (fs->m_feature_incompat &
+				    EXT4FS_FEATURE_INCOMPAT_64BIT)
+					gd->bgd_inode_bitmap_checksum_hi
+					    = htole16(
+					    (icsum >> 16) & 0xFFFF);
+
+				error = bwrite(bp);
+				if (error)
+					return (error);
+
+				/* Compute inode number (1-based) */
+				ino = g * fs->m_inodes_per_group +
+				    ino_in_group + 1;
+
+				/* Get vnode for new inode */
+				error = VFS_VGET(pvp->v_mount, ino, vpp);
+				if (error) {
+					ext4fs_inode_free(pip, ino, mode);
+					return (error);
 				}
 
 				/* Clear INODE_UNINIT flag if set */
 				gd->bgd_flags = htole16(letoh16(gd->bgd_flags) &
 				    ~EXT4FS_BGD_FLAG_INODE_UNINIT);
 
-				error = bwrite(bp);
-				if (error)
-					return (error);
-
-				/* Update BGD */
+				/* Update BGD free count */
 				free_inodes--;
 				gd->bgd_free_inodes_count_lo =
 				    htole16(free_inodes & 0xFFFF);
@@ -831,7 +871,6 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 					    0xFFFF);
 
 				if ((mode & S_IFMT) == S_IFDIR) {
-					u_int32_t dirs;
 					dirs = letoh16(
 					    gd->bgd_used_dirs_count_lo);
 					if (fs->m_feature_incompat &
@@ -849,23 +888,19 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 						    0xFFFF);
 				}
 
-				/* Update bg_itable_unused */
-				{
-					u_int32_t itu =
-					    letoh16(gd->bgd_inode_table_unused_lo);
-					u_int32_t first_unused =
-					    fs->m_inodes_per_group - itu;
-					if (ino_in_group >= first_unused) {
-						itu = fs->m_inodes_per_group -
-						    ino_in_group - 1;
-						gd->bgd_inode_table_unused_lo =
-						    htole16(itu & 0xFFFF);
-						if (fs->m_feature_incompat &
-						    EXT4FS_FEATURE_INCOMPAT_64BIT)
-							gd->bgd_inode_table_unused_hi =
-							    htole16((itu >> 16) &
-							    0xFFFF);
-					}
+				itu = letoh16(gd->bgd_inode_table_unused_lo);
+				first_unused =
+				    fs->m_inodes_per_group - itu;
+				if (ino_in_group >= first_unused) {
+					itu = fs->m_inodes_per_group -
+					    ino_in_group - 1;
+					gd->bgd_inode_table_unused_lo =
+					    htole16(itu & 0xFFFF);
+					if (fs->m_feature_incompat &
+					    EXT4FS_FEATURE_INCOMPAT_64BIT)
+						gd->bgd_inode_table_unused_hi =
+						    htole16((itu >> 16) &
+						    0xFFFF);
 				}
 
 				ext4fs_bgd_write(fs, pip->i_devvp, g);
@@ -875,17 +910,6 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 				fs->m_sble.sb_free_inodes_count =
 				    htole32(fs->m_free_inodes_count);
 				fs->m_fs_was_modified = 1;
-
-				/* Compute inode number (1-based) */
-				ino = g * fs->m_inodes_per_group +
-				    ino_in_group + 1;
-
-				/* Get vnode for new inode */
-				error = VFS_VGET(pvp->v_mount, ino, vpp);
-				if (error) {
-					ext4fs_inode_free(pip, ino, mode);
-					return (error);
-				}
 
 				ip = VTOI(*vpp);
 
@@ -937,7 +961,7 @@ ext4fs_inode_free(struct inode *pip, ufsino_t ino, mode_t mode)
 	struct ext4fs_block_group_descriptor *gd;
 	struct buf *bp;
 	u_int64_t bitmap_blk;
-	u_int32_t group, ino_in_group, free_inodes;
+	u_int32_t group, ino_in_group, free_inodes, icsum;
 	char *ibp;
 	int error;
 
@@ -945,7 +969,6 @@ ext4fs_inode_free(struct inode *pip, ufsino_t ino, mode_t mode)
 	ino_in_group = (ino - 1) % fs->m_inodes_per_group;
 	gd = &fs->m_gd[group];
 
-	/* Read inode bitmap */
 	bitmap_blk = letoh32(gd->bgd_inode_bitmap_block_lo);
 	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
 		bitmap_blk |=
@@ -962,15 +985,12 @@ ext4fs_inode_free(struct inode *pip, ufsino_t ino, mode_t mode)
 	ibp = (char *)bp->b_data;
 	clrbit(ibp, ino_in_group);
 
-	/* Update inode bitmap checksum in BGD */
-	{
-		u_int32_t icsum = ext4fs_bitmap_csum(fs, group, ibp,
-		    fs->m_inodes_per_group / 8);
-		gd->bgd_inode_bitmap_checksum_lo = htole16(icsum & 0xFFFF);
-		if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
-			gd->bgd_inode_bitmap_checksum_hi =
-			    htole16((icsum >> 16) & 0xFFFF);
-	}
+	icsum = ext4fs_bitmap_csum(fs, group, ibp,
+	    fs->m_inodes_per_group / 8);
+	gd->bgd_inode_bitmap_checksum_lo = htole16(icsum & 0xFFFF);
+	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+		gd->bgd_inode_bitmap_checksum_hi =
+		    htole16((icsum >> 16) & 0xFFFF);
 
 	error = bwrite(bp);
 	if (error)
@@ -1138,7 +1158,14 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	struct ufsmount *ump;
 	struct buf *bp;
 	struct vnode *vp;
+	struct ext4fs_block_group_descriptor *gd;
+	struct ext4fs_dinode *dp;
 	dev_t dev;
+	daddr_t disk_block;
+	u_int64_t inode_table_block;
+	u_int32_t inode_group, inode_index, block_in_table, offset_in_block;
+	u_int32_t itable_unused;
+	u_int16_t bgd_flags, imode;
 	int error;
 
 	if (ino > (ufsino_t)-1)
@@ -1190,57 +1217,87 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 		return (error);
 	}
 
-	/* Calculate inode location on disk */
-	u_int32_t inode_group = (ino - 1) / fs->m_inodes_per_group;
-	u_int32_t inode_index = (ino - 1) % fs->m_inodes_per_group;
-	u_int32_t block_in_table = inode_index / fs->m_inodes_per_block;
-	u_int32_t offset_in_block = (inode_index % fs->m_inodes_per_block) * fs->m_inode_size;
+	vref(ip->i_devvp);
 
-	struct ext4fs_block_group_descriptor *gd = &fs->m_gd[inode_group];
-	u_int64_t inode_table_block = letoh32(gd->bgd_inode_table_block_lo);
+	/* Calculate inode location on disk */
+	inode_group = (ino - 1) / fs->m_inodes_per_group;
+	inode_index = (ino - 1) % fs->m_inodes_per_group;
+	block_in_table = inode_index / fs->m_inodes_per_block;
+	offset_in_block = (inode_index % fs->m_inodes_per_block) *
+	    fs->m_inode_size;
+
+	gd = &fs->m_gd[inode_group];
+	inode_table_block = letoh32(gd->bgd_inode_table_block_lo);
 	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
-		inode_table_block |= (u_int64_t)letoh32(gd->bgd_inode_table_block_hi) << 32;
+		inode_table_block |= (u_int64_t)
+		    letoh32(gd->bgd_inode_table_block_hi) << 32;
 
 	/* Read the block containing this inode */
-	daddr_t disk_block = (inode_table_block + block_in_table) << fs->m_fs_block_to_disk_block;
+	disk_block = (inode_table_block + block_in_table) <<
+	    fs->m_fs_block_to_disk_block;
 	error = bread(ump->um_devvp, disk_block, fs->m_block_size, &bp);
 	if (error) {
-		/*
-		 * The inode does not contain anything useful, so it would
-		 * be misleading to leave it on its hash chain. With mode
-		 * still zero, it will be unlinked and returned to the free
-		 * list by vput().
-		 */
 		vput(vp);
 		brelse(bp);
 		*vpp = NULL;
 		return (error);
 	}
 
-	/* Get pointer to the inode within the block */
-	struct ext4fs_dinode *dp = (struct ext4fs_dinode *)((char *)bp->b_data + offset_in_block);
-	
-	/* Allocate space for on-disk inode and copy it */
-	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK|PR_ZERO);
-	memcpy(ip->i_e4din, dp, fs->m_inode_size);
-	brelse(bp);
+	dp = (struct ext4fs_dinode *)((char *)bp->b_data + offset_in_block);
 
-	/* Verify inode checksum, but skip for uninitialized (all-zero) slots */
-	if (letoh16(ip->i_e4din->dinode.i_mode) != 0 ||
-	    letoh16(ip->i_e4din->dinode.i_links_count) != 0 ||
-	    letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
-		if ((error = ext4fs_inode_csum_verify(fs, ip->i_e4din, ino)) != 0) {
+	/* Allocate space for on-disk inode */
+	ip->i_e4din = pool_get(&ext4fs_dinode_pool, PR_WAITOK|PR_ZERO);
+
+	/*
+	 * If the group has INODE_UNINIT set, or the inode is in the
+	 * unused portion of the inode table, the on-disk data is
+	 * garbage. Keep the zeroed buffer and skip checksum verification.
+	 */
+	bgd_flags = letoh16(gd->bgd_flags);
+	itable_unused = letoh16(gd->bgd_inode_table_unused_lo);
+	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+		itable_unused |= (u_int32_t)
+		    letoh16(gd->bgd_inode_table_unused_hi) << 16;
+	if ((bgd_flags & EXT4FS_BGD_FLAG_INODE_UNINIT) ||
+	    inode_index >= fs->m_inodes_per_group - itable_unused) {
+		memset(dp, 0, fs->m_inode_size);
+		error = bwrite(bp);
+		if (error) {
 			pool_put(&ext4fs_dinode_pool, ip->i_e4din);
 			ip->i_e4din = NULL;
 			vput(vp);
 			*vpp = NULL;
 			return (error);
 		}
+	} else {
+		memcpy(ip->i_e4din, dp, fs->m_inode_size);
+		brelse(bp);
+
+		/* Verify inode checksum for initialized slots */
+		if (letoh16(ip->i_e4din->dinode.i_mode) != 0 ||
+		    letoh16(ip->i_e4din->dinode.i_links_count) != 0 ||
+		    letoh32(ip->i_e4din->dinode.i_dtime) != 0) {
+			error = ext4fs_inode_csum_verify(fs,
+			    ip->i_e4din, ino);
+			if (error) {
+				printf("ext4fs: ino %u csum fail "
+				    "extra_isize=%u mode=0%o\n",
+				    (u_int32_t)ino,
+				    letoh16(ip->i_e4din->dinode.i_extra_isize),
+				    letoh16(ip->i_e4din->dinode.i_mode));
+				pool_put(&ext4fs_dinode_pool,
+				    ip->i_e4din);
+				ip->i_e4din = NULL;
+				vput(vp);
+				*vpp = NULL;
+				return (error);
+			}
+		}
 	}
 
 	/* Set vnode type based on inode mode */
-	u_int16_t mode = letoh16(ip->i_e4din->dinode.i_mode);
-	switch (mode & S_IFMT) {
+	imode = letoh16(ip->i_e4din->dinode.i_mode);
+	switch (imode & S_IFMT) {
 	case S_IFDIR:
 		vp->v_type = VDIR;
 		break;
@@ -1279,8 +1336,6 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 		vp->v_type = VNON;
 		ip->i_effnlink = 0;
 	}
-
-	vref(ip->i_devvp);
 
 	*vpp = vp;
 	return (0);
