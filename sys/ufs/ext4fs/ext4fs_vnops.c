@@ -1759,11 +1759,6 @@ ext4fs_remove(void *v)
 	ip->i_flag |= IN_CHANGE;
 
 out:
-	if (dvp == vp)
-		vrele(vp);
-	else
-		vput(vp);
-	vput(dvp);
 	return (error);
 }
 

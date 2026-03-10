@@ -68,6 +68,9 @@
 #include <ufs/ufs/dirhash.h>
 #endif
 #include <ufs/ext2fs/ext2fs_extern.h>
+#ifdef EXT4FS
+#include <ufs/ext4fs/ext4fs.h>
+#endif
 
 #include <uvm/uvm_extern.h>
 
@@ -105,6 +108,12 @@ ufs_itimes(struct vnode *vp)
 #ifdef EXT2FS
 	if (IS_EXT2_VNODE(ip->i_vnode)) {
 		EXT2FS_ITIMES(ip);
+		goto out;
+	}
+#endif
+#ifdef EXT4FS
+	if (vp->v_tag == VT_EXT4FS) {
+		EXT4FS_ITIMES(ip);
 		goto out;
 	}
 #endif
