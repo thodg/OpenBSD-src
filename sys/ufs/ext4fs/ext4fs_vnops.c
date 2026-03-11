@@ -1329,7 +1329,6 @@ ext4fs_lookup(void *v)
 	int error;
 
 	/* For CREATE: track free slot info */
-	int slotfreespace = 0;
 	int slotneeded = 0;
 	int slotsize = 0;
 	off_t slotoffset = -1;
@@ -1399,15 +1398,15 @@ ext4fs_lookup(void *v)
 			/* Track free space for CREATE/RENAME */
 			if ((nameiop == CREATE || nameiop == RENAME) &&
 			    slotoffset == -1) {
-				int entsz;
+				int freespace;
 
 				if (letoh32(ep->e4d_ino) == 0) {
-					slotfreespace += reclen;
+					freespace = reclen;
 				} else {
-					entsz = EXT4FS_DIRSIZ(ep->e4d_namlen);
-					slotfreespace += reclen - entsz;
+					freespace = reclen -
+					    EXT4FS_DIRSIZ(ep->e4d_namlen);
 				}
-				if (slotfreespace >= slotneeded) {
+				if (freespace >= slotneeded) {
 					slotoffset = off;
 					slotsize = reclen;
 				}
