@@ -414,6 +414,6 @@ ext4fs_extent_block_csum_set(struct m_ext4fs *fs, u_int32_t ino,
 	crc = ext4fs_crc32c(seed, &ino_le, sizeof(ino_le));
 	crc = ext4fs_crc32c(crc, &gen_le, sizeof(gen_le));
 	*tail = 0;
-	crc = ext4fs_crc32c(crc, buf, tail_offset + sizeof(u_int32_t));
+	crc = ext4fs_crc32c(crc, buf, tail_offset);
 	*tail = htole32(~crc);
 }

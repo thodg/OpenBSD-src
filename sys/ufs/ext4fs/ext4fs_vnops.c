@@ -449,9 +449,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 					    = htole16(
 					    (bcsum >> 16) & 0xFFFF);
 
-				error = bwrite(bp);
-				if (error)
-					return (error);
+				bdwrite(bp);
 
 				/* Update BGD */
 				free_blocks--;
@@ -534,9 +532,7 @@ ext4fs_blkfree(struct inode *ip, u_int64_t bno)
 			    htole16((bcsum >> 16) & 0xFFFF);
 	}
 
-	error = bwrite(bp);
-	if (error)
-		return;
+	bdwrite(bp);
 
 	/* Update BGD */
 	free_blocks = letoh16(gd->bgd_free_blocks_count_lo);
@@ -617,14 +613,7 @@ ext4fs_extent_grow_tree(struct inode *ip)
 	    din->i_extent, 4 * sizeof(struct ext4fs_extent));
 
 	ext4fs_extent_block_csum_set(fs, ip->i_number, din->i_nfs_generation, bp->b_data);
-	printf("ext4fs_grow_tree: bwrite leaf\n");
-	error = bwrite(bp);
-	if (error) {
-		printf("ext4fs_grow_tree: bwrite failed %d\n", error);
-		ext4fs_blkfree(ip, leaf_blk);
-		return (error);
-	}
-	printf("ext4fs_grow_tree: bwrite done, converting root\n");
+	bdwrite(bp);
 
 	/* Convert inode root to index node with depth=1 */
 	eh->eh_depth = htole16(1);
@@ -726,19 +715,12 @@ ext4fs_leaf_split(struct inode *ip, struct buf *old_bp,
 	    new_entries * sizeof(struct ext4fs_extent));
 
 	ext4fs_extent_block_csum_set(fs, ip->i_number, din->i_nfs_generation, new_bp->b_data);
-	error = bwrite(new_bp);
-	if (error) {
-		ext4fs_blkfree(ip, new_blk);
-		brelse(old_bp);
-		return (error);
-	}
+	bdwrite(new_bp);
 
 	/* Update old leaf */
 	old_eh->eh_entries = htole16(old_entries);
 	ext4fs_extent_block_csum_set(fs, ip->i_number, din->i_nfs_generation, old_bp->b_data);
-	error = bwrite(old_bp);
-	if (error)
-		return (error);
+	bdwrite(old_bp);
 
 	/* Add new index entry in parent root (keep sorted by ei_block) */
 	{
@@ -846,10 +828,9 @@ ext4fs_extent_insert_depth(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
 		    last_len + len <= 32768) {
 			last->e_len = htole16(last_len + len);
 			ext4fs_extent_block_csum_set(fs, ip->i_number, din->i_nfs_generation, bp->b_data);
-			error = bwrite(bp);
-			if (error == 0)
-				ip->i_flag |= IN_CHANGE | IN_MODIFIED;
-			return (error);
+			bdwrite(bp);
+			ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+			return (0);
 		}
 	}
 
@@ -872,10 +853,9 @@ ext4fs_extent_insert_depth(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
 
 		leaf_eh->eh_entries = htole16(leaf_entries + 1);
 		ext4fs_extent_block_csum_set(fs, ip->i_number, din->i_nfs_generation, bp->b_data);
-		error = bwrite(bp);
-		if (error == 0)
-			ip->i_flag |= IN_CHANGE | IN_MODIFIED;
-		return (error);
+		bdwrite(bp);
+		ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+		return (0);
 	}
 
 	/* Leaf is full - need to split */
@@ -1136,7 +1116,7 @@ ext4fs_free_extents(struct inode *ip, struct ext4fs_extent *ext,
 					gd->bgd_block_bitmap_checksum_hi =
 					    htole16((bcsum >> 16) & 0xFFFF);
 			}
-			bwrite(bbp);
+			bdwrite(bbp);
 
 			free_blocks = letoh16(gd->bgd_free_blocks_count_lo);
 			if (fs->m_feature_incompat &

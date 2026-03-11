@@ -680,7 +680,8 @@ ext4fs_bgd_write(struct m_ext4fs *fs, struct vnode *devvp, u_int32_t group)
 	memcpy((char *)bp->b_data + bgd_off, gd,
 	    sizeof(struct ext4fs_block_group_descriptor));
 
-	return (bwrite(bp));
+	bdwrite(bp);
+	return (0);
 }
 
 /*
