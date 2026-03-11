@@ -2033,7 +2033,7 @@ ext4fs_write(void *v)
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct buf *bp;
 	off_t filesz;
-	u_int64_t lbn;
+	u_int64_t lbn, pblk, ncontig;
 	int ioflag = ap->a_ioflag;
 	int blkoffset, xfersize;
 	int error;
@@ -2075,10 +2075,18 @@ ext4fs_write(void *v)
 		if (uio->uio_resid < xfersize)
 			xfersize = uio->uio_resid;
 
-		error = ext4fs_buf_alloc(ip, lbn, fs->m_block_size,
-		    ap->a_cred, &bp, B_CLRBUF);
-		if (error)
-			break;
+		if (blkoffset == 0 && xfersize == fs->m_block_size &&
+		    ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig) == 0) {
+			/* Full-block overwrite, already mapped: skip read */
+			bp = getblk(ip->i_devvp,
+			    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+			    fs->m_block_size, 0, INFSLP);
+		} else {
+			error = ext4fs_buf_alloc(ip, lbn, fs->m_block_size,
+			    ap->a_cred, &bp, B_CLRBUF);
+			if (error)
+				break;
+		}
 		error = uiomove((char *)bp->b_data + blkoffset, xfersize,
 		    uio);
 
