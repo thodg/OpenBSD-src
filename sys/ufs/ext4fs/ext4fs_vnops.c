@@ -280,7 +280,8 @@ ext4fs_setsize(struct inode *ip, u_int64_t size)
  * Tries the group of the goal block first, then scans all groups.
  */
 int
-ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
+ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int32_t count,
+    u_int64_t *bnp, u_int32_t *countp)
 {
 	struct m_ext4fs *fs = ip->i_e4fs;
 	struct ext4fs_block_group_descriptor *gd;
@@ -288,11 +289,16 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 	u_int64_t bitmap_blk, grp_start, bb, ib, itb;
 	u_int32_t group, ngroups, g, blk_in_group, free_blocks;
 	u_int32_t it_blocks, mb, pbit, rb, bcsum;
+	u_int32_t start_bit, nalloced, k;
 	u_int32_t *dind;
 	char *bbp;
 	int error, i, j, has_sb;
 
 	*bnp = 0;
+	*countp = 0;
+
+	if (count == 0)
+		count = 1;
 
 	if (fs->m_free_blocks_count == 0)
 		return (ENOSPC);
@@ -432,12 +438,31 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 			ext4fs_bgd_write(fs, ip->i_devvp, g);
 		}
 
-		/* Scan bitmap for free block */
-		for (blk_in_group = 0;
+		/* Start scan from goal bit if goal is in this group */
+		start_bit = 0;
+		if (goal >= fs->m_first_data_block &&
+		    goal < fs->m_blocks_count) {
+			u_int32_t goal_group = (goal - fs->m_first_data_block) /
+			    fs->m_blocks_per_group;
+			if (goal_group == g)
+				start_bit = (goal - fs->m_first_data_block) %
+				    fs->m_blocks_per_group;
+		}
+
+		/* Scan bitmap for free block(s) */
+		for (blk_in_group = start_bit;
 		    blk_in_group < fs->m_blocks_per_group;
 		    blk_in_group++) {
 			if (isclr(bbp, blk_in_group)) {
+				/* Found first free bit; grab contiguous run */
+				nalloced = 1;
 				setbit(bbp, blk_in_group);
+				for (k = 1; k < count &&
+				    blk_in_group + k < fs->m_blocks_per_group &&
+				    isclr(bbp, blk_in_group + k); k++) {
+					setbit(bbp, blk_in_group + k);
+					nalloced++;
+				}
 
 				bcsum = ext4fs_bitmap_csum(fs, g, bbp,
 				    fs->m_block_size);
@@ -452,7 +477,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 				bdwrite(bp);
 
 				/* Update BGD */
-				free_blocks--;
+				free_blocks -= nalloced;
 				gd->bgd_free_blocks_count_lo =
 				    htole16(free_blocks & 0xFFFF);
 				if (fs->m_feature_incompat &
@@ -464,7 +489,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 				ext4fs_bgd_write(fs, ip->i_devvp, g);
 
 				/* Update superblock counters */
-				fs->m_free_blocks_count--;
+				fs->m_free_blocks_count -= nalloced;
 				fs->m_sble.sb_free_blocks_count_lo =
 				    htole32((u_int32_t)
 				    fs->m_free_blocks_count);
@@ -475,6 +500,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int64_t *bnp)
 
 				*bnp = (u_int64_t)g * fs->m_blocks_per_group +
 				    blk_in_group + fs->m_first_data_block;
+				*countp = nalloced;
 
 				return (0);
 			}
@@ -572,7 +598,7 @@ ext4fs_extent_grow_tree(struct inode *ip)
 	struct buf *bp;
 	u_int64_t leaf_blk;
 	u_int16_t maxleaf;
-	u_int32_t i_blocks;
+	u_int32_t i_blocks, got;
 	int error;
 
 	if (letoh16(eh->eh_depth) != 0)
@@ -581,7 +607,7 @@ ext4fs_extent_grow_tree(struct inode *ip)
 		return (EIO);
 
 	/* Allocate a block for the leaf node */
-	error = ext4fs_blkalloc(ip, 0, &leaf_blk);
+	error = ext4fs_blkalloc(ip, 0, 1, &leaf_blk, &got);
 	if (error)
 		return (error);
 
@@ -654,7 +680,7 @@ ext4fs_leaf_split(struct inode *ip, struct buf *old_bp,
 	u_int32_t new_first_block;
 	u_int16_t old_entries, new_entries, maxleaf;
 	u_int16_t root_entries, root_max;
-	u_int32_t i_blocks;
+	u_int32_t i_blocks, got;
 	int error, i;
 
 	old_entries = letoh16(old_eh->eh_entries);
@@ -669,7 +695,7 @@ ext4fs_leaf_split(struct inode *ip, struct buf *old_bp,
 	}
 
 	/* Allocate block for new leaf */
-	error = ext4fs_blkalloc(ip, 0, &new_blk);
+	error = ext4fs_blkalloc(ip, 0, 1, &new_blk, &got);
 	if (error) {
 		brelse(old_bp);
 		return (error);
@@ -1000,19 +1026,26 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 		}
 	}
 
-	error = ext4fs_blkalloc(ip, goal, &pblk);
-	if (error)
-		return (error);
-	/* Insert extent */
-	error = ext4fs_extent_insert(ip, lbn, pblk, 1);
-	if (error) {
-		ext4fs_blkfree(ip, pblk);
-		return (error);
+	{
+		u_int32_t want, nalloced, j;
+
+		/* Preallocate contiguous blocks (up to 32768, extent max) */
+		want = 32768;
+		error = ext4fs_blkalloc(ip, goal, want, &pblk, &nalloced);
+		if (error)
+			return (error);
+		/* Insert extent for all allocated blocks */
+		error = ext4fs_extent_insert(ip, lbn, pblk, nalloced);
+		if (error) {
+			for (j = 0; j < nalloced; j++)
+				ext4fs_blkfree(ip, pblk + j);
+			return (error);
+		}
+		/* Update inode block count (i_blocks is in 512-byte sectors) */
+		i_blocks = letoh32(din->i_blocks_lo);
+		i_blocks += nalloced * (fs->m_block_size / DEV_BSIZE);
+		din->i_blocks_lo = htole32(i_blocks);
 	}
-	/* Update inode block count (i_blocks is in 512-byte sectors) */
-	i_blocks = letoh32(din->i_blocks_lo);
-	i_blocks += fs->m_block_size / DEV_BSIZE;
-	din->i_blocks_lo = htole32(i_blocks);
 
 	/* Set extents flag */
 	din->i_flags |= htole32(EXTFS_INODE_FLAG_EXTENTS);

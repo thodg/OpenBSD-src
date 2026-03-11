@@ -639,7 +639,8 @@ ext4fs_mode_to_ft(u_int16_t mode)
 }
 
 /* Block allocation / free */
-int ext4fs_blkalloc(struct inode *, u_int64_t, u_int64_t *);
+int ext4fs_blkalloc(struct inode *, u_int64_t, u_int32_t, u_int64_t *,
+    u_int32_t *);
 void ext4fs_blkfree(struct inode *, u_int64_t);
 
 /* Inode allocation / free */
