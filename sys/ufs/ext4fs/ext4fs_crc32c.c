@@ -382,3 +382,38 @@ ext4fs_sb_csum_verify(struct ext4fs *sb)
 
 	return 0;
 }
+
+/*
+ * Write the checksum tail of an extent tree block.
+ *
+ * The tail is a 4-byte le32 checksum placed right after eh_max entries.
+ * Checksum covers: UUID seed, inode number, inode generation,
+ * then the block data up to and including the zeroed tail.
+ */
+void
+ext4fs_extent_block_csum_set(struct m_ext4fs *fs, u_int32_t ino,
+    u_int32_t gen_le, void *buf)
+{
+	u_int32_t crc, seed, ino_le;
+	u_int32_t *tail;
+	struct ext4fs_extent_header *eh;
+	size_t tail_offset;
+
+	if (!(fs->m_feature_ro_compat &
+	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM))
+		return;
+
+	eh = (struct ext4fs_extent_header *)buf;
+	/* Tail is right after eh_max entries */
+	tail_offset = sizeof(struct ext4fs_extent_header) +
+	    (size_t)letoh16(eh->eh_max) * sizeof(struct ext4fs_extent);
+	tail = (u_int32_t *)((char *)buf + tail_offset);
+
+	seed = ext4fs_csum_seed(fs);
+	ino_le = htole32(ino);
+	crc = ext4fs_crc32c(seed, &ino_le, sizeof(ino_le));
+	crc = ext4fs_crc32c(crc, &gen_le, sizeof(gen_le));
+	*tail = 0;
+	crc = ext4fs_crc32c(crc, buf, tail_offset + sizeof(u_int32_t));
+	*tail = htole32(~crc);
+}
