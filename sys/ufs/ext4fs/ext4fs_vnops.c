@@ -63,18 +63,6 @@
 #include <ufs/ext4fs/ext4fs.h>
 #include <ufs/ext4fs/ext4fs_crc32c.h>
 
-#define EXT4FS_CHECK_EHMAGIC(ip, where) do {				\
-	if ((ip)->i_number == 2 &&					\
-	    (letoh32((ip)->i_e4din->dinode.i_flags) &			\
-	    EXTFS_INODE_FLAG_EXTENTS) &&				\
-	    letoh16((ip)->i_e4din->dinode.i_extent_header.eh_magic)	\
-	    != EXT4FS_EXTENT_HEADER_MAGIC)				\
-		printf("ext4fs: ino=2 eh_magic CORRUPT at %s "		\
-		    "magic=0x%x\n", (where),				\
-		    letoh16((ip)->i_e4din->dinode.			\
-		    i_extent_header.eh_magic));				\
-} while (0)
-
 /* Convert ext4 directory entry file type to BSD dirent type */
 static const u_int8_t ext4fs_type_to_dt[EXT4FS_FT_MAX] = {
 	[EXT4FS_FT_UNKNOWN]	= DT_UNKNOWN,
@@ -245,14 +233,6 @@ ext4fs_update(struct inode *ip, int waitfor)
 		u_int32_t wr_flags = letoh32(ip->i_e4din->dinode.i_flags);
 		u_int16_t wr_magic =
 		    letoh16(ip->i_e4din->dinode.i_extent_header.eh_magic);
-		struct ext4fs_dinode *disk_dp = (struct ext4fs_dinode *)
-		    ((char *)bp->b_data + offset_in_block);
-		u_int16_t disk_magic =
-		    letoh16(disk_dp->i_extent_header.eh_magic);
-		if (ip->i_number <= 11)
-			printf("ext4fs_update: ino=%u mem_magic=0x%x "
-			    "disk_magic=0x%x mode=0%o\n",
-			    ip->i_number, wr_magic, disk_magic, wr_mode);
 		if (wr_mode != 0 &&
 		    (wr_flags & EXTFS_INODE_FLAG_EXTENTS) &&
 		    wr_magic != EXT4FS_EXTENT_HEADER_MAGIC) {
@@ -581,7 +561,299 @@ ext4fs_blkfree(struct inode *ip, u_int64_t bno)
 }
 
 /*
- * Insert an extent into the inode's extent tree (depth 0 only).
+ * Promote a depth-0 extent tree to depth 1.
+ * Called when the inline extent array is full (4/4 entries).
+ * Allocates a leaf block, copies the 4 inline extents into it,
+ * and converts the inode root to an index node with one entry.
+ */
+static int
+ext4fs_extent_grow_tree(struct inode *ip)
+{
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ext4fs_extent_header *eh = &din->i_extent_header;
+	struct ext4fs_extent_header *leaf_eh;
+	struct buf *bp;
+	u_int64_t leaf_blk;
+	u_int16_t maxleaf;
+	u_int32_t i_blocks;
+	int error;
+
+	if (letoh16(eh->eh_depth) != 0)
+		return (EIO);
+	if (letoh16(eh->eh_entries) != 4)
+		return (EIO);
+
+	/* Allocate a block for the leaf node */
+	error = ext4fs_blkalloc(ip, 0, &leaf_blk);
+	if (error)
+		return (error);
+
+	/* Get buffer for the new leaf block */
+	bp = getblk(ip->i_devvp,
+	    (daddr_t)EXT4FS_FSBTODB(fs, leaf_blk),
+	    fs->m_block_size, 0, INFSLP);
+	clrbuf(bp);
+
+	/* Initialize leaf block header */
+	maxleaf = (fs->m_block_size - sizeof(struct ext4fs_extent_header)) /
+	    sizeof(struct ext4fs_extent);
+	leaf_eh = (struct ext4fs_extent_header *)bp->b_data;
+	leaf_eh->eh_magic = htole16(EXT4FS_EXTENT_HEADER_MAGIC);
+	leaf_eh->eh_entries = htole16(4);
+	leaf_eh->eh_max = htole16(maxleaf);
+	leaf_eh->eh_depth = htole16(0);
+	leaf_eh->eh_generation = htole32(0);
+
+	/* Copy 4 inline extents into the leaf block */
+	memcpy((char *)bp->b_data + sizeof(struct ext4fs_extent_header),
+	    din->i_extent, 4 * sizeof(struct ext4fs_extent));
+
+	error = bwrite(bp);
+	if (error) {
+		ext4fs_blkfree(ip, leaf_blk);
+		return (error);
+	}
+
+	/* Convert inode root to index node with depth=1 */
+	eh->eh_depth = htole16(1);
+	eh->eh_entries = htole16(1);
+	/* eh_max stays 4 (4 index entries fit in the inline area) */
+
+	/* Set up the single index entry pointing to the leaf block */
+	{
+		struct ext4fs_extent_idx *idx = din->i_extent_idx;
+		idx[0].ei_block = din->i_extent[0].e_block;  /* first lbn */
+		idx[0].ei_leaf_lo = htole32((u_int32_t)leaf_blk);
+		idx[0].ei_leaf_hi = htole16((u_int16_t)(leaf_blk >> 32));
+		idx[0].ei_unused = 0;
+		/* Zero remaining index slots */
+		memset(&idx[1], 0, 3 * sizeof(struct ext4fs_extent_idx));
+	}
+
+	/* Update inode block count for the leaf block */
+	i_blocks = letoh32(din->i_blocks_lo);
+	i_blocks += fs->m_block_size / DEV_BSIZE;
+	din->i_blocks_lo = htole32(i_blocks);
+
+	ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+	return (0);
+}
+
+/*
+ * Split a full leaf block into two.
+ * The old leaf keeps the first half, a new leaf gets the second half.
+ * A new index entry is added to the parent (the inode root).
+ * Returns ENOSPC if the parent index is also full (depth 2+ needed).
+ */
+static int
+ext4fs_leaf_split(struct inode *ip, struct buf *old_bp,
+    struct ext4fs_extent_header *old_eh)
+{
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ext4fs_extent_header *root_eh = &din->i_extent_header;
+	struct ext4fs_extent_idx *root_idx = din->i_extent_idx;
+	struct ext4fs_extent_header *new_eh;
+	struct ext4fs_extent *old_ext, *new_ext;
+	struct buf *new_bp;
+	u_int64_t new_blk;
+	u_int16_t old_entries, new_entries, maxleaf;
+	u_int16_t root_entries, root_max;
+	u_int32_t i_blocks;
+	int error, i;
+
+	old_entries = letoh16(old_eh->eh_entries);
+	maxleaf = letoh16(old_eh->eh_max);
+	old_ext = (struct ext4fs_extent *)(old_eh + 1);
+
+	/* Check parent has room for new index entry */
+	root_entries = letoh16(root_eh->eh_entries);
+	root_max = letoh16(root_eh->eh_max);
+	if (root_entries >= root_max)
+		return (ENOSPC);  /* Would need depth 2+, phase 4 */
+
+	/* Allocate block for new leaf */
+	error = ext4fs_blkalloc(ip, 0, &new_blk);
+	if (error)
+		return (error);
+
+	new_bp = getblk(ip->i_devvp,
+	    (daddr_t)EXT4FS_FSBTODB(fs, new_blk),
+	    fs->m_block_size, 0, INFSLP);
+	clrbuf(new_bp);
+
+	/* Split ~50/50 */
+	new_entries = old_entries / 2;
+	old_entries = old_entries - new_entries;
+
+	/* Initialize new leaf */
+	new_eh = (struct ext4fs_extent_header *)new_bp->b_data;
+	new_eh->eh_magic = htole16(EXT4FS_EXTENT_HEADER_MAGIC);
+	new_eh->eh_entries = htole16(new_entries);
+	new_eh->eh_max = htole16(maxleaf);
+	new_eh->eh_depth = htole16(0);
+	new_eh->eh_generation = htole32(0);
+
+	new_ext = (struct ext4fs_extent *)(new_eh + 1);
+	memcpy(new_ext, &old_ext[old_entries],
+	    new_entries * sizeof(struct ext4fs_extent));
+
+	error = bwrite(new_bp);
+	if (error) {
+		ext4fs_blkfree(ip, new_blk);
+		return (error);
+	}
+
+	/* Update old leaf */
+	old_eh->eh_entries = htole16(old_entries);
+	error = bwrite(old_bp);
+	if (error)
+		return (error);
+
+	/* Add new index entry in parent root (keep sorted by ei_block) */
+	{
+		u_int32_t new_first = letoh32(new_ext[0].e_block);
+		struct ext4fs_extent_idx entry;
+
+		entry.ei_block = htole32(new_first);
+		entry.ei_leaf_lo = htole32((u_int32_t)new_blk);
+		entry.ei_leaf_hi = htole16((u_int16_t)(new_blk >> 32));
+		entry.ei_unused = 0;
+
+		/* Find insertion point */
+		for (i = 0; i < root_entries; i++) {
+			if (letoh32(root_idx[i].ei_block) > new_first)
+				break;
+		}
+		if (i < root_entries)
+			memmove(&root_idx[i + 1], &root_idx[i],
+			    (root_entries - i) *
+			    sizeof(struct ext4fs_extent_idx));
+		root_idx[i] = entry;
+		root_eh->eh_entries = htole16(root_entries + 1);
+	}
+
+	/* Update inode block count for the new leaf block */
+	i_blocks = letoh32(din->i_blocks_lo);
+	i_blocks += fs->m_block_size / DEV_BSIZE;
+	din->i_blocks_lo = htole32(i_blocks);
+
+	ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+	return (0);
+}
+
+/*
+ * Insert an extent into a depth > 0 extent tree.
+ * Walks the index to find the correct leaf, tries merge,
+ * inserts if room, splits leaf if full.
+ */
+static int
+ext4fs_extent_insert_depth(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
+    u_int16_t len)
+{
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ext4fs_extent_header *root_eh = &din->i_extent_header;
+	struct ext4fs_extent_idx *idx;
+	struct ext4fs_extent_header *leaf_eh;
+	struct ext4fs_extent *ext;
+	struct buf *bp;
+	u_int64_t leaf_blk;
+	u_int16_t root_entries, leaf_entries, leaf_max;
+	int error, found, i;
+
+	root_entries = letoh16(root_eh->eh_entries);
+	if (root_entries == 0)
+		return (EIO);
+
+	/* Find the index entry whose subtree covers lbn */
+	idx = din->i_extent_idx;
+	found = 0;
+	for (i = 0; i < root_entries; i++) {
+		if (letoh32(idx[i].ei_block) <= lbn)
+			found = i;
+		else
+			break;
+	}
+
+	/* Read the leaf block */
+	leaf_blk = letoh32(idx[found].ei_leaf_lo) |
+	    ((u_int64_t)letoh16(idx[found].ei_leaf_hi) << 32);
+
+	error = bread(ip->i_devvp,
+	    (daddr_t)EXT4FS_FSBTODB(fs, leaf_blk),
+	    fs->m_block_size, &bp);
+	if (error) {
+		brelse(bp);
+		return (error);
+	}
+
+	leaf_eh = (struct ext4fs_extent_header *)bp->b_data;
+	if (letoh16(leaf_eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
+		brelse(bp);
+		return (EIO);
+	}
+
+	leaf_entries = letoh16(leaf_eh->eh_entries);
+	leaf_max = letoh16(leaf_eh->eh_max);
+	ext = (struct ext4fs_extent *)(leaf_eh + 1);
+
+	/* Try to merge with last extent in this leaf */
+	if (leaf_entries > 0) {
+		struct ext4fs_extent *last = &ext[leaf_entries - 1];
+		u_int32_t last_block = letoh32(last->e_block);
+		u_int16_t last_len = letoh16(last->e_len);
+		u_int64_t last_start = letoh32(last->e_start_lo) |
+		    ((u_int64_t)letoh16(last->e_start_hi) << 32);
+
+		if (last_block + last_len == lbn &&
+		    last_start + last_len == pblk &&
+		    last_len + len <= 32768) {
+			last->e_len = htole16(last_len + len);
+			error = bwrite(bp);
+			if (error == 0)
+				ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+			return (error);
+		}
+	}
+
+	/* Room in leaf? */
+	if (leaf_entries < leaf_max) {
+		/* Find insertion point (keep sorted) */
+		for (i = 0; i < leaf_entries; i++) {
+			if (letoh32(ext[i].e_block) > lbn)
+				break;
+		}
+		if (i < leaf_entries)
+			memmove(&ext[i + 1], &ext[i],
+			    (leaf_entries - i) *
+			    sizeof(struct ext4fs_extent));
+
+		ext[i].e_block = htole32(lbn);
+		ext[i].e_len = htole16(len);
+		ext[i].e_start_lo = htole32((u_int32_t)pblk);
+		ext[i].e_start_hi = htole16((u_int16_t)(pblk >> 32));
+
+		leaf_eh->eh_entries = htole16(leaf_entries + 1);
+		error = bwrite(bp);
+		if (error == 0)
+			ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+		return (error);
+	}
+
+	/* Leaf is full - need to split */
+	error = ext4fs_leaf_split(ip, bp, leaf_eh);
+	if (error)
+		return (error);
+
+	/* bp was consumed by leaf_split (bwrite'd). Retry the insert. */
+	return (ext4fs_extent_insert_depth(ip, lbn, pblk, len));
+}
+
+/*
+ * Insert an extent into the inode's extent tree.
+ * Handles depth 0 (inline) and depth > 0 (tree) cases.
  * Tries to merge with the last extent if contiguous.
  */
 static int
@@ -591,14 +863,19 @@ ext4fs_extent_insert(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct ext4fs_extent_header *eh = &din->i_extent_header;
 	struct ext4fs_extent *ext = din->i_extent;
-	u_int16_t entries, maxe;
-	int i;
+	u_int16_t entries, maxe, depth;
+	int error, i;
 
 	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC)
 		return (EIO);
-	if (letoh16(eh->eh_depth) != 0)
-		return (EOPNOTSUPP);
 
+	depth = letoh16(eh->eh_depth);
+
+	/* Depth > 0: delegate to tree insert */
+	if (depth > 0)
+		return (ext4fs_extent_insert_depth(ip, lbn, pblk, len));
+
+	/* Depth 0: inline extents */
 	entries = letoh16(eh->eh_entries);
 	maxe = letoh16(eh->eh_max);
 
@@ -619,32 +896,37 @@ ext4fs_extent_insert(struct inode *ip, u_int32_t lbn, u_int64_t pblk,
 		}
 	}
 
-	/* Cannot merge - need a new entry */
-	if (entries >= maxe) {
-		return (ENOSPC);
+	/* Room for a new inline entry? */
+	if (entries < maxe) {
+		/* Find insertion point (keep sorted by lbn) */
+		for (i = 0; i < entries; i++) {
+			if (letoh32(ext[i].e_block) > lbn)
+				break;
+		}
+
+		/* Shift entries to make room */
+		if (i < entries)
+			memmove(&ext[i + 1], &ext[i],
+			    (entries - i) * sizeof(struct ext4fs_extent));
+
+		/* Insert new extent */
+		ext[i].e_block = htole32(lbn);
+		ext[i].e_len = htole16(len);
+		ext[i].e_start_lo = htole32((u_int32_t)pblk);
+		ext[i].e_start_hi = htole16((u_int16_t)(pblk >> 32));
+
+		eh->eh_entries = htole16(entries + 1);
+		ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+
+		return (0);
 	}
 
-	/* Find insertion point (keep sorted by lbn) */
-	for (i = 0; i < entries; i++) {
-		if (letoh32(ext[i].e_block) > lbn)
-			break;
-	}
+	/* Inline full - grow tree to depth 1, then insert */
+	error = ext4fs_extent_grow_tree(ip);
+	if (error)
+		return (error);
 
-	/* Shift entries to make room */
-	if (i < entries)
-		memmove(&ext[i + 1], &ext[i],
-		    (entries - i) * sizeof(struct ext4fs_extent));
-
-	/* Insert new extent */
-	ext[i].e_block = htole32(lbn);
-	ext[i].e_len = htole16(len);
-	ext[i].e_start_lo = htole32((u_int32_t)pblk);
-	ext[i].e_start_hi = htole16((u_int16_t)(pblk >> 32));
-
-	eh->eh_entries = htole16(entries + 1);
-	ip->i_flag |= IN_CHANGE | IN_MODIFIED;
-
-	return (0);
+	return (ext4fs_extent_insert_depth(ip, lbn, pblk, len));
 }
 
 /*
@@ -678,11 +960,45 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 	/* Goal: try to be contiguous with last extent */
 	goal = 0;
 	if (letoh16(din->i_extent_header.eh_entries) > 0) {
-		u_int16_t entries = letoh16(din->i_extent_header.eh_entries);
-		struct ext4fs_extent *last = &din->i_extent[entries - 1];
-		u_int64_t last_start = letoh32(last->e_start_lo) |
-		    ((u_int64_t)letoh16(last->e_start_hi) << 32);
-		goal = last_start + letoh16(last->e_len);
+		u_int16_t depth = letoh16(din->i_extent_header.eh_depth);
+
+		if (depth == 0) {
+			u_int16_t ent = letoh16(din->i_extent_header.eh_entries);
+			struct ext4fs_extent *last = &din->i_extent[ent - 1];
+			u_int64_t last_start = letoh32(last->e_start_lo) |
+			    ((u_int64_t)letoh16(last->e_start_hi) << 32);
+			goal = last_start + letoh16(last->e_len);
+		} else {
+			/* Walk to last leaf to find last extent */
+			u_int16_t ent = letoh16(din->i_extent_header.eh_entries);
+			struct ext4fs_extent_idx *idx = din->i_extent_idx;
+			u_int64_t leaf_blk;
+			struct buf *gbp;
+
+			leaf_blk = letoh32(idx[ent - 1].ei_leaf_lo) |
+			    ((u_int64_t)letoh16(idx[ent - 1].ei_leaf_hi) << 32);
+			error = bread(ip->i_devvp,
+			    (daddr_t)EXT4FS_FSBTODB(fs, leaf_blk),
+			    fs->m_block_size, &gbp);
+			if (error == 0) {
+				struct ext4fs_extent_header *leh =
+				    (struct ext4fs_extent_header *)gbp->b_data;
+				u_int16_t lent = letoh16(leh->eh_entries);
+				if (lent > 0 && letoh16(leh->eh_magic) ==
+				    EXT4FS_EXTENT_HEADER_MAGIC) {
+					struct ext4fs_extent *le =
+					    (struct ext4fs_extent *)(leh + 1);
+					u_int64_t ls =
+					    letoh32(le[lent - 1].e_start_lo) |
+					    ((u_int64_t)letoh16(
+					    le[lent - 1].e_start_hi) << 32);
+					goal = ls + letoh16(le[lent - 1].e_len);
+				}
+				brelse(gbp);
+			} else {
+				brelse(gbp);
+			}
+		}
 	}
 
 	error = ext4fs_blkalloc(ip, goal, &pblk);
@@ -715,40 +1031,16 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 }
 
 /*
- * Truncate inode. Only truncate-to-0 is supported in Phase 2.
+ * Free all blocks described by an array of extents.
+ * Batches frees by block group for efficiency.
  */
-int
-ext4fs_truncate(struct inode *ip, off_t length, int flags, struct ucred *cred)
+static void
+ext4fs_free_extents(struct inode *ip, struct ext4fs_extent *ext,
+    u_int16_t entries)
 {
 	struct m_ext4fs *fs = ip->i_e4fs;
-	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
-	struct ext4fs_extent_header *eh = &din->i_extent_header;
-	struct ext4fs_extent *ext;
-	off_t cursize;
-	u_int16_t entries;
 	int i;
 
-	cursize = (off_t)letoh32(din->i_size_lo) |
-	    ((off_t)letoh32(din->i_size_hi) << 32);
-
-	if (length == cursize)
-		return (0);
-
-	/* Only support truncate to 0 for now */
-	if (length != 0)
-		return (EOPNOTSUPP);
-
-	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC)
-		return (EIO);
-
-	/* Only handle depth-0 extent trees */
-	if (letoh16(eh->eh_depth) != 0)
-		return (EOPNOTSUPP);
-
-	entries = letoh16(eh->eh_entries);
-	ext = din->i_extent;
-
-	/* Free all extents, batching by block group for efficiency */
 	for (i = 0; i < entries; i++) {
 		u_int64_t start = letoh32(ext[i].e_start_lo) |
 		    ((u_int64_t)letoh16(ext[i].e_start_hi) << 32);
@@ -830,10 +1122,88 @@ ext4fs_truncate(struct inode *ip, off_t length, int flags, struct ucred *cred)
 			freed += n;
 		}
 	}
+}
 
-	/* Zero extent entries */
-	memset(ext, 0, 4 * sizeof(struct ext4fs_extent));
+/*
+ * Truncate inode to size 0.
+ * Handles both depth-0 (inline) and depth > 0 (tree) extent trees.
+ */
+int
+ext4fs_truncate(struct inode *ip, off_t length, int flags, struct ucred *cred)
+{
+	struct m_ext4fs *fs = ip->i_e4fs;
+	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+	struct ext4fs_extent_header *eh = &din->i_extent_header;
+	off_t cursize;
+	u_int16_t entries, depth;
+
+	cursize = (off_t)letoh32(din->i_size_lo) |
+	    ((off_t)letoh32(din->i_size_hi) << 32);
+
+	if (length == cursize)
+		return (0);
+
+	/* Only support truncate to 0 for now */
+	if (length != 0)
+		return (EOPNOTSUPP);
+
+	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC)
+		return (EIO);
+
+	depth = letoh16(eh->eh_depth);
+	entries = letoh16(eh->eh_entries);
+
+	if (depth == 0) {
+		/* Depth 0: free inline extents */
+		ext4fs_free_extents(ip, din->i_extent, entries);
+	} else {
+		/* Depth > 0: walk index entries, free each leaf's extents,
+		 * then free the leaf blocks themselves */
+		struct ext4fs_extent_idx *idx = din->i_extent_idx;
+		int i;
+
+		for (i = 0; i < entries; i++) {
+			u_int64_t leaf_blk;
+			struct ext4fs_extent_header *leaf_eh;
+			struct ext4fs_extent *leaf_ext;
+			struct buf *bp;
+			u_int16_t leaf_entries;
+			int error;
+
+			leaf_blk = letoh32(idx[i].ei_leaf_lo) |
+			    ((u_int64_t)letoh16(idx[i].ei_leaf_hi) << 32);
+
+			error = bread(ip->i_devvp,
+			    (daddr_t)EXT4FS_FSBTODB(fs, leaf_blk),
+			    fs->m_block_size, &bp);
+			if (error) {
+				brelse(bp);
+				continue;
+			}
+
+			leaf_eh = (struct ext4fs_extent_header *)bp->b_data;
+			if (letoh16(leaf_eh->eh_magic) !=
+			    EXT4FS_EXTENT_HEADER_MAGIC) {
+				brelse(bp);
+				continue;
+			}
+
+			leaf_entries = letoh16(leaf_eh->eh_entries);
+			leaf_ext = (struct ext4fs_extent *)(leaf_eh + 1);
+
+			/* Free all extents in this leaf */
+			ext4fs_free_extents(ip, leaf_ext, leaf_entries);
+			brelse(bp);
+
+			/* Free the leaf block itself */
+			ext4fs_blkfree(ip, leaf_blk);
+		}
+	}
+
+	/* Reset inode root to depth 0, 0 entries */
+	memset(din->i_extent, 0, 4 * sizeof(struct ext4fs_extent));
 	eh->eh_entries = htole16(0);
+	eh->eh_depth = htole16(0);
 
 	/* Update size and block count */
 	ext4fs_setsize(ip, 0);
@@ -1745,9 +2115,7 @@ ext4fs_remove(void *v)
 		goto out;
 	}
 
-	EXT4FS_CHECK_EHMAGIC(VTOI(dvp), "remove:pre-dirremove");
 	error = ext4fs_dirremove(dvp, ap->a_cnp);
-	EXT4FS_CHECK_EHMAGIC(VTOI(dvp), "remove:post-dirremove");
 	if (error)
 		goto out;
 
@@ -2226,9 +2594,7 @@ ext4fs_rmdir(void *v)
 	}
 
 	/* Remove entry from parent */
-	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:pre-dirremove");
 	error = ext4fs_dirremove(dvp, cnp);
-	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:post-dirremove");
 	if (error)
 		goto out;
 
@@ -2248,9 +2614,7 @@ ext4fs_rmdir(void *v)
 	ip->i_flag |= IN_CHANGE;
 
 	/* Truncate directory contents */
-	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:pre-truncate");
 	error = ext4fs_truncate(ip, 0, 0, cnp->cn_cred);
-	EXT4FS_CHECK_EHMAGIC(dp, "rmdir:post-truncate");
 
 	cache_purge(vp);
 
@@ -2778,9 +3142,7 @@ ext4fs_inactive(void *v)
 	if (nlink == 0 && (vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
 		struct timespec ts;
 
-		EXT4FS_CHECK_EHMAGIC(ip, "inactive:pre-truncate");
 		(void)ext4fs_truncate(ip, 0, 0, NOCRED);
-		EXT4FS_CHECK_EHMAGIC(ip, "inactive:post-truncate");
 		ext4fs_inode_free(ip, ip->i_number, mode);
 
 		getnanotime(&ts);
