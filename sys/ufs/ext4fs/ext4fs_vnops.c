@@ -1027,23 +1027,19 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 	}
 
 	{
-		u_int32_t want, nalloced, j;
+		u_int32_t got;
 
-		/* Preallocate contiguous blocks (up to 32768, extent max) */
-		want = 32768;
-		error = ext4fs_blkalloc(ip, goal, want, &pblk, &nalloced);
+		error = ext4fs_blkalloc(ip, goal, 1, &pblk, &got);
 		if (error)
 			return (error);
-		/* Insert extent for all allocated blocks */
-		error = ext4fs_extent_insert(ip, lbn, pblk, nalloced);
+		error = ext4fs_extent_insert(ip, lbn, pblk, 1);
 		if (error) {
-			for (j = 0; j < nalloced; j++)
-				ext4fs_blkfree(ip, pblk + j);
+			ext4fs_blkfree(ip, pblk);
 			return (error);
 		}
 		/* Update inode block count (i_blocks is in 512-byte sectors) */
 		i_blocks = letoh32(din->i_blocks_lo);
-		i_blocks += nalloced * (fs->m_block_size / DEV_BSIZE);
+		i_blocks += fs->m_block_size / DEV_BSIZE;
 		din->i_blocks_lo = htole32(i_blocks);
 	}
 
@@ -2033,7 +2029,8 @@ ext4fs_write(void *v)
 	struct ext4fs_dinode *din = &ip->i_e4din->dinode;
 	struct buf *bp;
 	off_t filesz;
-	u_int64_t lbn, pblk, ncontig;
+	u_int64_t lbn, pblk, ncontig, prealloc_start;
+	u_int32_t prealloc_count, prealloc_got, prealloc_i, i_blocks;
 	int ioflag = ap->a_ioflag;
 	int blkoffset, xfersize;
 	int error;
@@ -2075,18 +2072,69 @@ ext4fs_write(void *v)
 		if (uio->uio_resid < xfersize)
 			xfersize = uio->uio_resid;
 
+		/*
+		 * For full-block writes past EOF, batch-allocate
+		 * contiguous blocks for the remaining write.
+		 */
 		if (blkoffset == 0 && xfersize == fs->m_block_size &&
-		    ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig) == 0) {
-			/* Full-block overwrite, already mapped: skip read */
-			bp = getblk(ip->i_devvp,
-			    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
-			    fs->m_block_size, 0, INFSLP);
+		    uio->uio_offset >= filesz &&
+		    ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig) != 0) {
+			/* Count full blocks remaining in this write */
+			prealloc_count = uio->uio_resid / fs->m_block_size;
+			if (prealloc_count > 32768)
+				prealloc_count = 32768;
+			if (prealloc_count == 0)
+				prealloc_count = 1;
+			/* Goal: contiguous with last extent */
+			pblk = 0;
+			if (letoh16(din->i_extent_header.eh_entries) > 0) {
+				u_int64_t dummy;
+				u_int64_t nc;
+				/* Use lbn-1 to find last mapped block */
+				if (lbn > 0 && ext4fs_extent_pblk(ip,
+				    lbn - 1, &dummy, &nc) == 0)
+					pblk = dummy + 1;
+			}
+			error = ext4fs_blkalloc(ip, pblk, prealloc_count,
+			    &prealloc_start, &prealloc_got);
+			if (error)
+				break;
+			error = ext4fs_extent_insert(ip, lbn,
+			    prealloc_start, prealloc_got);
+			if (error) {
+				for (prealloc_i = 0;
+				    prealloc_i < prealloc_got;
+				    prealloc_i++)
+					ext4fs_blkfree(ip,
+					    prealloc_start + prealloc_i);
+				break;
+			}
+			i_blocks = letoh32(din->i_blocks_lo);
+			i_blocks += prealloc_got *
+			    (fs->m_block_size / DEV_BSIZE);
+			din->i_blocks_lo = htole32(i_blocks);
+			din->i_flags |=
+			    htole32(EXTFS_INODE_FLAG_EXTENTS);
+			ip->i_flag |= IN_CHANGE | IN_MODIFIED;
+			/* Now use the first allocated block */
+			pblk = prealloc_start;
+		} else if (ext4fs_extent_pblk(ip, lbn, &pblk,
+		    &ncontig) == 0) {
+			/* Already mapped */
 		} else {
+			/* Partial block or not past EOF: single alloc */
 			error = ext4fs_buf_alloc(ip, lbn, fs->m_block_size,
 			    ap->a_cred, &bp, B_CLRBUF);
 			if (error)
 				break;
+			goto do_io;
 		}
+
+		/* Get buffer without reading (we'll overwrite it) */
+		bp = getblk(ip->i_devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+		    fs->m_block_size, 0, INFSLP);
+do_io:
 		error = uiomove((char *)bp->b_data + blkoffset, xfersize,
 		    uio);
 
