@@ -303,6 +303,7 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	mp->mnt_stat.f_namemax = MAXNAMLEN;
 	mp->mnt_flag |= MNT_LOCAL;
 	ump->um_mountp = mp;
+
 	ump->um_dev = dev;
 	ump->um_devvp = devvp;
 	ump->um_nindir = EXT4FS_NINDIR(mfs);
@@ -310,6 +311,10 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	ump->um_seqinc = 1; /* no frags */
 	ump->um_maxsymlinklen = EXT4FS_SYMLINK_LEN_MAX;
 	devvp->v_specmountpoint = mp;
+
+	if (ronly == 0)
+		ext4fs_sbwrite(mp);
+
 	return (0);
 out:
 	if (devvp->v_specinfo)
@@ -397,10 +402,9 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 	}
 
 	if (tmp & EXT4FS_FEATURE_INCOMPAT_RECOVER) {
-		printf("ext4fs: your file system says it needs"
-		       " recovery\n");
+		printf("ext4fs: file system needs recovery\n");
 		if (!ronly)
-			return (EROFS);	/* XXX needs translation */
+			return (EROFS);
 	}
 
 	tmp = letoh32(sble->sb_feature_ro_compat) &
@@ -409,7 +413,12 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		printf("ext4fs: unsupported R/O compat features: ");
 		PRINTF_FEATURES(tmp, ext4fs_feature_ro_compat);
 		printf("\n");
-		return (EROFS);      /* XXX needs translation */
+		return (EROFS);
+	}
+
+	if (!ronly && !(letoh16(sble->sb_state) & EXT4FS_STATE_VALID)) {
+		printf("ext4fs: file system not clean, run e2fsck\n");
+		return (EROFS);
 	}
 
 	return (0);
