@@ -547,6 +547,7 @@ static const struct ext4fs_feature ext4fs_feature_ro_compat[] = {
 			    htole32((u_int32_t)_ts.tv_sec);		\
 			(ip)->i_e4din->dinode.i_ctime_extra =		\
 			    htole32(_ts.tv_nsec << 2);			\
+			(ip)->i_modrev++;				\
 		}							\
 		(ip)->i_flag &= ~(IN_ACCESS | IN_CHANGE | IN_UPDATE);	\
 	}								\

@@ -1874,6 +1874,14 @@ filt_ufsread(struct knote *kn, long hint)
 		kn->kn_data = ext2fs_size(ip) - foffset(kn->kn_fp);
 	else
 #endif
+#ifdef EXT4FS
+	if (ip->i_vnode->v_tag == VT_EXT4FS) {
+		struct ext4fs_dinode *din = &ip->i_e4din->dinode;
+		kn->kn_data = ((off_t)letoh32(din->i_size_lo) |
+		    ((off_t)letoh32(din->i_size_hi) << 32)) -
+		    foffset(kn->kn_fp);
+	} else
+#endif
 		kn->kn_data = DIP(ip, size) - foffset(kn->kn_fp);
 	if (kn->kn_data == 0 && kn->kn_sfflags & NOTE_EOF) {
 		kn->kn_fflags |= NOTE_EOF;

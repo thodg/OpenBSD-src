@@ -362,8 +362,13 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		return (EIO);	   /* XXX needs translation */
 	}
 
-	if (sble->sb_blocks_per_group == 0) {
-		printf("ext2fs: zero blocks per group\n");
+	if (letoh32(sble->sb_blocks_per_group) == 0) {
+		printf("ext4fs: zero blocks per group\n");
+		return (EIO);
+	}
+
+	if (letoh32(sble->sb_inodes_per_group) == 0) {
+		printf("ext4fs: zero inodes per group\n");
 		return (EIO);
 	}
 
@@ -560,7 +565,6 @@ ext4fs_sbload(struct ext4fs *sble, struct m_ext4fs *dest)
 	dest->m_default_mount_opts = letoh32(sble->sb_default_mount_opts);
 	dest->m_first_meta_block_group = letoh32(sble->sb_first_meta_block_group);
 	dest->m_newfs_time = letoh32(sble->sb_newfs_time_lo);
-	if (letoh32(sble->sb_feature_incompat) & EXT4FS_FEATURE_INCOMPAT_64BIT)
 	dest->m_inode_size_extra_min = letoh16(sble->sb_inode_size_extra_min);
 	dest->m_inode_size_extra_want = letoh16(sble->sb_inode_size_extra_want);
 	dest->m_flags = letoh32(sble->sb_flags);
@@ -646,7 +650,10 @@ ext4fs_statfs(struct mount *mp, struct statfs *sbp, struct proc *p)
 	sbp->f_iosize = mfs->m_block_size;
 	sbp->f_blocks = mfs->m_blocks_count - overhead;
 	sbp->f_bfree = mfs->m_free_blocks_count;
-	sbp->f_bavail = sbp->f_bfree - mfs->m_reserved_blocks_count;
+	if (sbp->f_bfree > mfs->m_reserved_blocks_count)
+		sbp->f_bavail = sbp->f_bfree - mfs->m_reserved_blocks_count;
+	else
+		sbp->f_bavail = 0;
 	sbp->f_files = mfs->m_inodes_count;
 	sbp->f_favail = sbp->f_ffree = mfs->m_free_inodes_count;
 	copy_statfs_info(sbp, mp);
@@ -819,6 +826,10 @@ ext4fs_inode_alloc(struct inode *pip, mode_t mode, struct ucred *cred,
 				setbit(ibp, pbit);
 
 			itb = letoh32(gd->bgd_inode_table_block_lo);
+			if (fs->m_feature_incompat &
+			    EXT4FS_FEATURE_INCOMPAT_64BIT)
+				itb |= (u_int64_t)letoh32(
+				    gd->bgd_inode_table_block_hi) << 32;
 			it_blocks = fs->m_inode_table_blocks_per_group;
 			for (tb = 0; tb < it_blocks; tb++) {
 				error = bread(pip->i_devvp,
@@ -1230,7 +1241,17 @@ ext4fs_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	vref(ip->i_devvp);
 
 	/* Calculate inode location on disk */
+	if (ino == 0 || ino > fs->m_inodes_count) {
+		vput(vp);
+		*vpp = NULL;
+		return (ESTALE);
+	}
 	inode_group = (ino - 1) / fs->m_inodes_per_group;
+	if (inode_group >= fs->m_block_group_count) {
+		vput(vp);
+		*vpp = NULL;
+		return (ESTALE);
+	}
 	inode_index = (ino - 1) % fs->m_inodes_per_group;
 	block_in_table = inode_index / fs->m_inodes_per_block;
 	offset_in_block = (inode_index % fs->m_inodes_per_block) *

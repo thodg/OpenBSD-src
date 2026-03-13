@@ -360,7 +360,7 @@ ext4fs_blkalloc(struct inode *ip, u_int64_t goal, u_int32_t count,
 			else if (g == 0 || g == 1)
 				has_sb = 1;
 			else {
-				u_int32_t n;
+				u_int64_t n;
 				for (n = 3; n <= g; n *= 3)
 					if (n == g) has_sb = 1;
 				for (n = 5; n <= g; n *= 5)
@@ -526,7 +526,12 @@ ext4fs_blkfree(struct inode *ip, u_int64_t bno)
 	char *bbp;
 	int error;
 
+	if (bno < fs->m_first_data_block || bno >= fs->m_blocks_count)
+		return;
+
 	group = (bno - fs->m_first_data_block) / fs->m_blocks_per_group;
+	if (group >= fs->m_block_group_count)
+		return;
 	blk_in_group = (bno - fs->m_first_data_block) %
 	    fs->m_blocks_per_group;
 	gd = &fs->m_gd[group];
@@ -1080,12 +1085,23 @@ ext4fs_free_extents(struct inode *ip, struct ext4fs_extent *ext,
 
 		while (freed < len) {
 			u_int64_t bno = start + freed;
-			u_int32_t group = (bno - fs->m_first_data_block) /
+			u_int32_t group, blk_in_group;
+			struct ext4fs_block_group_descriptor *gd;
+
+			if (bno < fs->m_first_data_block ||
+			    bno >= fs->m_blocks_count) {
+				freed++;
+				continue;
+			}
+			group = (bno - fs->m_first_data_block) /
 			    fs->m_blocks_per_group;
-			u_int32_t blk_in_group = (bno -
-			    fs->m_first_data_block) % fs->m_blocks_per_group;
-			struct ext4fs_block_group_descriptor *gd =
-			    &fs->m_gd[group];
+			if (group >= fs->m_block_group_count) {
+				freed++;
+				continue;
+			}
+			blk_in_group = (bno - fs->m_first_data_block) %
+			    fs->m_blocks_per_group;
+			gd = &fs->m_gd[group];
 			u_int64_t bitmap_blk;
 			struct buf *bbp;
 			u_int32_t n, k, free_blocks;
@@ -1242,6 +1258,7 @@ ext4fs_truncate(struct inode *ip, off_t length, int flags, struct ucred *cred)
 
 	/* Purge cached data */
 	uvm_vnp_setsize(ITOV(ip), 0);
+	vinvalbuf(ITOV(ip), 0, NOCRED, curproc, 0, INFSLP);
 
 	return (ext4fs_update(ip, 1));
 }
@@ -1747,7 +1764,7 @@ ext4fs_getattr(void *v)
 
 	vap->va_bytes = letoh32(din->dinode.i_blocks_lo);
 	vap->va_bytes |= (off_t)letoh16(din->dinode.i_blocks_hi) << 32;
-	vap->va_bytes *= VFSTOUFS(vp->v_mount)->um_e4fs->m_block_size;
+	vap->va_bytes *= DEV_BSIZE;
 	vap->va_type = vp->v_type;
 	vap->va_filerev = 0;
 
@@ -1981,9 +1998,10 @@ ext4fs_read(void *v)
 			break;
 
 		/* Read up to ncontig blocks, capped at MAXPHYS */
-		size = ncontig * fs->m_block_size;
-		if (size > MAXPHYS)
-			size = MAXPHYS;
+		{
+			u_int64_t rdsz = ncontig * fs->m_block_size;
+			size = (rdsz > MAXPHYS) ? MAXPHYS : (int)rdsz;
+		}
 
 		xfersize = size - blkoffset;
 		xfersize = MIN(xfersize, uio->uio_resid);
@@ -2130,13 +2148,27 @@ ext4fs_write(void *v)
 			goto do_io;
 		}
 
-		/* Get buffer without reading (we'll overwrite it) */
-		bp = getblk(ip->i_devvp,
-		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
-		    fs->m_block_size, 0, INFSLP);
+		/* Full block: getblk without read; partial: bread */
+		if (blkoffset == 0 && xfersize == fs->m_block_size) {
+			bp = getblk(ip->i_devvp,
+			    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+			    fs->m_block_size, 0, INFSLP);
+		} else {
+			error = bread(ip->i_devvp,
+			    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
+			    fs->m_block_size, &bp);
+			if (error) {
+				brelse(bp);
+				break;
+			}
+		}
 do_io:
 		error = uiomove((char *)bp->b_data + blkoffset, xfersize,
 		    uio);
+		if (error) {
+			brelse(bp);
+			break;
+		}
 
 		if (ioflag & IO_SYNC)
 			(void)bwrite(bp);
@@ -2145,7 +2177,7 @@ do_io:
 		else
 			bdwrite(bp);
 		(void)uvm_vnp_uncache(vp);
-		if (error || xfersize == 0)
+		if (xfersize == 0)
 			break;
 
 		/* Update file size if we wrote past end */
@@ -2390,7 +2422,20 @@ abortit:
 		}
 		vput(tdvp);
 	} else {
-		/* Target exists - rewrite the entry */
+		/*
+		 * Target exists. If replacing a directory,
+		 * check that it is empty BEFORE rewriting
+		 * the directory entry.
+		 */
+		if (doingdirectory) {
+			if (!ext4fs_dirempty(xp, dp->i_number,
+			    tcnp->cn_cred)) {
+				error = ENOTEMPTY;
+				goto bad;
+			}
+		}
+
+		/* Rewrite the entry to point to source inode */
 		error = ext4fs_dirrewrite(dp, ip, tcnp);
 		if (error)
 			goto bad;
@@ -2422,12 +2467,6 @@ abortit:
 			if (xnlink > 0)
 				xnlink--;
 			if (doingdirectory) {
-				if (!ext4fs_dirempty(xp, dp->i_number,
-				    tcnp->cn_cred)) {
-					error = ENOTEMPTY;
-					vput(tvp);
-					goto out;
-				}
 				if (xnlink > 0)
 					xnlink--;
 				error = ext4fs_truncate(xp, 0, 0,
@@ -2521,7 +2560,6 @@ bad:
 	if (xp)
 		vput(ITOV(xp));
 	vput(ITOV(dp));
-out:
 	if (doingdirectory)
 		ip->i_flag &= ~IN_RENAME;
 	if (vn_lock(fvp, LK_EXCLUSIVE) == 0) {
@@ -2557,14 +2595,17 @@ ext4fs_mkdir(void *v)
 	nlink = letoh16(dp->i_e4din->dinode.i_links_count);
 	if (nlink >= EXT4FS_LINK_MAX) {
 		error = EMLINK;
+		pool_put(&namei_pool, cnp->cn_pnbuf);
 		goto out;
 	}
 
 	/* Allocate inode for new directory */
 	error = ext4fs_inode_alloc(dp, S_IFDIR | vap->va_mode,
 	    cnp->cn_cred, &tvp);
-	if (error)
+	if (error) {
+		pool_put(&namei_pool, cnp->cn_pnbuf);
 		goto out;
+	}
 
 	ip = VTOI(tvp);
 	din = &ip->i_e4din->dinode;
@@ -2761,8 +2802,7 @@ ext4fs_symlink(void *v)
 		error = VOP_WRITE(*vpp, &auio, IO_NODELOCKED, ap->a_cnp->cn_cred);
 	}
 
-	if (error)
-		vput(*vpp);
+	vput(*vpp);
 	vput(dvp);
 	return (error);
 }
@@ -2814,16 +2854,26 @@ ext4fs_readdir(void *v)
 			    ((char *)bp->b_data + blkoff);
 			reclen = letoh16(ep->e4d_reclen);
 
-			if (reclen == 0) {
+			if (reclen < 8 || reclen > fs->m_block_size ||
+			    blkoff + reclen > fs->m_block_size) {
 				error = EIO;
 				brelse(bp);
 				goto done;
 			}
 
 			if (letoh32(ep->e4d_ino) != 0) {
+				u_int8_t namlen = ep->e4d_namlen;
+
+				if (namlen > reclen - 8 ||
+				    namlen > MAXNAMLEN) {
+					error = EIO;
+					brelse(bp);
+					goto done;
+				}
+
 				memset(&dstd, 0, sizeof(dstd));
 				dstd.d_fileno = letoh32(ep->e4d_ino);
-				dstd.d_namlen = ep->e4d_namlen;
+				dstd.d_namlen = namlen;
 
 				if (ep->e4d_type < EXT4FS_FT_MAX)
 					dstd.d_type =
@@ -2832,7 +2882,7 @@ ext4fs_readdir(void *v)
 					dstd.d_type = DT_UNKNOWN;
 
 				memcpy(dstd.d_name, ep->e4d_name,
-				    dstd.d_namlen);
+				    namlen);
 				dstd.d_name[dstd.d_namlen] = '\0';
 				dstd.d_reclen = DIRENT_SIZE(&dstd);
 				dstd.d_off = off + reclen;
@@ -3112,7 +3162,8 @@ ext4fs_dirempty(struct inode *ip, ufsino_t parentino, struct ucred *cred)
 			    ((char *)bp->b_data + blkoff);
 			reclen = letoh16(ep->e4d_reclen);
 
-			if (reclen == 0) {
+			if (reclen < 8 || reclen > fs->m_block_size ||
+			    blkoff + reclen > fs->m_block_size) {
 				brelse(bp);
 				return (0);
 			}
@@ -3193,7 +3244,7 @@ ext4fs_inactive(void *v)
 	struct vop_inactive_args *ap = v;
 	struct vnode *vp = ap->a_vp;
 	struct inode *ip = VTOI(vp);
-	u_int16_t mode, nlink;
+	u_int16_t mode, nlink = 1;
 	int error = 0;
 #ifdef DIAGNOSTIC
 	extern int prtactive;
