@@ -2144,6 +2144,7 @@ do_io:
 			bawrite(bp);
 		else
 			bdwrite(bp);
+		(void)uvm_vnp_uncache(vp);
 		if (error || xfersize == 0)
 			break;
 
