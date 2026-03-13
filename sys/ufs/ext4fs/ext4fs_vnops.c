@@ -3230,6 +3230,10 @@ ext4fs_inactive(void *v)
 		struct timespec ts;
 
 		(void)ext4fs_truncate(ip, 0, 0, NOCRED);
+
+		mode = letoh16(ip->i_e4din->dinode.i_mode);
+		ip->i_e4din->dinode.i_mode = htole16(0);
+
 		ext4fs_inode_free(ip, ip->i_number, mode);
 
 		getnanotime(&ts);
