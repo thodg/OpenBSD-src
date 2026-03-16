@@ -172,7 +172,12 @@ ext4fs_extent_pblk(struct inode *ip, u_int64_t lbn, u_int64_t *pblk,
 
 	if (bp != NULL)
 		brelse(bp);
-	return (EIO);
+
+	/* Block not covered by any extent — hole */
+	*pblk = 0;
+	if (ncontig != NULL)
+		*ncontig = 1;
+	return (0);
 }
 
 /*
@@ -976,7 +981,7 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 
 	/* Check if already mapped */
 	error = ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig);
-	if (error == 0) {
+	if (error == 0 && pblk != 0) {
 		/* Already mapped, just read */
 		error = bread(ip->i_devvp,
 		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
@@ -985,6 +990,7 @@ ext4fs_buf_alloc(struct inode *ip, u_int64_t lbn, int size,
 			brelse(*bpp);
 		return (error);
 	}
+	error = 0;
 
 	/* Not mapped - allocate a new block */
 	/* Goal: try to be contiguous with last extent */
@@ -1385,8 +1391,8 @@ ext4fs_lookup(void *v)
 		lbn = EXT4FS_LBLKNO(fs, off);
 
 		error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
-		if (error) {
-			return (error);
+		if (error || pblk == 0) {
+			return (error ? error : EIO);
 		}
 
 		error = bread(dp->i_devvp,
@@ -1972,7 +1978,7 @@ ext4fs_read(void *v)
 	struct uio *uio = ap->a_uio;
 	struct buf *bp;
 	off_t filesz, bytesinfile;
-	u_int64_t lbn, pblk, ncontig;
+	daddr_t lbn;
 	int error, blkoffset, xfersize, size;
 
 	if (vp->v_type == VDIR)
@@ -1985,50 +1991,47 @@ ext4fs_read(void *v)
 	filesz = (off_t)letoh32(din->i_size_lo) |
 	    ((off_t)letoh32(din->i_size_hi) << 32);
 
-	for (error = 0; uio->uio_resid > 0; ) {
+	for (error = 0, bp = NULL; uio->uio_resid > 0; bp = NULL) {
 		bytesinfile = filesz - uio->uio_offset;
 		if (bytesinfile <= 0)
 			break;
 
 		lbn = EXT4FS_LBLKNO(fs, uio->uio_offset);
 		blkoffset = EXT4FS_BLKOFF(fs, uio->uio_offset);
-
-		error = ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig);
-		if (error)
-			break;
-
-		/* Read up to ncontig blocks, capped at MAXPHYS */
-		{
-			u_int64_t rdsz = ncontig * fs->m_block_size;
-			size = (rdsz > MAXPHYS) ? MAXPHYS : (int)rdsz;
-		}
+		size = fs->m_block_size;
 
 		xfersize = size - blkoffset;
-		xfersize = MIN(xfersize, uio->uio_resid);
-		xfersize = MIN(xfersize, bytesinfile);
+		if (uio->uio_resid < xfersize)
+			xfersize = uio->uio_resid;
+		if (bytesinfile < xfersize)
+			xfersize = bytesinfile;
 
-		error = bread(ip->i_devvp,
-		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
-		    size, &bp);
-		if (error) {
-			brelse(bp);
+		error = bread(vp, lbn, size, &bp);
+		if (error)
 			break;
-		}
+		ip->i_ci.ci_lastr = lbn;
 
+		/*
+		 * We should only get non-zero b_resid when an I/O error
+		 * has occurred, which should cause us to break above.
+		 * However, if the short read did not cause an error,
+		 * then we want to ensure that we do not uiomove bad
+		 * or uninitialized data.
+		 */
 		size -= bp->b_resid;
 		if (size < xfersize) {
-			if (size == 0) {
-				brelse(bp);
+			if (size == 0)
 				break;
-			}
 			xfersize = size;
 		}
 
 		error = uiomove((char *)bp->b_data + blkoffset, xfersize, uio);
-		brelse(bp);
 		if (error)
 			break;
+		brelse(bp);
 	}
+	if (bp != NULL)
+		brelse(bp);
 
 	if (!(vp->v_mount->mnt_flag & MNT_NOATIME))
 		ip->i_flag |= IN_ACCESS;
@@ -2096,7 +2099,8 @@ ext4fs_write(void *v)
 		 */
 		if (blkoffset == 0 && xfersize == fs->m_block_size &&
 		    uio->uio_offset >= filesz &&
-		    ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig) != 0) {
+		    (ext4fs_extent_pblk(ip, lbn, &pblk, &ncontig) != 0 ||
+		    pblk == 0)) {
 			/* Count full blocks remaining in this write */
 			prealloc_count = uio->uio_resid / fs->m_block_size;
 			if (prealloc_count > 32768)
@@ -2110,7 +2114,8 @@ ext4fs_write(void *v)
 				u_int64_t nc;
 				/* Use lbn-1 to find last mapped block */
 				if (lbn > 0 && ext4fs_extent_pblk(ip,
-				    lbn - 1, &dummy, &nc) == 0)
+				    lbn - 1, &dummy, &nc) == 0 &&
+				    dummy != 0)
 					pblk = dummy + 1;
 			}
 			error = ext4fs_blkalloc(ip, pblk, prealloc_count,
@@ -2137,7 +2142,7 @@ ext4fs_write(void *v)
 			/* Now use the first allocated block */
 			pblk = prealloc_start;
 		} else if (ext4fs_extent_pblk(ip, lbn, &pblk,
-		    &ncontig) == 0) {
+		    &ncontig) == 0 && pblk != 0) {
 			/* Already mapped */
 		} else {
 			/* Partial block or not past EOF: single alloc */
@@ -2517,7 +2522,7 @@ abortit:
 			dp->i_flag |= IN_CHANGE;
 
 			error = ext4fs_extent_pblk(ip, 0, &dpblk, NULL);
-			if (error == 0) {
+			if (error == 0 && dpblk != 0) {
 				error = bread(ip->i_devvp,
 				    (daddr_t)EXT4FS_FSBTODB(ip->i_e4fs,
 				    dpblk), ip->i_e4fs->m_block_size, &dbp);
@@ -2836,8 +2841,10 @@ ext4fs_readdir(void *v)
 		lbn = EXT4FS_LBLKNO(fs, off);
 
 		error = ext4fs_extent_pblk(ip, lbn, &pblk, NULL);
-		if (error)
+		if (error || pblk == 0) {
+			if (!error) error = EIO;
 			break;
+		}
 
 		error = bread(ip->i_devvp,
 		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
@@ -2974,8 +2981,8 @@ ext4fs_direnter(struct inode *ip, struct vnode *dvp,
 				return (error);
 		} else {
 			error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
-			if (error)
-				return (error);
+			if (error || pblk == 0)
+				return (error ? error : EIO);
 			error = bread(dp->i_devvp,
 			    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
 			    fs->m_block_size, &bp);
@@ -3027,8 +3034,8 @@ ext4fs_direnter(struct inode *ip, struct vnode *dvp,
 		u_int64_t lbn = EXT4FS_LBLKNO(fs, dp->i_offset);
 
 		error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
-		if (error)
-			return (error);
+		if (error || pblk == 0)
+			return (error ? error : EIO);
 
 		error = bread(dp->i_devvp,
 		    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
@@ -3089,8 +3096,8 @@ ext4fs_dirremove(struct vnode *dvp, struct componentname *cnp)
 	lbn = EXT4FS_LBLKNO(fs, dp->i_offset);
 
 	error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
-	if (error)
-		return (error);
+	if (error || pblk == 0)
+		return (error ? error : EIO);
 
 	error = bread(dp->i_devvp,
 	    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
@@ -3144,7 +3151,7 @@ ext4fs_dirempty(struct inode *ip, ufsino_t parentino, struct ucred *cred)
 		lbn = EXT4FS_LBLKNO(fs, off);
 
 		error = ext4fs_extent_pblk(ip, lbn, &pblk, NULL);
-		if (error)
+		if (error || pblk == 0)
 			return (0);
 
 		error = bread(ip->i_devvp,
@@ -3214,8 +3221,8 @@ ext4fs_dirrewrite(struct inode *dp, struct inode *ip,
 	lbn = EXT4FS_LBLKNO(fs, dp->i_offset);
 
 	error = ext4fs_extent_pblk(dp, lbn, &pblk, NULL);
-	if (error)
-		return (error);
+	if (error || pblk == 0)
+		return (error ? error : EIO);
 
 	error = bread(dp->i_devvp,
 	    (daddr_t)EXT4FS_FSBTODB(fs, pblk),
@@ -3352,6 +3359,14 @@ ext4fs_bmap(void *v)
 	if (error) {
 		*ap->a_bnp = -1;
 		return (error);
+	}
+
+	if (pblk == 0) {
+		/* Hole — no physical block allocated */
+		*ap->a_bnp = -1;
+		if (ap->a_runp != NULL)
+			*ap->a_runp = 0;
+		return (0);
 	}
 
 	*ap->a_bnp = (daddr_t)EXT4FS_FSBTODB(fs, pblk);
