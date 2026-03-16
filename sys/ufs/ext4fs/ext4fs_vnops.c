@@ -1978,7 +1978,7 @@ ext4fs_read(void *v)
 	struct uio *uio = ap->a_uio;
 	struct buf *bp;
 	off_t filesz, bytesinfile;
-	daddr_t lbn;
+	daddr_t lbn, nextlbn;
 	int error, blkoffset, xfersize, size;
 
 	if (vp->v_type == VDIR)
@@ -1997,6 +1997,7 @@ ext4fs_read(void *v)
 			break;
 
 		lbn = EXT4FS_LBLKNO(fs, uio->uio_offset);
+		nextlbn = lbn + 1;
 		blkoffset = EXT4FS_BLKOFF(fs, uio->uio_offset);
 		size = fs->m_block_size;
 
@@ -2006,7 +2007,13 @@ ext4fs_read(void *v)
 		if (bytesinfile < xfersize)
 			xfersize = bytesinfile;
 
-		error = bread(vp, lbn, size, &bp);
+		if ((u_int64_t)nextlbn * fs->m_block_size >= filesz)
+			error = bread(vp, lbn, size, &bp);
+		else if (lbn - 1 == ip->i_ci.ci_lastr ||
+		    uio->uio_resid > xfersize)
+			error = bread_cluster(vp, lbn, size, &bp);
+		else
+			error = bread(vp, lbn, size, &bp);
 		if (error)
 			break;
 		ip->i_ci.ci_lastr = lbn;
