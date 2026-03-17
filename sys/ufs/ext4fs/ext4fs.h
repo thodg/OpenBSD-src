@@ -132,6 +132,7 @@ struct vfsconf;
 #define EXT4FS_FEATURE_RO_COMPAT_REPLICA        0x0800
 #define EXT4FS_FEATURE_RO_COMPAT_READONLY       0x1000
 #define EXT4FS_FEATURE_RO_COMPAT_PROJECT        0x2000
+#define EXT4FS_FEATURE_RO_COMPAT_ORPHAN_PRESENT 0x10000
 
 #define EXT4FS_FEATURE_RO_COMPAT_SUPPORTED		\
 	(EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER |	\
@@ -139,7 +140,8 @@ struct vfsconf;
 	 EXT4FS_FEATURE_RO_COMPAT_HUGE_FILE |		\
 	 EXT4FS_FEATURE_RO_COMPAT_DIR_NLINK |		\
 	 EXT4FS_FEATURE_RO_COMPAT_EXTRA_ISIZE |		\
-	 EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM)
+	 EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM |	\
+	 EXT4FS_FEATURE_RO_COMPAT_ORPHAN_PRESENT)
 
 #define EXT4FS_FLAG_SIGNED_HASH		0x0001
 #define EXT4FS_FLAG_UNSIGNED_HASH	0x0002
@@ -333,8 +335,7 @@ struct ext4fs {
 	u_int16_t	sb_encoding;
 	u_int16_t	sb_encoding_flags;
 	// 0x280
-	u_int16_t	sb_orphan_file_inode;
-	u_int16_t	sb_reserved_284;
+	u_int32_t	sb_orphan_file_inode;
 	u_int32_t	sb_reserved_288[94];
 	u_int32_t	sb_checksum;
 } __attribute__((packed));
@@ -408,7 +409,7 @@ struct m_ext4fs {
 	u_int32_t	m_checksum_seed;
 	u_int16_t	m_encoding;
 	u_int16_t	m_encoding_flags;
-	u_int16_t	m_orphan_file_inode;
+	u_int32_t	m_orphan_file_inode;
 	int		m_read_only;
 	int		m_fs_was_modified;
 	/* computed by ext4fs_sbfill */
@@ -522,7 +523,8 @@ static const struct ext4fs_feature ext4fs_feature_ro_compat[] = {
   {EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM, "metadata-csum"},
   {EXT4FS_FEATURE_RO_COMPAT_REPLICA,       "replica"},
   {EXT4FS_FEATURE_RO_COMPAT_READONLY,      "readonly"},
-  {EXT4FS_FEATURE_RO_COMPAT_PROJECT,       "project"},
+  {EXT4FS_FEATURE_RO_COMPAT_PROJECT,        "project"},
+  {EXT4FS_FEATURE_RO_COMPAT_ORPHAN_PRESENT, "orphan_present"},
 };
 
 #define EXT4FS_ITIMES(ip) do {						\

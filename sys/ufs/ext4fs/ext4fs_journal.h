@@ -151,5 +151,6 @@ struct jbd2_replay_ctx {
 };
 
 int ext4fs_journal_replay(struct vnode *, struct m_ext4fs *);
+int ext4fs_orphan_cleanup(struct mount *);
 
 #endif /* _EXT4FS_JOURNAL_H_ */

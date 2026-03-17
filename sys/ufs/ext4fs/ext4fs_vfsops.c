@@ -388,8 +388,10 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	ump->um_maxsymlinklen = EXT4FS_SYMLINK_LEN_MAX;
 	devvp->v_specmountpoint = mp;
 
-	if (ronly == 0)
+	if (ronly == 0) {
+		ext4fs_orphan_cleanup(mp);
 		ext4fs_sbwrite(mp);
+	}
 
 	return (0);
 out:
@@ -679,7 +681,7 @@ ext4fs_sbload(struct ext4fs *sble, struct m_ext4fs *dest)
 	dest->m_checksum_seed = letoh32(sble->sb_checksum_seed);
 	dest->m_encoding = letoh16(sble->sb_encoding);
 	dest->m_encoding_flags = letoh16(sble->sb_encoding_flags);
-	dest->m_orphan_file_inode = letoh16(sble->sb_orphan_file_inode);
+	dest->m_orphan_file_inode = letoh32(sble->sb_orphan_file_inode);
 	if (feature_incompat_64bit) {
 		dest->m_blocks_count |= (u_int64_t)
 			letoh32(sble->sb_blocks_count_hi) << 32;
