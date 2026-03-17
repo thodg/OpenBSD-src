@@ -60,6 +60,7 @@
 
 #include <ufs/ext4fs/ext4fs.h>
 #include <ufs/ext4fs/ext4fs_extern.h>
+#include <ufs/ext4fs/ext4fs_journal.h>
 
 struct pool ext4fs_inode_pool;
 struct pool ext4fs_dinode_pool;
@@ -286,6 +287,81 @@ ext4fs_mountfs(struct vnode *devvp, struct mount *mp, struct proc *p)
 	brelse(bp);
 	bp = NULL;
 	sble = &mfs->m_sble;
+
+	/*
+	 * If the filesystem needs journal recovery, replay it now.
+	 * For r/o mounts, we temporarily reopen the device r/w.
+	 */
+	if ((mfs->m_feature_compat & EXT4FS_FEATURE_COMPAT_HAS_JOURNAL) &&
+	    (mfs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_RECOVER)) {
+		int reopen_ro = 0;
+
+		if (ronly) {
+			/* Reopen device r/w for replay */
+			vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+			VOP_CLOSE(devvp, FREAD, cred, p);
+			VOP_UNLOCK(devvp);
+			error = VOP_OPEN(devvp, FREAD | FWRITE, FSCRED, p);
+			if (error) {
+				printf("ext4fs: can't reopen device r/w "
+				    "for journal replay\n");
+				goto out;
+			}
+			reopen_ro = 1;
+		}
+
+		error = ext4fs_journal_replay(devvp, mfs);
+		if (error) {
+			printf("ext4fs: journal replay failed: %d\n", error);
+			printf("ext4fs: use Linux e2fsck to repair\n");
+			/* Leave RECOVER set, fail the mount */
+			if (reopen_ro) {
+				vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+				VOP_CLOSE(devvp, FREAD | FWRITE, cred, p);
+				VOP_UNLOCK(devvp);
+				VOP_OPEN(devvp, FREAD, FSCRED, p);
+			}
+			goto out;
+		}
+
+		/* Reopen device r/o if it was a r/o mount */
+		if (reopen_ro) {
+			vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
+			VOP_CLOSE(devvp, FREAD | FWRITE, cred, p);
+			VOP_UNLOCK(devvp);
+			error = VOP_OPEN(devvp, FREAD, FSCRED, p);
+			if (error) {
+				printf("ext4fs: can't reopen device r/o\n");
+				goto out;
+			}
+		}
+
+		/*
+		 * Replay may have changed group descriptors and
+		 * superblock counters. Reload them.
+		 */
+		if (mfs->m_gd != NULL) {
+			size_t gd_size = mfs->m_block_group_count *
+			    sizeof(struct ext4fs_block_group_descriptor);
+			free(mfs->m_gd, M_UFSMNT, gd_size);
+			mfs->m_gd = NULL;
+		}
+		/* Re-read superblock from disk */
+		error = bread(devvp,
+		    (daddr_t)(EXT4FS_SUPER_BLOCK_OFFSET / DEV_BSIZE),
+		    EXT4FS_SUPER_BLOCK_SIZE, &bp);
+		if (error)
+			goto out;
+		ext4fs_sbload((struct ext4fs *)bp->b_data, mfs);
+		brelse(bp);
+		bp = NULL;
+
+		error = ext4fs_sbfill(devvp, mfs);
+		if (error)
+			goto out;
+		sble = &mfs->m_sble;
+	}
+
 	ump->um_e4fs->m_read_only = ronly;
 	ump->um_fstype = UM_EXT4FS;
 
@@ -407,9 +483,13 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 	}
 
 	if (tmp & EXT4FS_FEATURE_INCOMPAT_RECOVER) {
-		printf("ext4fs: file system needs recovery\n");
-		if (!ronly)
-			return (EROFS);
+		printf("ext4fs: file system needs journal recovery\n");
+		if (!(letoh32(sble->sb_feature_compat) &
+		    EXT4FS_FEATURE_COMPAT_HAS_JOURNAL)) {
+			printf("ext4fs: RECOVER set but no journal\n");
+			return (EINVAL);
+		}
+		/* Allow mount to proceed; replay happens in mountfs */
 	}
 
 	tmp = letoh32(sble->sb_feature_ro_compat) &
@@ -421,7 +501,10 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 		return (EROFS);
 	}
 
-	if (!ronly && !(letoh16(sble->sb_state) & EXT4FS_STATE_VALID)) {
+	if (!ronly &&
+	    !(letoh32(sble->sb_feature_incompat) &
+	      EXT4FS_FEATURE_INCOMPAT_RECOVER) &&
+	    !(letoh16(sble->sb_state) & EXT4FS_STATE_VALID)) {
 		printf("ext4fs: file system not clean, run e2fsck\n");
 		return (EROFS);
 	}
