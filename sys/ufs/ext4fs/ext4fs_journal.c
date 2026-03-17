@@ -41,35 +41,63 @@
 #include <ufs/ext4fs/ext4fs_journal.h>
 
 /*
- * Build the journal block map from sb_jnl_blocks[0..14].
- *
- * sb_jnl_blocks[0..14] is a copy of inode 8's i_block[0..14], which
- * contains an extent tree in the same format as regular file inodes.
- * The values are little-endian (copied from the inode).
- *
- * sb_jnl_blocks[15] = i_size_lo, sb_jnl_blocks[16] = i_size_hi.
+ * Read journal inode (inode 8) directly from the inode table.
+ * Returns a pointer into the buffer; caller must brelse(*bpp).
  */
 static int
-jbd2_build_blockmap(struct jbd2_replay_ctx *ctx)
+jbd2_read_journal_inode(struct jbd2_replay_ctx *ctx, struct buf **bpp,
+    struct ext4fs_dinode **dpp)
 {
 	struct m_ext4fs *fs = ctx->rc_fs;
-	struct ext4fs *sble = &fs->m_sble;
-	u_int32_t *iblock = sble->sb_jnl_blocks;
-	struct ext4fs_extent_header *eh;
+	struct ext4fs_block_group_descriptor *gd;
+	u_int32_t ino = EXT4FS_INODE_JOURNAL;
+	u_int32_t group, index;
+	u_int64_t itb;
+	u_int64_t blk;
+	u_int32_t off;
+	int error;
+
+	group = (ino - 1) / fs->m_inodes_per_group;
+	index = (ino - 1) % fs->m_inodes_per_group;
+	gd = &fs->m_gd[group];
+
+	itb = letoh32(gd->bgd_inode_table_block_lo);
+	if (fs->m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+		itb |= (u_int64_t)letoh32(gd->bgd_inode_table_block_hi) << 32;
+
+	blk = itb + (index * fs->m_inode_size) / fs->m_block_size;
+	off = (index * fs->m_inode_size) % fs->m_block_size;
+
+	error = bread(ctx->rc_devvp, (daddr_t)EXT4FS_FSBTODB(fs, blk),
+	    fs->m_block_size, bpp);
+	if (error) {
+		brelse(*bpp);
+		*bpp = NULL;
+		printf("ext4fs: can't read journal inode\n");
+		return (error);
+	}
+
+	*dpp = (struct ext4fs_dinode *)((char *)(*bpp)->b_data + off);
+	return (0);
+}
+
+/*
+ * Fill blockmap from an extent tree rooted at an extent header.
+ * Handles depth 0 (inline extents) and depth 1 (one level of index).
+ */
+static int
+jbd2_fill_blockmap_from_eh(struct jbd2_replay_ctx *ctx,
+    struct ext4fs_extent_header *eh)
+{
+	struct m_ext4fs *fs = ctx->rc_fs;
 	struct ext4fs_extent *ext;
 	struct ext4fs_extent_idx *idx;
 	u_int16_t depth, entries, i;
-	u_int32_t jblock, maxblocks;
+	u_int32_t jblock, maxblocks, len;
 	u_int64_t pblock;
-	u_int32_t len;
 
-	maxblocks = ctx->rc_maxlen;
-	ctx->rc_blockmap = mallocarray(maxblocks,
-	    sizeof(struct jbd2_blockmap_entry), M_TEMP, M_WAITOK | M_ZERO);
-	ctx->rc_blockmap_count = maxblocks;
+	maxblocks = ctx->rc_blockmap_count;
 
-	/* Parse extent header from i_block[0..2] (first 12 bytes) */
-	eh = (struct ext4fs_extent_header *)iblock;
 	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
 		printf("ext4fs: journal inode has bad extent magic 0x%x\n",
 		    letoh16(eh->eh_magic));
@@ -80,7 +108,6 @@ jbd2_build_blockmap(struct jbd2_replay_ctx *ctx)
 	entries = letoh16(eh->eh_entries);
 
 	if (depth == 0) {
-		/* Leaf extents follow the header directly */
 		ext = (struct ext4fs_extent *)(eh + 1);
 		for (i = 0; i < entries; i++) {
 			u_int32_t lblk = letoh32(ext[i].e_block);
@@ -96,7 +123,6 @@ jbd2_build_blockmap(struct jbd2_replay_ctx *ctx)
 			}
 		}
 	} else {
-		/* Depth > 0: index nodes, need to read leaf blocks */
 		idx = (struct ext4fs_extent_idx *)(eh + 1);
 		for (i = 0; i < entries; i++) {
 			struct buf *bp;
@@ -158,6 +184,25 @@ jbd2_build_blockmap(struct jbd2_replay_ctx *ctx)
 	}
 
 	return (0);
+}
+
+/*
+ * Build the journal block map by reading inode 8's extent tree.
+ */
+static int
+jbd2_build_blockmap(struct jbd2_replay_ctx *ctx)
+{
+	u_int32_t maxblocks;
+	int error;
+
+	maxblocks = ctx->rc_maxlen;
+	ctx->rc_blockmap = mallocarray(maxblocks,
+	    sizeof(struct jbd2_blockmap_entry), M_TEMP, M_WAITOK | M_ZERO);
+	ctx->rc_blockmap_count = maxblocks;
+
+	error = jbd2_fill_blockmap_from_eh(ctx, ctx->rc_journal_eh);
+
+	return (error);
 }
 
 /*
@@ -732,7 +777,7 @@ jbd2_pass_replay(struct jbd2_replay_ctx *ctx)
  * Main entry point: replay the ext4 journal.
  *
  * Called during mount when the RECOVER incompat flag is set.
- * Reads the journal superblock backup from sb_jnl_blocks,
+ * Reads inode 8 directly from the inode table to locate the journal,
  * runs the three-pass replay, then clears the journal.
  */
 int
@@ -740,7 +785,8 @@ ext4fs_journal_replay(struct vnode *devvp, struct m_ext4fs *fs)
 {
 	struct jbd2_replay_ctx ctx;
 	struct jbd2_superblock *jsb;
-	struct buf *bp;
+	struct ext4fs_dinode *jdi;
+	struct buf *bp, *ibp;
 	u_int64_t jblock0;
 	int error;
 
@@ -749,46 +795,69 @@ ext4fs_journal_replay(struct vnode *devvp, struct m_ext4fs *fs)
 	ctx.rc_fs = fs;
 
 	/*
-	 * Locate journal block 0 from the block map.
-	 * We need to build the map first.
+	 * Read journal inode (inode 8) from the inode table.
 	 */
+	error = jbd2_read_journal_inode(&ctx, &ibp, &jdi);
+	if (error)
+		return (error);
 
-	/* Read journal superblock: first build the blockmap,
-	 * then read journal block 0 */
+	ctx.rc_journal_eh = &jdi->i_extent_header;
 
-	/* Temporarily set rc_maxlen from sb_jnl_blocks.
-	 * Journal size = sb_jnl_blocks[15] | sb_jnl_blocks[16] << 32,
-	 * in bytes. Divide by blocksize for blocks. */
-	{
-		u_int64_t jsize;
-		jsize = letoh32(fs->m_sble.sb_jnl_blocks[15]) |
-		    (u_int64_t)letoh32(fs->m_sble.sb_jnl_blocks[16]) << 32;
-		ctx.rc_maxlen = jsize / fs->m_block_size;
-	}
-
-	if (ctx.rc_maxlen == 0) {
-		printf("ext4fs: journal has zero size\n");
+	/* Find block 0 from the first extent */
+	if (letoh16(jdi->i_extent_header.eh_magic) !=
+	    EXT4FS_EXTENT_HEADER_MAGIC ||
+	    letoh16(jdi->i_extent_header.eh_entries) == 0) {
+		printf("ext4fs: journal inode has no extents\n");
+		brelse(ibp);
 		return (EINVAL);
 	}
 
-	/* Build journal block → filesystem block mapping */
-	error = jbd2_build_blockmap(&ctx);
-	if (error)
-		goto out;
+	if (letoh16(jdi->i_extent_header.eh_depth) == 0) {
+		struct ext4fs_extent *ext = jdi->i_extent;
+		jblock0 = (u_int64_t)letoh16(ext->e_start_hi) << 32 |
+		    letoh32(ext->e_start_lo);
+	} else {
+		/*
+		 * Depth > 0: need to read the first index block to
+		 * find the first leaf extent.
+		 */
+		struct ext4fs_extent_idx *idx = jdi->i_extent_idx;
+		struct ext4fs_extent_header *leh;
+		struct ext4fs_extent *lext;
+		struct buf *lbp;
+		u_int64_t leaf_block;
 
-	/* Read journal superblock (journal block 0) */
-	jblock0 = ctx.rc_blockmap[0].jb_fsblock;
-	if (jblock0 == 0) {
-		printf("ext4fs: journal block 0 not mapped\n");
-		error = EINVAL;
-		goto out;
+		leaf_block =
+		    (u_int64_t)letoh16(idx->ei_leaf_hi) << 32 |
+		    letoh32(idx->ei_leaf_lo);
+		error = bread(devvp,
+		    (daddr_t)EXT4FS_FSBTODB(fs, leaf_block),
+		    fs->m_block_size, &lbp);
+		if (error) {
+			brelse(lbp);
+			brelse(ibp);
+			return (error);
+		}
+		leh = (struct ext4fs_extent_header *)lbp->b_data;
+		lext = (struct ext4fs_extent *)(leh + 1);
+		jblock0 = (u_int64_t)letoh16(lext->e_start_hi) << 32 |
+		    letoh32(lext->e_start_lo);
+		brelse(lbp);
 	}
 
+	if (jblock0 == 0) {
+		printf("ext4fs: can't locate journal block 0\n");
+		brelse(ibp);
+		return (EINVAL);
+	}
+
+	/* Read journal superblock (journal block 0) */
 	error = bread(devvp, (daddr_t)EXT4FS_FSBTODB(fs, jblock0),
 	    fs->m_block_size, &bp);
 	if (error) {
 		printf("ext4fs: can't read journal superblock\n");
-		goto out;
+		brelse(ibp);
+		return (error);
 	}
 
 	jsb = (struct jbd2_superblock *)bp->b_data;
@@ -798,8 +867,8 @@ ext4fs_journal_replay(struct vnode *devvp, struct m_ext4fs *fs)
 		printf("ext4fs: bad journal magic 0x%x\n",
 		    betoh32(jsb->s_header.h_magic));
 		brelse(bp);
-		error = EINVAL;
-		goto out;
+		brelse(ibp);
+		return (EINVAL);
 	}
 	{
 		u_int32_t btype = betoh32(jsb->s_header.h_blocktype);
@@ -808,8 +877,8 @@ ext4fs_journal_replay(struct vnode *devvp, struct m_ext4fs *fs)
 			printf("ext4fs: bad journal superblock version %u\n",
 			    btype);
 			brelse(bp);
-			error = EINVAL;
-			goto out;
+			brelse(ibp);
+			return (EINVAL);
 		}
 	}
 
@@ -829,23 +898,21 @@ ext4fs_journal_replay(struct vnode *devvp, struct m_ext4fs *fs)
 	if (ctx.rc_blocksize != fs->m_block_size) {
 		printf("ext4fs: journal blocksize %u != fs blocksize %llu\n",
 		    ctx.rc_blocksize, (unsigned long long)fs->m_block_size);
-		error = EINVAL;
-		goto out;
+		brelse(ibp);
+		return (EINVAL);
 	}
 
-	/* If s_start == 0, journal is clean — nothing to replay */
 	if (ctx.rc_start == 0) {
 		printf("ext4fs: journal is clean, no replay needed\n");
+		brelse(ibp);
 		error = 0;
 		goto out;
 	}
 
-	/* Rebuild blockmap with correct maxlen from journal superblock */
-	free(ctx.rc_blockmap, M_TEMP,
-	    ctx.rc_blockmap_count * sizeof(struct jbd2_blockmap_entry));
-	ctx.rc_blockmap = NULL;
-	ctx.rc_blockmap_count = 0;
+	/* Build full blockmap from inode 8's extent tree */
 	error = jbd2_build_blockmap(&ctx);
+	brelse(ibp);
+	ctx.rc_journal_eh = NULL;
 	if (error)
 		goto out;
 

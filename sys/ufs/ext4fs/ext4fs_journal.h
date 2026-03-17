@@ -121,10 +121,10 @@ struct jbd2_blockmap_entry {
 	u_int64_t	jb_fsblock;	/* filesystem block number */
 };
 
-/* In-memory replay context */
 struct jbd2_replay_ctx {
 	struct vnode		*rc_devvp;
 	struct m_ext4fs		*rc_fs;
+	struct ext4fs_extent_header *rc_journal_eh;
 
 	/* Journal geometry (from journal superblock, host order) */
 	u_int32_t		rc_blocksize;

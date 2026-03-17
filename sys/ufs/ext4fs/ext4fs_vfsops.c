@@ -476,7 +476,8 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 	tmp = letoh32(sble->sb_feature_incompat);
 	mask = tmp & ~EXT4FS_FEATURE_INCOMPAT_SUPPORTED;
 	if (mask) {
-		printf("ext4fs: unsupported incompat features: ");
+		printf("ext4fs: unsupported incompat features: 0x%x ",
+		    mask);
 		PRINTF_FEATURES(mask, ext4fs_feature_incompat);
 		printf("\n");
 		return (EINVAL);      /* XXX needs translation */
@@ -494,8 +495,11 @@ ext4fs_sbcheck(struct ext4fs *sble, int ronly)
 
 	tmp = letoh32(sble->sb_feature_ro_compat) &
 		~EXT4FS_FEATURE_RO_COMPAT_SUPPORTED;
-	if (!ronly && tmp) {
-		printf("ext4fs: unsupported R/O compat features: ");
+	if (!ronly && tmp &&
+	    !(letoh32(sble->sb_feature_incompat) &
+	      EXT4FS_FEATURE_INCOMPAT_RECOVER)) {
+		printf("ext4fs: unsupported R/O compat features: 0x%x ",
+		    tmp);
 		PRINTF_FEATURES(tmp, ext4fs_feature_ro_compat);
 		printf("\n");
 		return (EROFS);
