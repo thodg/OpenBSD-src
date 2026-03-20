@@ -307,11 +307,22 @@ readsb(int listerr)
 	sblock.m_state = letoh16(fs->sb_state);
 	sblock.m_revision_level = letoh32(fs->sb_revision_level);
 	sblock.m_inode_size = letoh16(fs->sb_inode_size);
+	sblock.m_first_non_reserved_inode =
+	    letoh32(fs->sb_first_non_reserved_inode);
 	sblock.m_feature_compat = letoh32(fs->sb_feature_compat);
 	sblock.m_feature_incompat = letoh32(fs->sb_feature_incompat);
 	sblock.m_feature_ro_compat = letoh32(fs->sb_feature_ro_compat);
 	sblock.m_block_group_descriptor_size =
 	    letoh16(fs->sb_block_group_descriptor_size);
+	sblock.m_reserved_bgdt_blocks =
+	    letoh16(fs->sb_reserved_bgdt_blocks);
+	sblock.m_last_orphan = letoh32(fs->sb_last_orphan);
+	sblock.m_orphan_file_inode = letoh32(fs->sb_orphan_file_inode);
+	sblock.m_journal_inode_number = letoh32(fs->sb_journal_inode_number);
+	sblock.m_user_quota_inode = letoh32(fs->sb_user_quota_inode);
+	sblock.m_group_quota_inode = letoh32(fs->sb_group_quota_inode);
+	sblock.m_lost_and_found_inode = letoh32(fs->sb_lost_and_found_inode);
+	sblock.m_project_quota_inode = letoh32(fs->sb_project_quota_inode);
 
 	if (sblock.m_revision_level < EXT4FS_REV_DYNAMIC) {
 		sblock.m_inode_size = 128;

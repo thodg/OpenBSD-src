@@ -140,9 +140,10 @@ pass2(void)
 				inodirty();
 			}
 		}
+		dp = ginode(inp->i_number);
 		memset(&dino, 0, sizeof(dino));
 		dino.i_mode = htole16(IFDIR);
-		dino.i_flags = htole32(EXTFS_INODE_FLAG_EXTENTS);
+		dino.i_flags = dp->i_flags;
 		inossize(&dino, inp->i_isize);
 		memcpy(&dino.i_block[0], &inp->i_blks[0],
 		    (size_t)inp->i_numblks);

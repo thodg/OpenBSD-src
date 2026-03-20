@@ -48,6 +48,164 @@ static u_int64_t dupblk;
 static void checkinode(ino_t, struct inodesc *);
 int ext4fs_block_group_has_super_block(int);
 
+static void
+mark_reserved_inode_blocks(ino_t ino)
+{
+	u_int32_t group, index;
+	u_int64_t itb, blk;
+	u_int32_t off;
+	char *ibuf;
+	struct ext4fs_dinode *di;
+	struct ext4fs_extent_header *eh;
+	struct ext4fs_extent *ext;
+	struct ext4fs_extent_idx *idx;
+	u_int16_t entries, depth, n;
+
+	ibuf = malloc(sblock.m_block_size);
+	if (ibuf == NULL)
+		return;
+
+	group = (ino - 1) / sblock.m_inodes_per_group;
+	index = (ino - 1) % sblock.m_inodes_per_group;
+	itb = letoh32(sblock.m_gd[group].bgd_inode_table_block_lo);
+	if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+		itb |= (u_int64_t)letoh32(sblock.m_gd[group].bgd_inode_table_block_hi) << 32;
+	blk = itb + (index * sblock.m_inode_size) / sblock.m_block_size;
+	off = (index * sblock.m_inode_size) % sblock.m_block_size;
+
+	if (bread(fsreadfd, ibuf, EXT4FS_FSBTODB(&sblock, blk),
+	    sblock.m_block_size) != 0) {
+		free(ibuf);
+		return;
+	}
+
+	di = (struct ext4fs_dinode *)(ibuf + off);
+
+	if (!(letoh32(di->i_flags) & EXTFS_INODE_FLAG_EXTENTS)) {
+		u_int32_t i;
+		for (i = 0; i < 12; i++) {
+			u_int32_t b = letoh32(di->i_block[i]);
+			if (b != 0)
+				setbmap(b);
+		}
+		for (i = 12; i < 15; i++) {
+			u_int32_t b = letoh32(di->i_block[i]);
+			char *indbuf;
+			u_int32_t j, nind;
+			if (b == 0)
+				continue;
+			setbmap(b);
+			indbuf = malloc(sblock.m_block_size);
+			if (indbuf == NULL)
+				continue;
+			if (bread(fsreadfd, indbuf,
+			    EXT4FS_FSBTODB(&sblock, b),
+			    sblock.m_block_size) != 0) {
+				free(indbuf);
+				continue;
+			}
+			nind = sblock.m_block_size / sizeof(u_int32_t);
+			for (j = 0; j < nind; j++) {
+				u_int32_t ib = letoh32(((u_int32_t *)indbuf)[j]);
+				if (ib != 0)
+					setbmap(ib);
+			}
+			free(indbuf);
+		}
+		free(ibuf);
+		return;
+	}
+
+	eh = &di->i_extent_header;
+	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
+		free(ibuf);
+		return;
+	}
+
+	entries = letoh16(eh->eh_entries);
+	depth = letoh16(eh->eh_depth);
+
+	if (depth == 0) {
+		ext = di->i_extent;
+		for (n = 0; n < entries; n++) {
+			u_int64_t pblk = (u_int64_t)letoh16(ext[n].e_start_hi) << 32 |
+			    letoh32(ext[n].e_start_lo);
+			u_int32_t len = letoh16(ext[n].e_len);
+			u_int32_t j;
+			if (len > 32768)
+				len -= 32768;
+			for (j = 0; j < len; j++)
+				setbmap(pblk + j);
+		}
+	} else {
+		idx = di->i_extent_idx;
+		for (n = 0; n < entries; n++) {
+			u_int64_t iblk = (u_int64_t)letoh16(idx[n].ei_leaf_hi) << 32 |
+			    letoh32(idx[n].ei_leaf_lo);
+			char *lbuf;
+			struct ext4fs_extent_header *leh;
+			struct ext4fs_extent *lext;
+			u_int16_t lentries, j;
+
+			setbmap(iblk);
+			lbuf = malloc(sblock.m_block_size);
+			if (lbuf == NULL)
+				continue;
+			if (bread(fsreadfd, lbuf,
+			    EXT4FS_FSBTODB(&sblock, iblk),
+			    sblock.m_block_size) != 0) {
+				free(lbuf);
+				continue;
+			}
+			leh = (struct ext4fs_extent_header *)lbuf;
+			if (letoh16(leh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
+				free(lbuf);
+				continue;
+			}
+			lentries = letoh16(leh->eh_entries);
+			lext = (struct ext4fs_extent *)(leh + 1);
+			for (j = 0; j < lentries; j++) {
+				u_int64_t pblk = (u_int64_t)letoh16(lext[j].e_start_hi) << 32 |
+				    letoh32(lext[j].e_start_lo);
+				u_int32_t len = letoh16(lext[j].e_len);
+				u_int32_t k;
+				if (len > 32768)
+					len -= 32768;
+				for (k = 0; k < len; k++)
+					setbmap(pblk + k);
+			}
+			free(lbuf);
+		}
+	}
+	free(ibuf);
+}
+
+static void
+mark_reserved_blocks(void)
+{
+	ino_t ino;
+	ino_t special[] = {
+		sblock.m_journal_inode_number,
+		sblock.m_user_quota_inode,
+		sblock.m_group_quota_inode,
+		sblock.m_lost_and_found_inode,
+		sblock.m_project_quota_inode,
+		sblock.m_orphan_file_inode,
+		0
+	};
+	int i;
+
+	for (ino = 1; ino < EXT4FS_INODE_FIRST; ino++) {
+		if (ino == EXT4FS_INODE_ROOT_DIR)
+			continue;
+		mark_reserved_inode_blocks(ino);
+	}
+	for (i = 0; special[i] != 0; i++) {
+		if (special[i] >= EXT4FS_INODE_FIRST)
+			mark_reserved_inode_blocks(special[i]);
+	}
+}
+
 void
 pass1(void)
 {
@@ -58,39 +216,36 @@ pass1(void)
 	struct inodesc idesc;
 
 	for (c = 0; c < sblock.m_block_group_count; c++) {
+		u_int64_t itb, bb, ib;
+		u_int32_t ngdb = sblock.m_block_group_descriptor_blocks_count;
+
 		dbase = c * sblock.m_blocks_per_group +
 		    sblock.m_first_data_block;
 
-		if (letoh32(sblock.m_gd[c].bgd_inode_table_block_lo) >= dbase) {
-			u_int64_t itb = letoh32(sblock.m_gd[c].bgd_inode_table_block_lo);
-			if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
-				itb |= (u_int64_t)letoh32(sblock.m_gd[c].bgd_inode_table_block_hi) << 32;
-			for (i = 0; i < sblock.m_inode_table_blocks_per_group; i++)
-				setbmap(itb + i);
-		}
+		itb = letoh32(sblock.m_gd[c].bgd_inode_table_block_lo);
+		if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+			itb |= (u_int64_t)letoh32(sblock.m_gd[c].bgd_inode_table_block_hi) << 32;
+		for (i = 0; i < sblock.m_inode_table_blocks_per_group; i++)
+			setbmap(itb + i);
 
-		{
-			u_int64_t bb = letoh32(sblock.m_gd[c].bgd_block_bitmap_block_lo);
-			if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
-				bb |= (u_int64_t)letoh32(sblock.m_gd[c].bgd_block_bitmap_block_hi) << 32;
-			if (bb >= dbase)
-				setbmap(bb);
-		}
+		bb = letoh32(sblock.m_gd[c].bgd_block_bitmap_block_lo);
+		if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+			bb |= (u_int64_t)letoh32(sblock.m_gd[c].bgd_block_bitmap_block_hi) << 32;
+		setbmap(bb);
 
-		{
-			u_int64_t ib = letoh32(sblock.m_gd[c].bgd_inode_bitmap_block_lo);
-			if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
-				ib |= (u_int64_t)letoh32(sblock.m_gd[c].bgd_inode_bitmap_block_hi) << 32;
-			if (ib >= dbase)
-				setbmap(ib);
-		}
+		ib = letoh32(sblock.m_gd[c].bgd_inode_bitmap_block_lo);
+		if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+			ib |= (u_int64_t)letoh32(sblock.m_gd[c].bgd_inode_bitmap_block_hi) << 32;
+		setbmap(ib);
 
 		if ((sblock.m_feature_ro_compat &
 		    EXT4FS_FEATURE_RO_COMPAT_SPARSE_SUPER) == 0 ||
 		    ext4fs_block_group_has_super_block(c)) {
 			setbmap(dbase);
-			for (i = 1; i <= sblock.m_block_group_descriptor_blocks_count; i++)
+			for (i = 1; i <= ngdb; i++)
 				setbmap(dbase + i);
+			for (i = 0; i < sblock.m_reserved_bgdt_blocks; i++)
+				setbmap(dbase + ngdb + 1 + i);
 		}
 
 		if (c == 0) {
@@ -98,6 +253,8 @@ pass1(void)
 				setbmap(i);
 		}
 	}
+
+	mark_reserved_blocks();
 
 	memset(&idesc, 0, sizeof(struct inodesc));
 	idesc.id_type = ADDR;
@@ -109,9 +266,24 @@ pass1(void)
 		u_int16_t bgd_flags = letoh16(sblock.m_gd[c].bgd_flags);
 		u_int32_t itable_unused =
 		    letoh16(sblock.m_gd[c].bgd_inode_table_unused_lo);
+		u_int64_t ibitmap_blk;
+		char *ibitmap = NULL;
+
 		if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
 			itable_unused |= (u_int32_t)
 			    letoh16(sblock.m_gd[c].bgd_inode_table_unused_hi) << 16;
+
+		if (!(bgd_flags & EXT4FS_BGD_FLAG_INODE_UNINIT)) {
+			ibitmap_blk = letoh32(sblock.m_gd[c].bgd_inode_bitmap_block_lo);
+			if (sblock.m_feature_incompat & EXT4FS_FEATURE_INCOMPAT_64BIT)
+				ibitmap_blk |= (u_int64_t)letoh32(
+				    sblock.m_gd[c].bgd_inode_bitmap_block_hi) << 32;
+			ibitmap = malloc(sblock.m_block_size);
+			if (ibitmap != NULL)
+				bread(fsreadfd, ibitmap,
+				    EXT4FS_FSBTODB(&sblock, ibitmap_blk),
+				    sblock.m_block_size);
+		}
 
 		for (i = 0;
 		    i < sblock.m_inodes_per_group &&
@@ -129,8 +301,14 @@ pass1(void)
 				statemap[inumber] = USTATE;
 				continue;
 			}
+			if (ibitmap != NULL && !isset(ibitmap, i)) {
+				getnextinode(inumber);
+				statemap[inumber] = USTATE;
+				continue;
+			}
 			checkinode(inumber, &idesc);
 		}
+		free(ibitmap);
 	}
 	freeinodebuf();
 }
@@ -144,6 +322,13 @@ checkinode(ino_t inumber, struct inodesc *idesc)
 
 	dp = getnextinode(inumber);
 	if (inumber < EXT4FS_INODE_FIRST && inumber != EXT4FS_INODE_ROOT_DIR)
+		return;
+	if (inumber == sblock.m_journal_inode_number ||
+	    inumber == sblock.m_user_quota_inode ||
+	    inumber == sblock.m_group_quota_inode ||
+	    inumber == sblock.m_lost_and_found_inode ||
+	    inumber == sblock.m_project_quota_inode ||
+	    inumber == sblock.m_orphan_file_inode)
 		return;
 
 	mode = letoh16(dp->i_mode) & IFMT;

@@ -78,6 +78,10 @@ inossize(struct ext4fs_dinode *dp, u_int64_t size)
 	dp->i_size_lo = htole32(size);
 }
 
+static int walk_indirect(struct ext4fs_dinode *, struct inodesc *);
+static int walk_indirect_block(struct inodesc *, u_int64_t, int,
+    int (*)(struct inodesc *));
+
 static int
 walk_extents(struct ext4fs_dinode *dp, struct inodesc *idesc)
 {
@@ -125,26 +129,36 @@ walk_extents(struct ext4fs_dinode *dp, struct inodesc *idesc)
 			u_int64_t iblk = letoh32(idx->ei_leaf_lo) |
 			    ((u_int64_t)letoh16(idx->ei_leaf_hi) << 32);
 			struct bufarea *bp;
+			u_int16_t centries, cdepth;
+			struct ext4fs_extent_header *ceh;
+
+			if (idesc->id_type == ADDR) {
+				idesc->id_blkno = iblk;
+				idesc->id_numfrags = 1;
+				ret = (*func)(idesc);
+				if (ret & STOP)
+					return (ret);
+			}
+
 			bp = getdatablk(iblk, sblock.m_block_size);
-			struct ext4fs_extent_header *ceh =
-			    (struct ext4fs_extent_header *)bp->b_un.b_buf;
+			ceh = (struct ext4fs_extent_header *)bp->b_un.b_buf;
 			if (letoh16(ceh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
 				bp->b_flags &= ~B_INUSE;
 				return (STOP);
 			}
-			u_int16_t centries = letoh16(ceh->eh_entries);
-			u_int16_t cdepth = letoh16(ceh->eh_depth);
+			centries = letoh16(ceh->eh_entries);
+			cdepth = letoh16(ceh->eh_depth);
 			if (cdepth == 0) {
 				struct ext4fs_extent *cext =
 				    (struct ext4fs_extent *)(ceh + 1);
 				u_int16_t j;
 				for (j = 0; j < centries; j++, cext++) {
+					u_int32_t i;
 					pblk = letoh32(cext->e_start_lo) |
 					    ((u_int64_t)letoh16(cext->e_start_hi) << 32);
 					len = letoh16(cext->e_len);
 					if (len > 32768)
 						len -= 32768;
-					u_int32_t i;
 					for (i = 0; i < len; i++) {
 						idesc->id_blkno = pblk + i;
 						idesc->id_numfrags = 1;
@@ -179,6 +193,94 @@ ckinode(struct ext4fs_dinode *dp, struct inodesc *idesc)
 	if (letoh32(dp->i_flags) & EXTFS_INODE_FLAG_EXTENTS)
 		return walk_extents(dp, idesc);
 
+	return walk_indirect(dp, idesc);
+}
+
+static int
+walk_indirect(struct ext4fs_dinode *dp, struct inodesc *idesc)
+{
+	int n, ret;
+	u_int32_t blk;
+	int (*func)(struct inodesc *);
+
+	if (idesc->id_type == ADDR)
+		func = idesc->id_func;
+	else
+		func = dirscan;
+
+	for (n = 0; n < 12; n++) {
+		blk = letoh32(dp->i_block[n]);
+		if (blk == 0)
+			continue;
+		idesc->id_blkno = blk;
+		idesc->id_numfrags = 1;
+		ret = (*func)(idesc);
+		if (ret & STOP)
+			return (ret);
+	}
+	for (n = 0; n < 3; n++) {
+		blk = letoh32(dp->i_block[12 + n]);
+		if (blk == 0)
+			continue;
+		idesc->id_blkno = blk;
+		idesc->id_numfrags = 1;
+		if (idesc->id_type == ADDR) {
+			ret = (*func)(idesc);
+			if (ret & STOP)
+				return (ret);
+		}
+		ret = walk_indirect_block(idesc, blk, n + 1, func);
+		if (ret & STOP)
+			return (ret);
+	}
+	return (KEEPON);
+}
+
+static int
+walk_indirect_block(struct inodesc *idesc, u_int64_t blk, int level,
+    int (*func)(struct inodesc *))
+{
+	struct bufarea *bp;
+	u_int32_t *ptrs;
+	u_int32_t nptrs, i;
+	int ret;
+
+	if (chkrange(blk, 1))
+		return (SKIP);
+	bp = getdatablk(blk, sblock.m_block_size);
+	ptrs = bp->b_un.b_indir;
+	nptrs = sblock.m_block_size / sizeof(u_int32_t);
+
+	for (i = 0; i < nptrs; i++) {
+		u_int32_t b = letoh32(ptrs[i]);
+		if (b == 0)
+			continue;
+		if (level == 1) {
+			idesc->id_blkno = b;
+			idesc->id_numfrags = 1;
+			ret = (*func)(idesc);
+			if (ret & STOP) {
+				bp->b_flags &= ~B_INUSE;
+				return (ret);
+			}
+		} else {
+			idesc->id_blkno = b;
+			idesc->id_numfrags = 1;
+			if (idesc->id_type == ADDR) {
+				ret = (*func)(idesc);
+				if (ret & STOP) {
+					bp->b_flags &= ~B_INUSE;
+					return (ret);
+				}
+			}
+			ret = walk_indirect_block(idesc, b, level - 1, func);
+			if (ret & STOP) {
+				bp->b_flags &= ~B_INUSE;
+				return (ret);
+			}
+		}
+	}
+	bp->b_flags &= ~B_INUSE;
 	return (KEEPON);
 }
 
