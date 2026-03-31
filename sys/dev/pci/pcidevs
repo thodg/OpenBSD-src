@@ -1,4 +1,4 @@
-$OpenBSD: pcidevs,v 1.2123 2026/02/12 14:19:23 hshoexer Exp $
+$OpenBSD: pcidevs,v 1.2129 2026/03/19 22:31:02 kn Exp $
 /*	$NetBSD: pcidevs,v 1.30 1997/06/24 06:20:24 thorpej Exp $	*/
 
 /*
@@ -2784,6 +2784,9 @@ product BUSLOGIC FLASHPOINT	0x8130	FlashPoint
 /* c't Magazin products */
 product C4T GPPCI		0x6773	GPPCI
 
+/* Cadence products */
+product CADENCE CIX_PCIE	0x0100	PCIe
+
 /* Cavium products */
 product CAVIUM NITROX		0x0001	NITROX XL
 product CAVIUM NITROX_LITE	0x0003	NITROX Lite
@@ -2995,6 +2998,7 @@ product CREATIVELABS EV1938	0x8938	Ectiva 1938
 
 /* Crucial products */
 product CRUCIAL P5PLUS		0x5407	P5 Plus
+product CRUCIAL P310		0x5427	P310
 
 /* Cyclades products */
 product CYCLADES CYCLOMY_1	0x0100	Cyclom-Y below 1M
@@ -4091,7 +4095,7 @@ product INTEL 82576_QUAD_COPPER	0x10e8	82576
 product INTEL 82577LM		0x10ea	82577LM
 product INTEL 82577LC		0x10eb	82577LC
 product INTEL 82598EB_CX4_DUAL	0x10ec	82598EB
-product INTEL 82599VF		0x10ed	82599
+product INTEL 82599VF		0x10ed	82599 VF
 product INTEL 82578DM		0x10ef	82578DM
 product INTEL 82578DC		0x10f0	82578DC
 product INTEL 82598_DA_DUAL	0x10f1	82598
@@ -6377,6 +6381,7 @@ product INTEL ARL_U_PCIE_5	0x773c	Core Ultra PCIE
 product INTEL ARL_U_PCIE_6	0x773d	Core Ultra PCIE
 product INTEL ARL_U_PCIE_7	0x773e	Core Ultra PCIE
 product INTEL ARL_U_PCIE_8	0x773f	Core Ultra PCIE
+product INTEL WL_22500_18	0x7740	Wi-Fi AX211
 product INTEL ARL_U_ISH		0x7745	Core Ultra ISH
 product INTEL ARL_U_GSPI_2	0x7746	Core Ultra GSPI
 product INTEL ARL_U_THC_0_1	0x7748	Core Ultra THC
@@ -8982,6 +8987,7 @@ product REALTEK RTS5260		0x5260	RTS5260 Card Reader
 product REALTEK RTL8402		0x5286	RTL8402 Card Reader
 product REALTEK RTL8411B	0x5287	RTL8411B Card Reader
 product REALTEK RTL8411		0x5289	RTL8411 Card Reader
+product REALTEK RTS5765DL	0x5765	RTS5765DL
 product REALTEK RT8029		0x8029	8029
 product REALTEK RT8139D		0x8039	8139D
 product REALTEK RTL8125		0x8125	RTL8125
@@ -9075,6 +9081,7 @@ product RICOH R5U852		0xe852	5U852 SD/MMC
 
 /* Rockchip products */
 product ROCKCHIP RK3399		0x0100	RK3399
+product ROCKCHIP RK3528		0x3528	RK3528
 product ROCKCHIP RK3566		0x3566	RK3566
 product ROCKCHIP RK3588		0x3588	RK3588
 

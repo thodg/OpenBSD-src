@@ -33,6 +33,7 @@
 
 #include <linux/cc_platform.h>
 #include <linux/debugfs.h>
+#include <linux/export.h>
 #include <linux/file.h>
 #include <linux/module.h>
 #include <linux/sched.h>
@@ -40,6 +41,7 @@
 #include <drm/drm_cache.h>
 #include <drm/drm_device.h>
 #include <drm/drm_util.h>
+#include <drm/ttm/ttm_backup.h>
 #include <drm/ttm/ttm_bo.h>
 #include <drm/ttm/ttm_tt.h>
 
@@ -116,7 +118,7 @@ static int ttm_tt_alloc_page_directory(struct ttm_tt *ttm)
 	if (!ttm->pages)
 		return -ENOMEM;
 	ttm->orders = kvmalloc_array(ttm->num_pages,
-	    sizeof(unsigned long), GFP_KERNEL | __GFP_ZERO);
+	    sizeof(*ttm->orders), GFP_KERNEL | __GFP_ZERO);
 	if (!ttm->orders)
 		return -ENOMEM;
 	return 0;
@@ -167,6 +169,8 @@ static void ttm_tt_init_fields(struct ttm_tt *ttm,
 	ttm->swap_storage = NULL;
 	ttm->sg = bo->sg;
 	ttm->caching = caching;
+	ttm->restore = NULL;
+	ttm->backup = NULL;
 	ttm->dmat = bo->bdev->dmat;
 	ttm->map = NULL;
 	ttm->segs = NULL;
@@ -193,6 +197,13 @@ void ttm_tt_fini(struct ttm_tt *ttm)
 	if (ttm->swap_storage)
 		uao_detach(ttm->swap_storage);
 	ttm->swap_storage = NULL;
+
+	if (ttm_tt_is_backed_up(ttm))
+		ttm_pool_drop_backed_up(ttm);
+	if (ttm->backup) {
+		ttm_backup_fini(ttm->backup);
+		ttm->backup = NULL;
+	}
 
 	if (ttm->pages)
 		kvfree(ttm->pages);
@@ -298,6 +309,49 @@ out_err:
 EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_tt_swapin);
 
 /**
+ * ttm_tt_backup() - Helper to back up a struct ttm_tt.
+ * @bdev: The TTM device.
+ * @tt: The struct ttm_tt.
+ * @flags: Flags that govern the backup behaviour.
+ *
+ * Update the page accounting and call ttm_pool_shrink_tt to free pages
+ * or back them up.
+ *
+ * Return: Number of pages freed or swapped out, or negative error code on
+ * error.
+ */
+long ttm_tt_backup(struct ttm_device *bdev, struct ttm_tt *tt,
+		   const struct ttm_backup_flags flags)
+{
+	long ret;
+
+	if (WARN_ON(IS_ERR_OR_NULL(tt->backup)))
+		return 0;
+
+	ret = ttm_pool_backup(&bdev->pool, tt, &flags);
+	if (ret > 0) {
+		tt->page_flags &= ~TTM_TT_FLAG_PRIV_POPULATED;
+		tt->page_flags |= TTM_TT_FLAG_BACKED_UP;
+	}
+
+	return ret;
+}
+
+int ttm_tt_restore(struct ttm_device *bdev, struct ttm_tt *tt,
+		   const struct ttm_operation_ctx *ctx)
+{
+	int ret = ttm_pool_restore_and_alloc(&bdev->pool, tt, ctx);
+
+	if (ret)
+		return ret;
+
+	tt->page_flags &= ~TTM_TT_FLAG_BACKED_UP;
+
+	return 0;
+}
+EXPORT_SYMBOL(ttm_tt_restore);
+
+/**
  * ttm_tt_swapout - swap out tt object
  *
  * @bdev: TTM device structure.
@@ -310,9 +364,6 @@ EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_tt_swapin);
 int ttm_tt_swapout(struct ttm_device *bdev, struct ttm_tt *ttm,
 		   gfp_t gfp_flags)
 {
-	STUB();
-	return -ENOSYS;
-#ifdef notyet
 	loff_t size = (loff_t)ttm->num_pages << PAGE_SHIFT;
 	struct uvm_object *swap_storage;
 	struct vm_page *from_page;
@@ -320,18 +371,25 @@ int ttm_tt_swapout(struct ttm_device *bdev, struct ttm_tt *ttm,
 	int i, ret;
 
 	swap_storage = uao_create(size, 0);
-#ifdef notyet
-	if (IS_ERR(swap_storage)) {
+	if (swap_storage == NULL) {
 		pr_err("Failed allocating swap storage\n");
-		return PTR_ERR(swap_storage);
+		return -ENOMEM;
 	}
-#endif
 
+	struct pglist plist;
+	TAILQ_INIT(&plist);
+	if (uvm_obj_wire(swap_storage, 0, size, &plist)) {
+		ret = -ENOMEM;
+		goto out_err;
+	}
+
+	to_page = TAILQ_FIRST(&plist);
 	for (i = 0; i < ttm->num_pages; ++i) {
 		from_page = ttm->pages[i];
 		if (unlikely(from_page == NULL))
 			continue;
 
+#ifdef __linux__
 		to_page = shmem_read_mapping_page_gfp(swap_space, i, gfp_flags);
 		if (IS_ERR(to_page)) {
 			ret = PTR_ERR(to_page);
@@ -341,7 +399,13 @@ int ttm_tt_swapout(struct ttm_device *bdev, struct ttm_tt *ttm,
 		set_page_dirty(to_page);
 		mark_page_accessed(to_page);
 		put_page(to_page);
+#else
+		uvm_pagecopy(from_page, to_page);
+		to_page = TAILQ_NEXT(to_page, pageq);
+#endif
 	}
+
+	uvm_obj_unwire(swap_storage, 0, size);
 
 	ttm_tt_unpopulate(bdev, ttm);
 	ttm->swap_storage = swap_storage;
@@ -353,7 +417,6 @@ out_err:
 	uao_detach(swap_storage);
 
 	return ret;
-#endif
 }
 EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_tt_swapout);
 
@@ -394,6 +457,7 @@ int ttm_tt_populate(struct ttm_device *bdev,
 		goto error;
 
 	ttm->page_flags |= TTM_TT_FLAG_PRIV_POPULATED;
+	ttm->page_flags &= ~TTM_TT_FLAG_BACKED_UP;
 	if (unlikely(ttm->page_flags & TTM_TT_FLAG_SWAPPED)) {
 		ret = ttm_tt_swapin(ttm);
 		if (unlikely(ret != 0)) {
@@ -413,7 +477,10 @@ error:
 	}
 	return ret;
 }
+
+#if IS_ENABLED(CONFIG_DRM_TTM_KUNIT_TEST)
 EXPORT_SYMBOL(ttm_tt_populate);
+#endif
 
 void ttm_tt_unpopulate(struct ttm_device *bdev, struct ttm_tt *ttm)
 {
@@ -529,3 +596,32 @@ unsigned long ttm_tt_pages_limit(void)
 	return ttm_pages_limit;
 }
 EXPORT_SYMBOL(ttm_tt_pages_limit);
+
+/**
+ * ttm_tt_setup_backup() - Allocate and assign a backup structure for a ttm_tt
+ * @tt: The ttm_tt for wich to allocate and assign a backup structure.
+ *
+ * Assign a backup structure to be used for tt backup. This should
+ * typically be done at bo creation, to avoid allocations at shrinking
+ * time.
+ *
+ * Return: 0 on success, negative error code on failure.
+ */
+int ttm_tt_setup_backup(struct ttm_tt *tt)
+{
+	struct file *backup =
+		ttm_backup_shmem_create(((loff_t)tt->num_pages) << PAGE_SHIFT);
+
+	if (WARN_ON_ONCE(!(tt->page_flags & TTM_TT_FLAG_EXTERNAL_MAPPABLE)))
+		return -EINVAL;
+
+	if (IS_ERR(backup))
+		return PTR_ERR(backup);
+
+	if (tt->backup)
+		ttm_backup_fini(tt->backup);
+
+	tt->backup = backup;
+	return 0;
+}
+EXPORT_SYMBOL(ttm_tt_setup_backup);

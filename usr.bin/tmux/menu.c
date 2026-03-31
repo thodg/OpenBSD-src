@@ -1,4 +1,4 @@
-/* $OpenBSD: menu.c,v 1.60 2026/02/23 08:50:00 nicm Exp $ */
+/* $OpenBSD: menu.c,v 1.62 2026/03/12 07:15:26 nicm Exp $ */
 
 /*
  * Copyright (c) 2019 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -90,6 +90,7 @@ menu_add_item(struct menu *menu, const struct menu_item *item,
 	else
 		s = format_single(qitem, item->name, c, NULL, NULL, NULL);
 	if (*s == '\0') { /* no item if empty after format expanded */
+		free(s);
 		menu->count--;
 		return;
 	}
@@ -362,7 +363,7 @@ menu_key_cb(struct client *c, void *data, struct key_event *event)
 		name = menu->items[i].name;
 		if (name == NULL || *name == '-')
 			continue;
-		if (event->key == menu->items[i].key) {
+		if ((event->key & ~KEYC_MASK_FLAGS) == menu->items[i].key) {
 			md->choice = i;
 			goto chosen;
 		}

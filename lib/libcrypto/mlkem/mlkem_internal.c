@@ -1,4 +1,4 @@
-/* $OpenBSD: mlkem_internal.c,v 1.6 2026/01/18 08:49:42 tb Exp $ */
+/* $OpenBSD: mlkem_internal.c,v 1.8 2026/03/29 06:31:07 tb Exp $ */
 /*
  * Copyright (c) 2024, Google Inc.
  * Copyright (c) 2024, 2025 Bob Beck <beck@obtuse.com>
@@ -828,11 +828,13 @@ public_key_from_external(const MLKEM_public_key *external,
     struct public_key *pub)
 {
 	size_t vector_size = external->rank * sizeof(scalar);
-	uint8_t *bytes = external->key_768->bytes;
 	size_t offset = 0;
+	uint8_t *bytes;
 
 	if (external->rank == MLKEM1024_RANK)
 		bytes = external->key_1024->bytes;
+	else
+		bytes = external->key_768->bytes;
 
 	pub->t = (struct scalar *)bytes + offset;
 	offset += vector_size;
@@ -856,10 +858,12 @@ private_key_from_external(const MLKEM_private_key *external,
 {
 	size_t vector_size = external->rank * sizeof(scalar);
 	size_t offset = 0;
-	uint8_t *bytes = external->key_768->bytes;
+	uint8_t *bytes;
 
 	if (external->rank == MLKEM1024_RANK)
 		bytes = external->key_1024->bytes;
+	else
+		bytes = external->key_768->bytes;
 
 	priv->pub.t = (struct scalar *)(bytes + offset);
 	offset += vector_size;
@@ -1121,7 +1125,7 @@ mlkem_decap(const MLKEM_private_key *private_key, const uint8_t *ciphertext,
 	encrypt_cpa(expected_ciphertext, &priv.pub, decrypted,
 	    key_and_randomness + 32, private_key->rank);
 	kdf(failure_key, priv.fo_failure_secret, ciphertext, ciphertext_len);
-	mask = constant_time_eq_int_8(memcmp(ciphertext, expected_ciphertext,
+	mask = constant_time_eq_int_8(timingsafe_memcmp(ciphertext, expected_ciphertext,
 	    expected_ciphertext_length), 0);
 	for (i = 0; i < MLKEM_SHARED_SECRET_LENGTH; i++) {
 		out_shared_secret[i] = constant_time_select_8(mask,

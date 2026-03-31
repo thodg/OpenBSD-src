@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_iwxvar.h,v 1.43 2025/12/01 16:44:13 stsp Exp $	*/
+/*	$OpenBSD: if_iwxvar.h,v 1.50 2026/03/20 08:38:21 stsp Exp $	*/
 
 /*
  * Copyright (c) 2014 genua mbh <info@genua.de>
@@ -123,7 +123,7 @@ struct iwx_tx_radiotap_header {
 	 (1 << IEEE80211_RADIOTAP_RATE) |				\
 	 (1 << IEEE80211_RADIOTAP_CHANNEL))
 
-#define IWX_UCODE_SECT_MAX 60
+#define IWX_UCODE_SECT_MAX 69
 
 /*
  * fw_status is used to determine if we've already parsed the firmware file
@@ -173,6 +173,13 @@ struct iwx_fw_info {
 	/* Copy of firmware image loader found in file. */
 	uint8_t *iml;
 	size_t iml_len;
+
+	/*
+	 * Copy of PNVM image found in file.
+	 * Used in preference to external .pnvm file if present.
+	 */
+	uint8_t *pnvm;
+	size_t pnvm_len;
 };
 
 struct iwx_nvm_data {
@@ -283,6 +290,7 @@ struct iwx_rx_ring {
 #define IWX_FLAG_SHUTDOWN	0x100	/* shutting down; new tasks forbidden */
 #define IWX_FLAG_BGSCAN		0x200	/* background scan in progress */
 #define IWX_FLAG_TXFLUSH	0x400	/* Tx queue flushing in progress */
+#define IWX_FLAG_PHY_ACTIVE	0x800	/* PHY context added to firmware */
 
 struct iwx_ucode_status {
 	uint32_t uc_lmac_error_event_table[2];
@@ -358,11 +366,6 @@ struct iwx_self_init_dram {
  * @num_stored: number of mpdus stored in the buffer
  * @buf_size: the reorder buffer size as set by the last addba request
  * @queue: queue of this reorder buffer
- * @last_amsdu: track last ASMDU SN for duplication detection
- * @last_sub_index: track ASMDU sub frame index for duplication detection
- * @reorder_timer: timer for frames are in the reorder buffer. For AMSDU
- *	it is the time of last received sub-frame
- * @removed: prevent timer re-arming
  * @valid: reordering is valid for this queue
  * @consec_oldsn_drops: consecutive drops due to old SN
  * @consec_oldsn_ampdu_gp2: A-MPDU GP2 timestamp to track
@@ -375,25 +378,15 @@ struct iwx_reorder_buffer {
 	uint16_t head_sn;
 	uint16_t num_stored;
 	uint16_t buf_size;
-	uint16_t last_amsdu;
-	uint8_t last_sub_index;
-	struct timeout reorder_timer;
-	int removed;
 	int valid;
-	unsigned int consec_oldsn_drops;
-	uint32_t consec_oldsn_ampdu_gp2;
-	unsigned int consec_oldsn_prev_drop;
-#define IWX_AMPDU_CONSEC_DROPS_DELBA	10
 };
 
 /**
  * struct iwx_reorder_buf_entry - reorder buffer entry per frame sequence number
  * @frames: list of mbufs stored (A-MSDU subframes share a sequence number)
- * @reorder_time: time the packet was stored in the reorder buffer
  */
 struct iwx_reorder_buf_entry {
 	struct mbuf_list frames;
-	struct timeval reorder_time;
 	uint32_t rx_pkt_status;
 	int chanidx;
 	int is_shortpre;
@@ -486,14 +479,15 @@ struct iwx_device_cfg {
 #define IWX_SO_A_GF4_A_PNVM	"iwx-so-a0-gf4-a0.pnvm"
 #define IWX_SO_A_HR_B_FW	"iwx-so-a0-hr-b0-77"
 #define IWX_SO_A_JF_B_FW	"iwx-so-a0-jf-b0-77"
-#define IWX_MA_B_HR_B_FW	"iwx-ma-a0-hr-b0-83"
-#define IWX_MA_B_HR_B_PNVM	"iwx-ma-a0-hr-b0.pnvm"
-#define IWX_MA_B_GF_A_FW	"iwx-ma-b0-gf-a0-83"
+#define IWX_MA_B_HR_B_FW	"iwx-ma-b0-hr-b0-89"
+#define IWX_MA_B_GF_A_FW	"iwx-ma-b0-gf-a0-89"
 #define IWX_MA_B_GF_A_PNVM	"iwx-ma-b0-gf-a0.pnvm"
-#define IWX_MA_B_GF4_A_FW	"iwx-ma-b0-gf4-a0-83"
+#define IWX_MA_B_GF4_A_FW	"iwx-ma-b0-gf4-a0-89"
 #define IWX_MA_B_GF4_A_PNVM	"iwx-ma-b0-gf4-a0.pnvm"
-#define IWX_MA_A_FM_A_FW	"iwx-ma-a0-fm-a0-83"
+#define IWX_MA_A_FM_A_FW	"iwx-ma-a0-fm-a0-89"
 #define IWX_MA_A_FM_A_PNVM	"iwx-ma-a0-fm-a0.pnvm"
+#define IWX_BZ_B_GF_A_FW	"iwx-bz-b0-gf-a0-100"
+#define IWX_BZ_B_GF_A_PNVM	"iwx-bz-b0-gf-a0.pnvm"
 
 const struct iwx_device_cfg iwx_9560_quz_a0_jf_b0_cfg = {
 	.fw_name = IWX_QUZ_A_JF_B_FW,
@@ -584,7 +578,6 @@ const struct iwx_device_cfg iwx_2ax_cfg_so_jf_b0 = {
 
 const struct iwx_device_cfg iwx_cfg_ma_b0_hr_b0 = {
 	.fw_name = IWX_MA_B_HR_B_FW,
-	.pnvm_name = IWX_MA_B_HR_B_PNVM,
 };
 
 const struct iwx_device_cfg iwx_cfg_ma_b0_gf_a0 = {
@@ -613,6 +606,7 @@ const struct iwx_device_cfg iwx_cfg_ma_a0_fm_a0 = {
 #define IWX_CFG_MAC_TYPE_MA		0x44
 #define IWX_CFG_MAC_TYPE_BZ		0x46
 #define IWX_CFG_MAC_TYPE_GL		0x47
+#define IWX_CFG_MAC_TYPE_BZ_W		0x4B
 
 #define IWX_CFG_RF_TYPE_JF2		0x105
 #define IWX_CFG_RF_TYPE_JF1		0x108
@@ -710,10 +704,13 @@ struct iwx_softc {
 #define IWX_SILICON_C_STEP	2
 #define IWX_SILICON_Z_STEP	0xf
 	int sc_hw_id;
+	int sc_hw_crf_id;
+	int sc_hw_cnv_id;
 	int sc_hw_rf_id;
 	int sc_device_family;
 #define IWX_DEVICE_FAMILY_22000	1
 #define IWX_DEVICE_FAMILY_AX210	2
+#define IWX_DEVICE_FAMILY_BZ	3
 	uint32_t sc_sku_id[3];
 	uint32_t mac_addr_from_csr;
 
@@ -733,6 +730,8 @@ struct iwx_softc {
 #define IWX_INIT_COMPLETE	0x01
 #define IWX_CALIB_COMPLETE	0x02
 #define IWX_PNVM_COMPLETE	0x04
+
+	int sc_system_stats_cleared;
 
 	struct iwx_ucode_status sc_uc;
 	char sc_fwver[32];

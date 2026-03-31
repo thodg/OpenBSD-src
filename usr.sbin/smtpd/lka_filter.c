@@ -1,4 +1,4 @@
-/*	$OpenBSD: lka_filter.c,v 1.79 2026/01/07 07:54:57 martijn Exp $	*/
+/*	$OpenBSD: lka_filter.c,v 1.81 2026/03/10 17:35:05 martijn Exp $	*/
 
 /*
  * Copyright (c) 2018 Gilles Chehade <gilles@poolp.org>
@@ -20,11 +20,12 @@
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
+#include <syslog.h>
 
 #include "smtpd.h"
 #include "log.h"
 
-#define	PROTOCOL_VERSION	"0.7"
+#define	PROTOCOL_VERSION	"0.8"
 
 struct filter;
 struct filter_session;
@@ -165,6 +166,7 @@ static struct dict		processors;
 
 struct processor_instance {
 	char			*name;
+	struct syslog_data	 sd;
 	struct io		*io;
 	struct io		*errfd;
 	int			 ready;
@@ -204,7 +206,7 @@ lka_proc_config(struct processor_instance *pi)
 }
 
 void
-lka_proc_forked(const char *name, uint32_t subsystems, int fd)
+lka_proc_forked(const char *name, const char *tag, uint32_t subsystems, int fd)
 {
 	struct processor_instance	*processor;
 
@@ -215,6 +217,10 @@ lka_proc_forked(const char *name, uint32_t subsystems, int fd)
 
 	processor = xcalloc(1, sizeof *processor);
 	processor->name = xstrdup(name);
+	processor->sd = (struct syslog_data)SYSLOG_DATA_INIT;
+	/* Make sure it persists */
+	tag = xstrdup(tag);
+	openlog_r(tag, LOG_ODELAY, LOG_MAIL, &processor->sd);
 	processor->io = io_new();
 	processor->subsystems = subsystems;
 
@@ -236,7 +242,7 @@ lka_proc_errfd(const char *name, int fd)
 
 	processor->errfd = io_new();
 	io_set_fd(processor->errfd, fd);
-	io_set_callback(processor->errfd, processor_errfd, processor->name);
+	io_set_callback(processor->errfd, processor_errfd, processor);
 
 	lka_proc_config(processor);
 }
@@ -310,14 +316,36 @@ processor_io(struct io *io, int evt, void *arg)
 static void
 processor_errfd(struct io *io, int evt, void *arg)
 {
-	const char	*name = arg;
+	struct processor_instance *processor = arg;
 	char		*line = NULL;
 	ssize_t		 len;
 
 	switch (evt) {
 	case IO_DATAIN:
-		while ((line = io_getline(io, &len)) != NULL)
-			log_warnx("%s: %s", name, line);
+		while ((line = io_getline(io, &len)) != NULL) {
+			if (!strncasecmp(
+			    line, "DEBUG|", sizeof("DEBUG|") - 1))
+				log_debug_r(&processor->sd, "%s",
+				    line + sizeof("DEBUG|") - 1);
+			else if (!strncasecmp(
+			    line, "INFO|", sizeof("INFO|") - 1))
+				log_info_r(&processor->sd, "%s",
+				    line + sizeof("INFO|") - 1);
+			else if (!strncasecmp(
+			    line, "WARNING|", sizeof("WARNING|") - 1))
+				log_warnx_r(&processor->sd, "%s",
+				    line + sizeof("WARNING|") - 1);
+			else if (!strncasecmp(
+			    line, "WARN|", sizeof("WARN|") - 1))
+				log_warnx_r(&processor->sd, "%s",
+				    line + sizeof("WARN|") - 1);
+			else if (!strncasecmp(
+			    line, "FATAL|", sizeof("FATAL|") - 1))
+				logit_r(&processor->sd, LOG_CRIT, "%s",
+				    line + sizeof("FATAL|") - 1);
+			else
+				log_warnx_r(&processor->sd, "%s", line);
+		}
 	}
 }
 

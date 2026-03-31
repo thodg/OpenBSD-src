@@ -1,4 +1,4 @@
-/* $OpenBSD: mux.c,v 1.110 2026/02/14 00:18:34 jsg Exp $ */
+/* $OpenBSD: mux.c,v 1.112 2026/03/05 05:40:36 djm Exp $ */
 /*
  * Copyright (c) 2002-2008 Damien Miller <djm@openbsd.org>
  *
@@ -624,7 +624,7 @@ compare_forward(struct Forward *a, struct Forward *b)
 }
 
 static void
-mux_confirm_remote_forward(struct ssh *ssh, int type, u_int32_t seq, void *ctxt)
+mux_confirm_remote_forward(struct ssh *ssh, int type, uint32_t seq, void *ctxt)
 {
 	struct mux_channel_confirm_ctx *fctx = ctxt;
 	char *failmsg = NULL;
@@ -1433,12 +1433,8 @@ mux_session_confirm(struct ssh *ssh, int id, int success, void *arg)
 		}
 	}
 
-	if (cctx->want_agent_fwd && options.forward_agent) {
-		debug("Requesting authentication agent forwarding.");
-		channel_request_start(ssh, id, "auth-agent-req@openssh.com", 0);
-		if ((r = sshpkt_send(ssh)) != 0)
-			fatal_fr(r, "send");
-	}
+	if (cctx->want_agent_fwd && options.forward_agent)
+		client_channel_reqest_agent_forwarding(ssh, id);
 
 	client_session2_setup(ssh, id, cctx->want_tty, cctx->want_subsys,
 	    cctx->term, &cctx->tio, c->rfd, cctx->cmd, cctx->env);

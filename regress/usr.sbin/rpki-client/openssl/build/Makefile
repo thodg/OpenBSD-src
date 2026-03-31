@@ -1,12 +1,15 @@
-# $OpenBSD: Makefile,v 1.3 2025/11/14 05:11:09 tb Exp $
+# $OpenBSD: Makefile,v 1.7 2026/03/31 06:25:39 tb Exp $
 
 EOPENSSL =	eopenssl35
-EOPENSSL_PATH = /usr/local/lib/${EOPENSSL35}/
+
+.if ${EOPENSSL} != "eopenssl35"
+CFLAGS += -DHAVE_X509_CRL_GET0_TBS_SIGALG
+.endif
 
 regress: all
 
-.if (exists(/usr/local/lib/eopenssl35/libcrypto.a) && \
-     exists(/usr/local/lib/eopenssl35/libtls.a)) || \
+.if (exists(/usr/local/lib/${EOPENSSL}/libcrypto.a) && \
+     exists(/usr/local/lib/${EOPENSSL}/libtls.a)) || \
     defined(REGRESS_FULL) || make(clean) || make(cleandir) || make(obj)
 LDADD +=	-Wl,-rpath,/usr/local/lib/${EOPENSSL} -L/usr/local/lib/${EOPENSSL}
 CFLAGS +=	-I${.CURDIR}/ -I/usr/local/include/${EOPENSSL}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: dev.h,v 1.51 2026/01/22 09:24:26 ratchov Exp $	*/
+/*	$OpenBSD: dev.h,v 1.53 2026/03/15 14:24:43 ratchov Exp $	*/
 /*
  * Copyright (c) 2008-2012 Alexandre Ratchov <alex@caoua.org>
  *
@@ -78,11 +78,10 @@ struct slot {
 		int prime;			/* initial cycles to skip */
 		int bpf;			/* byte per frame */
 		int nch;			/* number of rec chans */
-		struct cmap cmap;		/* channel mapper state */
+		struct cmap cmap_rec;		/* rec channel mapper state */
+		struct cmap cmap_mon;		/* mon channel mapper state */
 		struct resamp resamp;		/* buffer for resampling */
 		struct conv enc;		/* buffer for encoding */
-		int join;			/* channel join factor */
-		int expand;			/* channel expand factor */
 		void *resampbuf, *encbuf;	/* tmp buffers */
 	} sub;
 	int xrun;				/* underrun policy */

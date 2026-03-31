@@ -1,4 +1,4 @@
-/* $OpenBSD: intr.c,v 1.36 2025/12/15 12:59:24 dlg Exp $ */
+/* $OpenBSD: intr.c,v 1.39 2026/03/09 06:38:02 tb Exp $ */
 /*
  * Copyright (c) 2011 Dale Rahn <drahn@openbsd.org>
  *
@@ -19,6 +19,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/atomic.h>
 #include <sys/timetc.h>
 #include <sys/malloc.h>
 
@@ -80,7 +81,7 @@ arm_cpu_irq(void *frame)
 {
 	struct cpu_info	*ci = curcpu();
 
-	uvmexp.intrs++;
+	atomic_inc_int(&uvmexp.intrs);
 	ci->ci_idepth++;
 	(*arm_irq_dispatch)(frame);
 	ci->ci_idepth--;
@@ -93,7 +94,7 @@ arm_cpu_fiq(void *frame)
 {
 	struct cpu_info	*ci = curcpu();
 
-	uvmexp.intrs++;
+	atomic_inc_int(&uvmexp.intrs);
 	ci->ci_idepth++;
 	(*arm_fiq_dispatch)(frame);
 	ci->ci_idepth--;

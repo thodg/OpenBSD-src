@@ -1,4 +1,4 @@
-/* $OpenBSD: format.c,v 1.344 2026/02/24 18:06:41 nicm Exp $ */
+/* $OpenBSD: format.c,v 1.349 2026/03/27 08:40:26 nicm Exp $ */
 
 /*
  * Copyright (c) 2011 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -1341,6 +1341,18 @@ format_cb_alternate_saved_y(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for bracket_paste_flag. */
+static void *
+format_cb_bracket_paste_flag(struct format_tree *ft)
+{
+	if (ft->wp != NULL && ft->wp->screen != NULL) {
+		if (ft->wp->screen->mode & MODE_BRACKETPASTE)
+			return (xstrdup("1"));
+		return (xstrdup("0"));
+	}
+	return (NULL);
+}
+
 /* Callback for buffer_name. */
 static void *
 format_cb_buffer_name(struct format_tree *ft)
@@ -2225,6 +2237,17 @@ format_cb_pane_pipe(struct format_tree *ft)
 	return (NULL);
 }
 
+/* Callback for pane_pipe_pid. */
+static void *
+format_cb_pane_pipe_pid(struct format_tree *ft)
+{
+	char	*value = NULL;
+
+	if (ft->wp != NULL && ft->wp->pipe_fd != -1)
+		xasprintf(&value, "%ld", (long)ft->wp->pipe_pid);
+	return (value);
+}
+
 /* Callback for pane_right. */
 static void *
 format_cb_pane_right(struct format_tree *ft)
@@ -3020,6 +3043,9 @@ static const struct format_table_entry format_table[] = {
 	{ "alternate_saved_y", FORMAT_TABLE_STRING,
 	  format_cb_alternate_saved_y
 	},
+	{ "bracket_paste_flag", FORMAT_TABLE_STRING,
+	  format_cb_bracket_paste_flag
+	},
 	{ "buffer_created", FORMAT_TABLE_TIME,
 	  format_cb_buffer_created
 	},
@@ -3310,6 +3336,9 @@ static const struct format_table_entry format_table[] = {
 	},
 	{ "pane_pipe", FORMAT_TABLE_STRING,
 	  format_cb_pane_pipe
+	},
+	{ "pane_pipe_pid", FORMAT_TABLE_STRING,
+	  format_cb_pane_pipe_pid
 	},
 	{ "pane_right", FORMAT_TABLE_STRING,
 	  format_cb_pane_right
@@ -4429,6 +4458,9 @@ format_loop_sessions(struct format_expand_state *es, const char *fmt)
 		free(expanded);
 	}
 
+	free(active);
+	free(all);
+
 	return (value);
 }
 
@@ -4454,6 +4486,37 @@ format_window_name(struct format_expand_state *es, const char *fmt)
 	}
 	free(name);
 	return (xstrdup("0"));
+}
+
+/* Add neighbor window variables to the format tree. */
+static void
+format_add_window_neighbor(struct format_tree *nft, struct winlink *wl,
+    struct session *s, const char *prefix)
+{
+	struct options_entry	*o;
+	const char		*oname;
+	char			*key, *prefixed, *oval;
+
+	xasprintf(&key, "%s_window_index", prefix);
+	format_add(nft, key, "%u", wl->idx);
+	free(key);
+
+	xasprintf(&key, "%s_window_active", prefix);
+	format_add(nft, key, "%d", wl == s->curw);
+	free(key);
+
+	o = options_first(wl->window->options);
+	while (o != NULL) {
+		oname = options_name(o);
+		if (*oname == '@') {
+			xasprintf(&prefixed, "%s_%s", prefix, oname);
+			oval = options_to_string(o, -1, 1);
+			format_add(nft, prefixed, "%s", oval);
+			free(oval);
+			free(prefixed);
+		}
+		o = options_next(o);
+	}
 }
 
 /* Loop over windows. */
@@ -4499,6 +4562,17 @@ format_loop_windows(struct format_expand_state *es, const char *fmt)
 		nft = format_create(c, item, FORMAT_WINDOW|w->id,
 		    ft->flags|last);
 		format_defaults(nft, ft->c, ft->s, wl, NULL);
+
+		/* Add neighbor window data to the format tree. */
+		format_add(nft, "window_after_active", "%d",
+		    i > 0 && l[i - 1] == ft->s->curw);
+		format_add(nft, "window_before_active", "%d",
+		    i + 1 < n && l[i + 1] == ft->s->curw);
+		if (i + 1 < n)
+			format_add_window_neighbor(nft, l[i + 1], ft->s, "next");
+		if (i > 0)
+			format_add_window_neighbor(nft, l[i - 1], ft->s, "prev");
+
 		format_copy_state(&next, es, 0);
 		next.ft = nft;
 		expanded = format_expand1(&next, use);
@@ -5221,13 +5295,11 @@ format_replace(struct format_expand_state *es, const char *key, size_t keylen,
 done:
 	/* Expand again if required. */
 	if (modifiers & FORMAT_EXPAND) {
-		format_copy_state(&next, es, FORMAT_EXPAND_NOJOBS);
-		new = format_expand1(&next, value);
+		new = format_expand1(es, value);
 		free(value);
 		value = new;
 	} else if (modifiers & FORMAT_EXPANDTIME) {
-		format_copy_state(&next, es, FORMAT_EXPAND_TIME|
-		    FORMAT_EXPAND_NOJOBS);
+		format_copy_state(&next, es, FORMAT_EXPAND_TIME);
 		new = format_expand1(&next, value);
 		free(value);
 		value = new;

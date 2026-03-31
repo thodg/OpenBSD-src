@@ -1,4 +1,4 @@
-/* $OpenBSD: input.c,v 1.253 2026/02/26 11:01:48 nicm Exp $ */
+/* $OpenBSD: input.c,v 1.255 2026/03/23 08:58:39 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -949,7 +949,7 @@ input_set_state(struct input_ctx *ictx, const struct input_transition *itr)
 
 /* Parse data. */
 static void
-input_parse(struct input_ctx *ictx, u_char *buf, size_t len)
+input_parse(struct input_ctx *ictx, const u_char *buf, size_t len)
 {
 	struct screen_write_ctx		*sctx = &ictx->ctx;
 	const struct input_state	*state = NULL;
@@ -1020,7 +1020,7 @@ input_parse_pane(struct window_pane *wp)
 
 /* Parse given input. */
 void
-input_parse_buffer(struct window_pane *wp, u_char *buf, size_t len)
+input_parse_buffer(struct window_pane *wp, const u_char *buf, size_t len)
 {
 	struct input_ctx	*ictx = wp->ictx;
 	struct screen_write_ctx	*sctx = &ictx->ctx;
@@ -1051,7 +1051,7 @@ input_parse_buffer(struct window_pane *wp, u_char *buf, size_t len)
 /* Parse given input for screen. */
 void
 input_parse_screen(struct input_ctx *ictx, struct screen *s,
-    screen_write_init_ctx_cb cb, void *arg, u_char *buf, size_t len)
+    screen_write_init_ctx_cb cb, void *arg, const u_char *buf, size_t len)
 {
 	struct screen_write_ctx	*sctx = &ictx->ctx;
 
@@ -1613,7 +1613,7 @@ input_csi_dispatch(struct input_ctx *ictx)
 				if (ictx->wp != NULL)
 					oo = ictx->wp->options;
 				else
-					oo = global_options;
+					oo = global_w_options;
 				p = options_get_number(oo, "cursor-style");
 
 				/* blink for 1,3,5; steady for 0,2,4,6 */
@@ -2503,7 +2503,7 @@ input_handle_decrqss(struct input_ctx *ictx)
 		if (wp != NULL)
 			oo = wp->options;
 		else
-			oo = global_options;
+			oo = global_w_options;
 		opt_ps = options_get_number(oo, "cursor-style");
 
 		/* Sanity clamp: valid Ps are 0..6 per DECSCUSR. */
@@ -2538,8 +2538,9 @@ input_dcs_dispatch(struct input_ctx *ictx)
 	long long		 allow_passthrough = 0;
 
 	if (wp == NULL)
-		return (0);
-	oo = wp->options;
+		oo = global_w_options;
+	else
+		oo = wp->options;
 
 	if (ictx->flags & INPUT_DISCARD) {
 		log_debug("%s: %zu bytes (discard)", __func__, len);

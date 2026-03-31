@@ -80,8 +80,6 @@ struct slot {
 	struct cmap cmap;		/* channel mapper state */
 	struct resamp resamp;		/* resampler state */
 	struct conv conv;		/* format encoder state */
-	int join;			/* channel join factor */
-	int expand;			/* channel expand factor */
 	void *resampbuf, *convbuf;	/* conversion tmp buffers */
 	int dup;			/* compat with legacy -j option */
 	int round;			/* slot-side block size */
@@ -214,8 +212,8 @@ slot_fmt(char *buf, size_t size, struct slot *s)
 		if (s->afile.endpos >= 0) {
 			p += snprintf(p, p < end ? end - p : 0,
 			    ", bytes %lld..%lld",
-			    s->afile.startpos,
-			    s->afile.endpos);
+			    (long long)s->afile.startpos,
+			    (long long)s->afile.endpos);
 		}
 		p += snprintf(p, p < end ? end - p : 0, ", vol %d", s->vol);
 	}
@@ -301,7 +299,7 @@ slot_new(char *path, int mode, struct aparams *par, int hdr,
 static void
 slot_init(struct slot *s)
 {
-	unsigned int inch, onch, bufsz;
+	unsigned int bufsz;
 
 #ifdef DEBUG
 	if (s->pstate != SLOT_CFG) {
@@ -324,25 +322,10 @@ slot_init(struct slot *s)
 
 	s->convbuf = NULL;
 	s->resampbuf = NULL;
-	s->join = 1;
-	s->expand = 1;
-	inch = s->imax - s->imin + 1;
-	onch = s->omax - s->omin + 1;
-	if (s->dup) {
-		/* compat with legacy -j option */
-		if (s->mode == SIO_PLAY)
-			onch = dev_pchan;
-		else
-			inch = dev_rchan;
-	}
-	if (onch > inch)
-		s->expand = onch / inch;
-	else if (onch < inch)
-		s->join = inch / onch;
 	if (s->mode & SIO_PLAY) {
 		cmap_init(&s->cmap,
 		    0, s->afile.nch - 1, s->imin, s->imax,
-		    0, dev_pchan - 1, s->omin, s->omax);
+		    0, dev_pchan - 1, s->omin, s->omax, s->dup);
 		if (s->afile.fmt != AFILE_FMT_PCM ||
 		    !aparams_native(&s->afile.par)) {
 			dec_init(&s->conv, &s->afile.par, s->afile.nch);
@@ -357,7 +340,7 @@ slot_init(struct slot *s)
 	if (s->mode & SIO_REC) {
 		cmap_init(&s->cmap,
 		    0, dev_rchan - 1, s->imin, s->imax,
-		    0, s->afile.nch - 1, s->omin, s->omax);
+		    0, s->afile.nch - 1, s->omin, s->omax, s->dup);
 		if (s->afile.rate != dev_rate) {
 			resamp_init(&s->resamp, dev_rate, s->afile.rate,
 			    s->afile.nch);
@@ -369,9 +352,9 @@ slot_init(struct slot *s)
 		}
 
 		/*
-		 * cmap_copy() doesn't write samples in all channels,
+		 * cmap_do() doesn't write samples in all channels,
 	         * for instance when mono->stereo conversion is
-	         * disabled. So we have to prefill cmap_copy() output
+	         * disabled. So we have to prefill cmap_do() output
 	         * with silence.
 	         */
 		if (s->resampbuf) {
@@ -480,63 +463,36 @@ slot_getcnt(struct slot *s, int *icnt, int *ocnt)
 }
 
 static void
-play_filt_resamp(struct slot *s, void *res_in, void *out, int icnt, int ocnt)
+play_filt_resamp(struct slot *s, void *in, void *out, int icnt, int ocnt)
 {
-	int i, offs, vol, inch, onch;
-	void *in;
-
 	if (s->resampbuf) {
-		resamp_do(&s->resamp, res_in, s->resampbuf, icnt, ocnt);
+		resamp_do(&s->resamp, in, s->resampbuf, icnt, ocnt);
 		in = s->resampbuf;
-	} else
-		in = res_in;
-
-	inch = s->imax - s->imin + 1;
-	onch = s->omax - s->omin + 1;
-	vol = s->vol / s->join; /* XXX */
-	cmap_add(&s->cmap, in, out, vol, ocnt);
-
-	offs = 0;
-	for (i = s->join - 1; i > 0; i--) {
-		offs += onch;
-		if (offs + s->cmap.nch > s->afile.nch)
-			break;
-		cmap_add(&s->cmap, (adata_t *)in + offs, out, vol, ocnt);
 	}
-
-	offs = 0;
-	for (i = s->expand - 1; i > 0; i--) {
-		offs += inch;
-		if (offs + s->cmap.nch > dev_pchan)
-			break;
-		cmap_add(&s->cmap, in, (adata_t *)out + offs, vol, ocnt);
-	}
+	cmap_do(&s->cmap, in, out, s->vol, ocnt, 1);
 }
 
 static void
 play_filt_dec(struct slot *s, void *in, void *out, int icnt, int ocnt)
 {
-	void *tmp;
-
-	tmp = s->convbuf;
-	if (tmp) {
+	if (s->convbuf) {
 		switch (s->afile.fmt) {
 		case AFILE_FMT_PCM:
-			dec_do(&s->conv, in, tmp, icnt);
+			dec_do(&s->conv, in, s->convbuf, icnt);
 			break;
 		case AFILE_FMT_ULAW:
-			dec_do_ulaw(&s->conv, in, tmp, icnt, 0);
+			dec_do_ulaw(&s->conv, in, s->convbuf, icnt, 0);
 			break;
 		case AFILE_FMT_ALAW:
-			dec_do_ulaw(&s->conv, in, tmp, icnt, 1);
+			dec_do_ulaw(&s->conv, in, s->convbuf, icnt, 1);
 			break;
 		case AFILE_FMT_FLOAT:
-			dec_do_float(&s->conv, in, tmp, icnt);
+			dec_do_float(&s->conv, in, s->convbuf, icnt);
 			break;
 		}
-	} else
-		tmp = in;
-	play_filt_resamp(s, tmp, out, icnt, ocnt);
+		in = s->convbuf;
+	}
+	play_filt_resamp(s, in, out, icnt, ocnt);
 }
 
 /*
@@ -580,47 +536,21 @@ slot_mix_badd(struct slot *s, adata_t *odata)
 }
 
 static void
-rec_filt_resamp(struct slot *s, void *in, void *res_out, int icnt, int ocnt)
+rec_filt_resamp(struct slot *s, void *in, void *out, int icnt, int ocnt)
 {
-	int i, vol, offs, inch, onch;
-	void *out = res_out;
+	cmap_do(&s->cmap, in, s->resampbuf ? s->resampbuf : out, ADATA_UNIT, icnt, 0);
 
-	out = (s->resampbuf) ? s->resampbuf : res_out;
-
-	inch = s->imax - s->imin + 1;
-	onch = s->omax - s->omin + 1;
-	vol = ADATA_UNIT / s->join;
-	cmap_copy(&s->cmap, in, out, vol, icnt);
-
-	offs = 0;
-	for (i = s->join - 1; i > 0; i--) {
-		offs += onch;
-		if (offs + s->cmap.nch > dev_rchan)
-			break;
-		cmap_add(&s->cmap, (adata_t *)in + offs, out, vol, icnt);
-	}
-	offs = 0;
-	for (i = s->expand - 1; i > 0; i--) {
-		offs += inch;
-		if (offs + s->cmap.nch > s->afile.nch)
-			break;
-		cmap_copy(&s->cmap, in, (adata_t *)out + offs, vol, icnt);
-	}
 	if (s->resampbuf)
-		resamp_do(&s->resamp, s->resampbuf, res_out, icnt, ocnt);
-	else
-		ocnt = icnt;
+		resamp_do(&s->resamp, s->resampbuf, out, icnt, ocnt);
 }
 
 static void
 rec_filt_enc(struct slot *s, void *in, void *out, int icnt, int ocnt)
 {
-	void *tmp;
+	rec_filt_resamp(s, in, s->convbuf ? s->convbuf : out, icnt, ocnt);
 
-	tmp = s->convbuf;
-	rec_filt_resamp(s, in, tmp ? tmp : out, icnt, ocnt);
-	if (tmp)
-		enc_do(&s->conv, tmp, out, ocnt);
+	if (s->convbuf)
+		enc_do(&s->conv, s->convbuf, out, ocnt);
 }
 
 /*

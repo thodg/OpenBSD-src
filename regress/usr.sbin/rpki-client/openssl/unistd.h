@@ -1,4 +1,4 @@
-/*	$OpenBSD: unistd.h,v 1.4 2025/08/19 11:31:48 job Exp $ */
+/*	$OpenBSD: unistd.h,v 1.6 2026/03/31 06:25:39 tb Exp $ */
 /*
  * Public domain
  * compatibility shim for OpenSSL 3
@@ -31,6 +31,7 @@ CMS_SignerInfo_get_version(CMS_SignerInfo *si, long *version)
 	return 1;
 }
 
+#if !HAVE_X509_CRL_GET0_TBS_SIGALG
 static inline const X509_ALGOR *
 X509_CRL_get0_tbs_sigalg(const X509_CRL *crl)
 {
@@ -39,5 +40,6 @@ X509_CRL_get0_tbs_sigalg(const X509_CRL *crl)
 	X509_CRL_get0_signature(crl, NULL, &alg);
 	return alg;
 }
+#endif
 
 #endif  /* ! RPKI_CLIENT_UNISTD_H */

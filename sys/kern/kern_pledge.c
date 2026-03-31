@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_pledge.c,v 1.337 2026/02/26 07:42:25 deraadt Exp $	*/
+/*	$OpenBSD: kern_pledge.c,v 1.356 2026/03/27 05:15:25 dgl Exp $	*/
 
 /*
  * Copyright (c) 2015 Nicholas Marriott <nicm@openbsd.org>
@@ -82,7 +82,7 @@
 uint64_t pledgereq_flags(const char *req);
 int	 parsepledges(struct proc *p, const char *kname,
 	    const char *promises, u_int64_t *fp);
-int	 canonpath(const char *input, char *buf, size_t bufsize);
+int	 checkpledgepaths(const char *path);
 void	 unveil_destroy(struct process *ps);
 
 /*
@@ -216,7 +216,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_dup3] = PLEDGE_STDIO,
 	[SYS_closefrom] = PLEDGE_STDIO,
 	[SYS_shutdown] = PLEDGE_STDIO,
-	[SYS_fchdir] = PLEDGE_STDIO,	/* XXX consider tightening */
+	[SYS_fchdir] = PLEDGE_STDIO,
 
 	[SYS_pipe] = PLEDGE_STDIO,
 	[SYS_pipe2] = PLEDGE_STDIO,
@@ -241,11 +241,12 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	 * Path access/creation calls encounter many extensive
 	 * checks done during pledge_namei()
 	 */
-	[SYS_open] = PLEDGE_STDIO,
-	[SYS_stat] = PLEDGE_STDIO,
-	[SYS_access] = PLEDGE_STDIO,
-	[SYS_readlink] = PLEDGE_STDIO,
-	[SYS___realpath] = PLEDGE_STDIO,
+	[SYS_open] = PLEDGE_RPATH | PLEDGE_WPATH,
+	[SYS___pledge_open] = PLEDGE_STDIO,
+	[SYS_stat] = PLEDGE_RPATH,
+	[SYS_access] = PLEDGE_RPATH,
+	[SYS_readlink] = PLEDGE_RPATH,
+	[SYS___realpath] = PLEDGE_RPATH,
 
 	[SYS_adjtime] = PLEDGE_STDIO,   /* setting requires "settime" */
 	[SYS_adjfreq] = PLEDGE_SETTIME,
@@ -253,7 +254,6 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 
 	/*
 	 * Needed by threaded programs
-	 * XXX should we have a new "threads"?
 	 */
 	[SYS___tfork] = PLEDGE_STDIO,
 	[SYS_sched_yield] = PLEDGE_STDIO,
@@ -293,10 +293,10 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 
 	[SYS_chdir] = PLEDGE_RPATH,
 	[SYS_openat] = PLEDGE_RPATH | PLEDGE_WPATH,
-	[SYS_fstatat] = PLEDGE_RPATH | PLEDGE_WPATH,
-	[SYS_faccessat] = PLEDGE_RPATH | PLEDGE_WPATH,
-	[SYS_readlinkat] = PLEDGE_RPATH | PLEDGE_WPATH,
-	[SYS_lstat] = PLEDGE_RPATH | PLEDGE_WPATH,
+	[SYS_fstatat] = PLEDGE_RPATH,
+	[SYS_faccessat] = PLEDGE_RPATH,
+	[SYS_readlinkat] = PLEDGE_RPATH,
+	[SYS_lstat] = PLEDGE_RPATH,
 	[SYS_truncate] = PLEDGE_WPATH,
 	[SYS_rename] = PLEDGE_RPATH | PLEDGE_CPATH,
 	[SYS_rmdir] = PLEDGE_CPATH,
@@ -317,11 +317,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 
 	[SYS_revoke] = PLEDGE_TTY,	/* also requires PLEDGE_RPATH */
 
-	/*
-	 * Classify as RPATH|WPATH, because of path information leakage.
-	 * WPATH due to unknown use of mk*temp(3) on non-/tmp paths..
-	 */
-	[SYS___getcwd] = PLEDGE_RPATH | PLEDGE_WPATH,
+	[SYS___getcwd] = PLEDGE_RPATH,
 
 	/* Classify as RPATH, because these leak path information */
 	[SYS_getdents] = PLEDGE_RPATH,
@@ -367,6 +363,7 @@ const uint64_t pledge_syscalls[SYS_MAXSYSCALL] = {
 	[SYS_sysarch] = PLEDGE_PROTEXEC,
 };
 
+/* must be sorted by name because of bsearch */
 static const struct {
 	char *name;
 	uint64_t flags;
@@ -586,138 +583,179 @@ pledge_fail(struct proc *p, int error, uint64_t code)
 	return (error);
 }
 
+#ifndef SMALL_KERNEL
+
+#define PLEDGEPATH_NULL		1
+#define PLEDGEPATH_TTY		2
+#define PLEDGEPATH_SPWD		3
+#define PLEDGEPATH_PWD		4
+#define PLEDGEPATH_GROUP	5
+#define PLEDGEPATH_NETID	6
+#define PLEDGEPATH_RESOLVCONF	7
+#define PLEDGEPATH_HOSTS	8
+#define PLEDGEPATH_SERVICES	9
+#define PLEDGEPATH_PROTOCOLS	10
+#define PLEDGEPATH_LOCALTIME	11
+#define PLEDGEPATH_ZONEINFO	12	/* manually parsed */
+
+/* must be sorted by name because of bsearch */
+static const struct {
+	char *name;
+	int item;
+} pledgepaths[] = {
+	{ "/dev/null", PLEDGEPATH_NULL },
+	{ "/dev/tty", PLEDGEPATH_TTY },
+	{ "/etc/group", PLEDGEPATH_GROUP },
+	{ "/etc/hosts", PLEDGEPATH_HOSTS },
+	{ "/etc/localtime", PLEDGEPATH_LOCALTIME },
+	{ "/etc/netid", PLEDGEPATH_NETID },
+	{ "/etc/protocols", PLEDGEPATH_PROTOCOLS },
+	{ "/etc/pwd.db", PLEDGEPATH_PWD },
+	{ "/etc/resolv.conf", PLEDGEPATH_RESOLVCONF },
+	{ "/etc/services", PLEDGEPATH_SERVICES },
+	{ "/etc/spwd.db", PLEDGEPATH_SPWD },
+};
+
+/* bsearch over pledgepaths. return item value if found, 0 else */
+int
+checkpledgepaths(const char *path)
+{
+	int base = 0, cmp, i, lim;
+
+	for (lim = nitems(pledgepaths); lim != 0; lim >>= 1) {
+		i = base + (lim >> 1);
+		cmp = strcmp(path, pledgepaths[i].name);
+		if (cmp == 0)
+			return (pledgepaths[i].item);
+		if (cmp > 0) { /* not found before, move right */
+			base = i + 1;
+			lim--;
+		} /* else move left */
+	}
+	return (0);
+}
+
+#endif /* SMALL_KERNEL */
+
 /*
  * Need to make it more obvious that one cannot get through here
  * without the right flags set
  */
 int
-pledge_namei(struct proc *p, struct nameidata *ni, char *origpath)
+pledge_namei(struct proc *p, struct nameidata *ni, char *path)
 {
-	char path[PATH_MAX];
-	uint64_t pledge;
-	int error;
+	uint64_t ple, nip;
 
 	if ((p->p_p->ps_flags & PS_PLEDGE) == 0 ||
 	    (p->p_p->ps_flags & PS_COREDUMP))
 		return (0);
-	pledge = p->p_pledge;
-
-	if (ni->ni_pledge == 0)
+	ple = p->p_pledge;
+	nip = ni->ni_pledge;
+	if (nip == 0)
 		panic("pledge_namei: ni_pledge");
 
-	/*
-	 * We set the BYPASSUNVEIL flag to skip unveil checks
-	 * as necessary
-	 */
-
 	/* Doing a permitted execve() */
-	if ((ni->ni_pledge & PLEDGE_EXEC) && (pledge & PLEDGE_EXEC))
+	if ((nip & PLEDGE_EXEC) && (ple & PLEDGE_EXEC))
 		return (0);
 
-	error = canonpath(origpath, path, sizeof(path));
-	if (error)
-		return (error);
+	/*
+	 * In specific promise situations, __pledge_open() can open
+	 * specific paths and ignores rpath, wpath, or unveil restrictions.
+	 */
+	if (ni->ni_unveil & UNVEIL_PLEDGEOPEN) {
+#ifdef SMALL_KERNEL
+		/* To save ramdisk space, we trust the libc provided paths */
+		ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
+#else
+		int item;
 
-	/* Whitelisted paths */
-	switch (p->p_pledge_syscall) {
-	case SYS_access:
-		/* tzset() needs this. */
-		if (ni->ni_pledge == PLEDGE_RPATH &&
-		    strcmp(path, "/etc/localtime") == 0) {
-			ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-			return (0);
-		}
-		break;
-	case SYS_open:
-		/* daemon(3) or other such functions */
-		if ((ni->ni_pledge & ~(PLEDGE_RPATH | PLEDGE_WPATH)) == 0 &&
-		    strcmp(path, "/dev/null") == 0) {
-			ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-			return (0);
-		}
-
-		/* readpassphrase(3), getpass(3) */
-		if ((pledge & PLEDGE_TTY) &&
-		    (ni->ni_pledge & ~(PLEDGE_RPATH | PLEDGE_WPATH)) == 0 &&
-		    strcmp(path, "/dev/tty") == 0) {
-			ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-			return (0);
-		}
-
-		/* getpw* and friends need a few files */
-		if ((ni->ni_pledge == PLEDGE_RPATH) &&
-		    (pledge & PLEDGE_GETPW)) {
-			if (strcmp(path, "/etc/spwd.db") == 0)
-				return (EPERM); /* don't call pledge_fail */
-			if (strcmp(path, "/etc/pwd.db") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-			if (strcmp(path, "/etc/group") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-			if (strcmp(path, "/etc/netid") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-		}
-
-		/* DNS needs /etc/{resolv.conf,hosts,services,protocols}. */
-		if ((ni->ni_pledge == PLEDGE_RPATH) &&
-		    (pledge & PLEDGE_DNS)) {
-			if (strcmp(path, "/etc/resolv.conf") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-			if (strcmp(path, "/etc/hosts") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-			if (strcmp(path, "/etc/services") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-			if (strcmp(path, "/etc/protocols") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
-			}
-		}
-
-		/* tzset() needs these. */
-		if ((ni->ni_pledge == PLEDGE_RPATH) &&
+		item = checkpledgepaths(path);
+		if (item == 0 &&
 		    strncmp(path, "/usr/share/zoneinfo/",
-		    sizeof("/usr/share/zoneinfo/") - 1) == 0)  {
-			ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-			return (0);
-		}
-		if ((ni->ni_pledge == PLEDGE_RPATH) &&
-		    strcmp(path, "/etc/localtime") == 0) {
-			ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-			return (0);
-		}
+		    sizeof("/usr/share/zoneinfo/") - 1) == 0) {
+			const char *cp;
 
-		break;
-	case SYS_stat:
-		/* XXX go library stats /etc/hosts, remove this soon */
-		if ((ni->ni_pledge == PLEDGE_RPATH) &&
-		    (pledge & PLEDGE_DNS)) {
-			if (strcmp(path, "/etc/hosts") == 0) {
-				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
-				return (0);
+			item = PLEDGEPATH_ZONEINFO;
+			for (cp = path + sizeof("/usr/share/zoneinfo/") - 2;
+			    *cp; cp++) {
+				if (cp[0] == '/' &&
+				    cp[1] == '.' && cp[2] == '.' &&
+				    (cp[3] == '/' || cp[3] == '\0')) {
+					item = 0;	/* bad path */
+					break;
+				}
 			}
 		}
-		break;
+
+		switch (item) {
+		case 0:
+			/* Invalid path provided to __pledge_open */
+			return (pledge_fail(p, EACCES, (nip & ~ple)));
+
+		/* "stdio" - for daemon(3) or other such functions */
+		case PLEDGEPATH_NULL:
+			if ((nip & ~(PLEDGE_RPATH | PLEDGE_WPATH)) == 0)
+				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
+			break;
+
+		/* "tty" - readpassphrase(3), getpass(3) */
+		case PLEDGEPATH_TTY:
+			if ((ple & PLEDGE_TTY) &&
+			    (nip & ~(PLEDGE_RPATH | PLEDGE_WPATH)) == 0)
+				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
+			break;
+
+		/* "getpw" requirements */
+		case PLEDGEPATH_SPWD:
+			/* XXX should remove nip check! */
+			if ((ple & PLEDGE_GETPW) && (nip == PLEDGE_RPATH))
+				return (EPERM);
+			break;
+		case PLEDGEPATH_PWD:
+			/* FALLTHROUGH */
+		case PLEDGEPATH_GROUP:
+			/* FALLTHROUGH */
+		case PLEDGEPATH_NETID:
+			if ((ple & PLEDGE_GETPW) && (nip == PLEDGE_RPATH))
+				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
+			break;
+
+		/* "dns" requirements */
+		case PLEDGEPATH_RESOLVCONF:
+			/* FALLTHROUGH */
+		case PLEDGEPATH_HOSTS:
+			/* FALLTHROUGH */
+		case PLEDGEPATH_SERVICES:
+			/* FALLTHROUGH */
+		case PLEDGEPATH_PROTOCOLS:
+			if ((ple & PLEDGE_DNS) && (nip == PLEDGE_RPATH))
+				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
+			break;
+
+		/* tzset() often happen late in programs */
+		case PLEDGEPATH_LOCALTIME:
+			/* FALLTHROUGH */
+		case PLEDGEPATH_ZONEINFO:
+			if (nip == PLEDGE_RPATH)
+				ni->ni_cnd.cn_flags |= BYPASSUNVEIL;
+			break;
+
+		default:
+			panic("pledgepaths table is broken");
+		}
+#endif /* SMALL_KERNEL */
 	}
+	if (ni->ni_cnd.cn_flags & BYPASSUNVEIL)
+		return (0);
 
 	/*
 	 * Ensure each flag of ni_pledge has counterpart allowing it in
 	 * p_pledge.
 	 */
-	if (ni->ni_pledge & ~pledge)
-		return (pledge_fail(p, EPERM, (ni->ni_pledge & ~pledge)));
+	if (nip & ~ple)
+		return (pledge_fail(p, EPERM, (nip & ~ple)));
 
-	/* continue, and check unveil if present */
+	/* continue into namei() which will check unveils */
 	return (0);
 }
 
@@ -746,7 +784,7 @@ pledge_recvfd(struct proc *p, struct file *fp)
 		if (vp->v_type != VDIR)
 			return (0);
 	}
-	return pledge_fail(p, EINVAL, PLEDGE_RECVFD);
+	return (EPERM);
 }
 
 /*
@@ -778,6 +816,7 @@ pledge_sendfd(struct proc *p, struct file *fp)
 	return pledge_fail(p, EINVAL, PLEDGE_SENDFD);
 }
 
+#ifndef SMALL_KERNEL
 int
 pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 {
@@ -969,6 +1008,7 @@ pledge_sysctl(struct proc *p, int miblen, int *mib, void *new)
 
 	return pledge_fail(p, EINVAL, 0);
 }
+#endif /* SMALL_KERNEL */
 
 int
 pledge_chown(struct proc *p, uid_t uid, gid_t gid)
@@ -1589,45 +1629,4 @@ pledge_protexec(struct proc *p, int prot)
 	if (!(p->p_pledge & PLEDGE_PROTEXEC) && (prot & PROT_EXEC))
 		return pledge_fail(p, EPERM, PLEDGE_PROTEXEC);
 	return 0;
-}
-
-int
-canonpath(const char *input, char *buf, size_t bufsize)
-{
-	const char *p;
-	char *q;
-
-	/* can't canon relative paths, don't bother */
-	if (input[0] != '/') {
-		if (strlcpy(buf, input, bufsize) >= bufsize)
-			return ENAMETOOLONG;
-		return 0;
-	}
-
-	p = input;
-	q = buf;
-	while (*p && (q - buf < bufsize)) {
-		if (p[0] == '/' && (p[1] == '/' || p[1] == '\0')) {
-			p += 1;
-
-		} else if (p[0] == '/' && p[1] == '.' &&
-		    (p[2] == '/' || p[2] == '\0')) {
-			p += 2;
-
-		} else if (p[0] == '/' && p[1] == '.' && p[2] == '.' &&
-		    (p[3] == '/' || p[3] == '\0')) {
-			p += 3;
-			if (q != buf)	/* "/../" at start of buf */
-				while (*--q != '/')
-					continue;
-
-		} else {
-			*q++ = *p++;
-		}
-	}
-	if ((*p == '\0') && (q - buf < bufsize)) {
-		*q = 0;
-		return 0;
-	} else
-		return ENAMETOOLONG;
 }

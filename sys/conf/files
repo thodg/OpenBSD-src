@@ -1,4 +1,4 @@
-#	$OpenBSD: files,v 1.750 2026/01/29 11:23:35 kettenis Exp $
+#	$OpenBSD: files,v 1.752 2026/03/16 14:57:34 claudio Exp $
 #	$NetBSD: files,v 1.87 1996/05/19 17:17:50 jonathan Exp $
 
 #	@(#)files.newconf	7.5 (Berkeley) 5/10/93
@@ -996,7 +996,7 @@ file ufs/mfs/mfs_vfsops.c		mfs
 file ufs/mfs/mfs_vnops.c		mfs
 file ufs/ufs/ufs_bmap.c			ffs | mfs | ext2fs
 file ufs/ufs/ufs_dirhash.c		ufs_dirhash & (ffs | mfs)
-file ufs/ufs/ufs_ihash.c		ffs | mfs | ext2fs | fuse
+file ufs/ufs/ufs_ihash.c		ffs | mfs | ext2fs
 file ufs/ufs/ufs_inode.c		ffs | mfs | ext2fs
 file ufs/ufs/ufs_lookup.c		ffs | mfs | ext2fs
 file ufs/ufs/ufs_quota.c		quota & ( ffs | mfs | ext2fs )
@@ -1022,7 +1022,7 @@ file uvm/uvm_device.c
 file uvm/uvm_fault.c
 file uvm/uvm_glue.c
 file uvm/uvm_init.c
-file uvm/uvm_io.c
+file uvm/uvm_io.c			ptrace | dt | !small_kernel
 file uvm/uvm_km.c
 file uvm/uvm_map.c
 file uvm/uvm_meter.c

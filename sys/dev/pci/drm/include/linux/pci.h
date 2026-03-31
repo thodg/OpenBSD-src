@@ -1,4 +1,4 @@
-/*	$OpenBSD: pci.h,v 1.19 2025/02/07 03:03:31 jsg Exp $	*/
+/*	$OpenBSD: pci.h,v 1.21 2026/03/13 02:44:52 jsg Exp $	*/
 /*
  * Copyright (c) 2015 Mark Kettenis
  *
@@ -136,6 +136,8 @@ struct pci_dev {
 #define PCI_COMMAND_MEMORY	PCI_COMMAND_MEM_ENABLE
 
 #define PCI_PRIMARY_BUS		PCI_PRIBUS_1
+
+#define PCI_POSSIBLE_ERROR(r)	((r) == 0xffffffff)
 
 static inline int
 pci_read_config_dword(struct pci_dev *pdev, int reg, u32 *val)
@@ -541,6 +543,8 @@ pci_match_id(const struct pci_device_id *ids, struct pci_dev *pdev)
 	return NULL;
 }
 
+#define PCI_BASE_CLASS_DISPLAY PCI_CLASS_DISPLAY
+
 #define PCI_CLASS_DISPLAY_VGA \
     ((PCI_CLASS_DISPLAY << 8) | PCI_SUBCLASS_DISPLAY_VGA)
 #define PCI_CLASS_DISPLAY_OTHER \
@@ -548,15 +552,21 @@ pci_match_id(const struct pci_device_id *ids, struct pci_dev *pdev)
 #define PCI_CLASS_ACCELERATOR_PROCESSING \
     (PCI_CLASS_ACCELERATOR << 8)
 
-static inline int
+static inline bool
 pci_device_is_present(struct pci_dev *pdev)
 {
-	return 1;
+	return true;
 }
 
-static inline int
+static inline bool
+pci_dev_is_disconnected(struct pci_dev *pdev)
+{
+	return false;
+}
+
+static inline bool 
 dev_is_pci(struct device *dev)
 {
-	return 1;
+	return true;
 }
 #endif /* _LINUX_PCI_H_ */

@@ -1,5 +1,5 @@
 #!/bin/ksh
-#	$OpenBSD: install.sub,v 1.1284 2026/01/17 21:49:39 kn Exp $
+#	$OpenBSD: install.sub,v 1.1286 2026/03/25 21:24:29 kn Exp $
 #
 # Copyright (c) 1997-2015 Todd Miller, Theo de Raadt, Ken Westerback
 # Copyright (c) 2015, Robert Peichaer <rpe@openbsd.org>
@@ -2700,39 +2700,27 @@ start_cgiinfo() {
 #
 # In addition,
 #
-# 1) mount non-ffs filesystems read only,
+# 1) mount ffs filesystems read-write and all others read-only,
 # 2) prepend '/mnt' to all mount points,
 # 3) delete any trailing '/' from the mount point (e.g. root),
 #
 # If no /etc/fstab is created, do not proceed with install/upgrade.
 munge_fstab() {
-	local _dev _mp _fstype _opt _rest
+	local _dev _mp _fstype _opt _rest _mode
 
 	while read _dev _mp _fstype _opt _rest; do
-		# Drop irrelevant lines and filesystems.
 		[[ $_dev == @(/dev/vnd*|\#*) ||
 			$_fstype == nfs ||
 			! -f /sbin/mount_$_fstype ||
 			$_opt == *noauto* ||
 			$_opt == *xx* ]] && continue
 
-		# Change read-only ffs to read-write since we'll potentially
-		# write to these filesystems.
-		# Mount non-ffs filesystems read only.
-		if [[ $_fstype == ffs ]]; then
-			_opt=$(echo $_opt | sed 's/[[:<:]]ro[[:>:]]/rw/')
-		else
-			_opt=$(echo $_opt | sed 's/[[:<:]]rw[[:>:]]/ro/')
-		fi
+		[[ $_fstype == ffs ]] && _mode=rw || _mode=ro
+		_opt=$(echo $_opt | sed "s,[[:<:]]r[wo][[:>:]],${_mode},")
 
-		# Write fs entry in fstab.
-		# 1) prepend '/mnt' to the mount point.
-		# 2) remove a trailing '/' from the mount point (e.g. root).
 		echo $_dev /mnt${_mp%/} $_fstype $_opt $_rest
-
 	done </tmp/i/fstab >/etc/fstab
 
-	# If no /etc/fstab was created, we have nowhere to $MODE to.
 	if [[ ! -s /etc/fstab ]]; then
 		echo "Unable to create valid /etc/fstab."
 		exit

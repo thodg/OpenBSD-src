@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.159 2024/06/02 23:26:39 jsg Exp $	*/
+/*	$OpenBSD: util.c,v 1.161 2026/03/15 19:23:22 op Exp $	*/
 
 /*
  * Copyright (c) 2000,2001 Markus Friedl.  All rights reserved.
@@ -76,6 +76,17 @@ xstrdup(const char *str)
 	return (r);
 }
 
+char *
+xstrndup(const char *str, size_t maxlen)
+{
+	char	*r;
+
+	if ((r = strndup(str, maxlen)) == NULL)
+		fatal("strdup");
+
+	return (r);
+}
+
 void *
 xmemdup(const void *ptr, size_t size)
 {
@@ -84,7 +95,7 @@ xmemdup(const void *ptr, size_t size)
 	if ((r = malloc(size)) == NULL)
 		fatal("malloc");
 
-	memmove(r, ptr, size);
+	memcpy(r, ptr, size);
 
 	return (r);
 }

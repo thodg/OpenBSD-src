@@ -1,4 +1,4 @@
-/* $OpenBSD: grid.c,v 1.143 2026/02/20 08:41:23 nicm Exp $ */
+/* $OpenBSD: grid.c,v 1.145 2026/03/23 09:05:59 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -495,7 +495,7 @@ static void
 grid_expand_line(struct grid *gd, u_int py, u_int sx, u_int bg)
 {
 	struct grid_line	*gl;
-	u_int			 xx, old_cellsize;
+	u_int			 xx;
 
 	gl = &gd->linedata[py];
 	if (sx <= gl->cellsize)
@@ -508,10 +508,13 @@ grid_expand_line(struct grid *gd, u_int py, u_int sx, u_int bg)
 	else if (gd->sx > sx)
 		sx = gd->sx;
 
-	old_cellsize = gl->cellsize;
-	gl->celldata = xrecallocarray(gl->celldata, old_cellsize, sx,
+	gl->celldata = xreallocarray(gl->celldata, sx,
 	    sizeof *gl->celldata);
-	for (xx = old_cellsize; xx < sx; xx++)
+	if (gl->cellsize < sx) {
+		memset(gl->celldata + gl->cellsize, 0,
+		    (sx - gl->cellsize) * sizeof *gl->celldata);
+	}
+	for (xx = gl->cellsize; xx < sx; xx++)
 		grid_clear_cell(gd, xx, py, bg);
 	gl->cellsize = sx;
 }
@@ -1114,7 +1117,7 @@ grid_string_cells(struct grid *gd, u_int px, u_int py, u_int nx,
 		if (gc.flags & GRID_FLAG_PADDING)
 			continue;
 
-		if (flags & GRID_STRING_WITH_SEQUENCES) {
+		if (lastgc != NULL && (flags & GRID_STRING_WITH_SEQUENCES)) {
 			grid_string_cells_code(*lastgc, &gc, code, sizeof code,
 			    flags, s, &has_link);
 			codelen = strlen(code);

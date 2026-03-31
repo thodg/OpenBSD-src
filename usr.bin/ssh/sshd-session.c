@@ -1,4 +1,4 @@
-/* $OpenBSD: sshd-session.c,v 1.20 2026/02/09 21:38:14 dtucker Exp $ */
+/* $OpenBSD: sshd-session.c,v 1.23 2026/03/11 09:10:59 dtucker Exp $ */
 /*
  * SSH2 implementation:
  * Privilege Separation:
@@ -739,7 +739,7 @@ main(int ac, char **av)
 	const char *remote_ip, *rdomain;
 	char *line, *laddr, *logfile = NULL;
 	u_int i;
-	u_int64_t ibytes, obytes;
+	uint64_t ibytes, obytes;
 	mode_t new_umask;
 	Authctxt *authctxt;
 	struct connection_info *connection_info = NULL;
@@ -1054,8 +1054,8 @@ main(int ac, char **av)
 	setproctitle("%s", "[accepted]");
 
 	/* Executed child processes don't need these. */
-	fcntl(sock_out, F_SETFD, FD_CLOEXEC);
-	fcntl(sock_in, F_SETFD, FD_CLOEXEC);
+	FD_CLOSEONEXEC(sock_out);
+	FD_CLOSEONEXEC(sock_in);
 
 	/* We will not restart on SIGHUP since it no longer makes sense. */
 	ssh_signal(SIGALRM, SIG_DFL);
@@ -1131,13 +1131,6 @@ main(int ac, char **av)
 		if (setitimer(ITIMER_REAL, &itv, NULL) == -1)
 			fatal("login grace time setitimer failed");
 	}
-
-	if ((r = kex_exchange_identification(ssh, -1,
-	    options.version_addendum)) != 0)
-		sshpkt_fatal(ssh, r, "banner exchange");
-
-	if ((ssh->compat & SSH_BUG_NOREKEY))
-		debug("client does not support rekeying");
 
 	ssh_packet_set_nonblocking(ssh);
 
