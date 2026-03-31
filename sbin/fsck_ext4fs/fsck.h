@@ -43,6 +43,7 @@
 #define	DFOUND	04
 #define	DCLEAR	05
 #define	FCLEAR	06
+#define	SSTATE	07
 
 struct bufarea {
 	struct bufarea	*b_next;

@@ -49,6 +49,38 @@ static void checkinode(ino_t, struct inodesc *);
 int ext4fs_block_group_has_super_block(int);
 
 static void
+mark_indirect(u_int64_t blk, int level)
+{
+	char *buf;
+	u_int32_t i, nptrs;
+
+	if (blk == 0 || blk >= maxfsblock)
+		return;
+	setbmap(blk);
+	if (level == 0)
+		return;
+	buf = malloc(sblock.m_block_size);
+	if (buf == NULL)
+		return;
+	if (bread(fsreadfd, buf, EXT4FS_FSBTODB(&sblock, blk),
+	    sblock.m_block_size) != 0) {
+		free(buf);
+		return;
+	}
+	nptrs = sblock.m_block_size / sizeof(u_int32_t);
+	for (i = 0; i < nptrs; i++) {
+		u_int32_t b = letoh32(((u_int32_t *)buf)[i]);
+		if (b == 0)
+			continue;
+		if (level == 1)
+			setbmap(b);
+		else
+			mark_indirect(b, level - 1);
+	}
+	free(buf);
+}
+
+static void
 mark_reserved_inode_blocks(ino_t ino)
 {
 	u_int32_t group, index;
@@ -81,6 +113,11 @@ mark_reserved_inode_blocks(ino_t ino)
 
 	di = (struct ext4fs_dinode *)(ibuf + off);
 
+	if (letoh16(di->i_mode) == 0) {
+		free(ibuf);
+		return;
+	}
+
 	if (!(letoh32(di->i_flags) & EXTFS_INODE_FLAG_EXTENTS)) {
 		u_int32_t i;
 		for (i = 0; i < 12; i++) {
@@ -88,30 +125,12 @@ mark_reserved_inode_blocks(ino_t ino)
 			if (b != 0)
 				setbmap(b);
 		}
-		for (i = 12; i < 15; i++) {
-			u_int32_t b = letoh32(di->i_block[i]);
-			char *indbuf;
-			u_int32_t j, nind;
-			if (b == 0)
-				continue;
-			setbmap(b);
-			indbuf = malloc(sblock.m_block_size);
-			if (indbuf == NULL)
-				continue;
-			if (bread(fsreadfd, indbuf,
-			    EXT4FS_FSBTODB(&sblock, b),
-			    sblock.m_block_size) != 0) {
-				free(indbuf);
-				continue;
-			}
-			nind = sblock.m_block_size / sizeof(u_int32_t);
-			for (j = 0; j < nind; j++) {
-				u_int32_t ib = letoh32(((u_int32_t *)indbuf)[j]);
-				if (ib != 0)
-					setbmap(ib);
-			}
-			free(indbuf);
-		}
+		if (letoh32(di->i_block[12]) != 0)
+			mark_indirect(letoh32(di->i_block[12]), 1);
+		if (letoh32(di->i_block[13]) != 0)
+			mark_indirect(letoh32(di->i_block[13]), 2);
+		if (letoh32(di->i_block[14]) != 0)
+			mark_indirect(letoh32(di->i_block[14]), 3);
 		free(ibuf);
 		return;
 	}
@@ -188,7 +207,6 @@ mark_reserved_blocks(void)
 		sblock.m_journal_inode_number,
 		sblock.m_user_quota_inode,
 		sblock.m_group_quota_inode,
-		sblock.m_lost_and_found_inode,
 		sblock.m_project_quota_inode,
 		sblock.m_orphan_file_inode,
 		0
@@ -324,12 +342,34 @@ checkinode(ino_t inumber, struct inodesc *idesc)
 	if (inumber < EXT4FS_INODE_FIRST && inumber != EXT4FS_INODE_ROOT_DIR)
 		return;
 	if (inumber == sblock.m_journal_inode_number ||
-	    inumber == sblock.m_user_quota_inode ||
-	    inumber == sblock.m_group_quota_inode ||
-	    inumber == sblock.m_lost_and_found_inode ||
-	    inumber == sblock.m_project_quota_inode ||
-	    inumber == sblock.m_orphan_file_inode)
+	    (sblock.m_user_quota_inode && inumber == sblock.m_user_quota_inode) ||
+	    (sblock.m_group_quota_inode && inumber == sblock.m_group_quota_inode) ||
+	    (sblock.m_project_quota_inode && inumber == sblock.m_project_quota_inode) ||
+	    (sblock.m_orphan_file_inode && inumber == sblock.m_orphan_file_inode)) {
+		statemap[inumber] = SSTATE;
+		n_files++;
 		return;
+	}
+
+	if (sblock.m_feature_ro_compat &
+	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM) {
+		if (letoh16(dp->i_mode) != 0 ||
+		    letoh16(dp->i_links_count) != 0 ||
+		    letoh32(dp->i_dtime) != 0) {
+			if (ext4fs_inode_csum_verify(&sblock,
+			    (struct ext4fs_dinode_256 *)dp, inumber) != 0) {
+				pfatal("INODE CHECKSUM INVALID I=%llu",
+				    (unsigned long long)inumber);
+				if (reply("CLEAR") == 1) {
+					dp = ginode(inumber);
+					clearinode(dp);
+					inodirty();
+					statemap[inumber] = USTATE;
+					return;
+				}
+			}
+		}
+	}
 
 	mode = letoh16(dp->i_mode) & IFMT;
 	if (mode == 0 || (dp->i_dtime != 0 && dp->i_links_count == 0)) {

@@ -83,95 +83,154 @@ static int walk_indirect_block(struct inodesc *, u_int64_t, int,
     int (*)(struct inodesc *));
 
 static int
+walk_leaf_extents(struct ext4fs_extent *ext, u_int16_t entries,
+    struct inodesc *idesc, int (*func)(struct inodesc *))
+{
+	int n, ret;
+	u_int64_t pblk;
+	u_int32_t lblk, len, prev_end = 0;
+	u_int32_t i;
+
+	for (n = 0; n < entries; n++, ext++) {
+		u_int16_t raw_len = letoh16(ext->e_len);
+
+		lblk = letoh32(ext->e_block);
+		pblk = letoh32(ext->e_start_lo) |
+		    ((u_int64_t)letoh16(ext->e_start_hi) << 32);
+		len = raw_len > 32768 ? raw_len - 32768 : raw_len;
+
+		if (len == 0) {
+			pwarn("EXTENT WITH ZERO LENGTH I=%llu\n",
+			    (unsigned long long)idesc->id_number);
+			return (STOP);
+		}
+		if (n > 0 && lblk < prev_end) {
+			pwarn("OVERLAPPING EXTENTS I=%llu "
+			    "(lblk %u < prev_end %u)\n",
+			    (unsigned long long)idesc->id_number,
+			    lblk, prev_end);
+			return (STOP);
+		}
+		if (pblk + len > maxfsblock) {
+			pwarn("EXTENT BEYOND FILESYSTEM I=%llu "
+			    "(pblk %llu + len %u > %llu)\n",
+			    (unsigned long long)idesc->id_number,
+			    (unsigned long long)pblk, len,
+			    (unsigned long long)maxfsblock);
+			return (STOP);
+		}
+		prev_end = lblk + len;
+
+		for (i = 0; i < len; i++) {
+			idesc->id_blkno = pblk + i;
+			idesc->id_numfrags = 1;
+			ret = (*func)(idesc);
+			if (ret & STOP)
+				return (ret);
+		}
+	}
+	return (KEEPON);
+}
+
+static int
 walk_extents(struct ext4fs_dinode *dp, struct inodesc *idesc)
 {
 	struct ext4fs_extent_header *eh;
-	struct ext4fs_extent *ext;
 	struct ext4fs_extent_idx *idx;
 	u_int16_t entries, depth;
 	int ret, n;
-	u_int64_t pblk;
-	u_int32_t len;
 	int (*func)(struct inodesc *);
 
 	eh = &dp->i_extent_header;
-	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC)
+	if (letoh16(eh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
+		pwarn("BAD EXTENT MAGIC 0x%x I=%llu\n",
+		    letoh16(eh->eh_magic),
+		    (unsigned long long)idesc->id_number);
 		return (STOP);
+	}
 
 	entries = letoh16(eh->eh_entries);
 	depth = letoh16(eh->eh_depth);
+
+	if (depth > EXT4FS_EXTENT_DEPTH_MAX) {
+		pwarn("EXCESSIVE EXTENT DEPTH %u I=%llu\n",
+		    depth, (unsigned long long)idesc->id_number);
+		return (STOP);
+	}
+	if (entries > letoh16(eh->eh_max)) {
+		pwarn("EXTENT ENTRIES %u > MAX %u I=%llu\n",
+		    entries, letoh16(eh->eh_max),
+		    (unsigned long long)idesc->id_number);
+		return (STOP);
+	}
 
 	if (idesc->id_type == ADDR)
 		func = idesc->id_func;
 	else
 		func = dirscan;
 
-	if (depth == 0) {
-		ext = dp->i_extent;
-		for (n = 0; n < entries; n++, ext++) {
-			pblk = letoh32(ext->e_start_lo) |
-			    ((u_int64_t)letoh16(ext->e_start_hi) << 32);
-			len = letoh16(ext->e_len);
-			if (len > 32768)
-				len -= 32768;
-			u_int32_t i;
-			for (i = 0; i < len; i++) {
-				idesc->id_blkno = pblk + i;
-				idesc->id_numfrags = 1;
-				ret = (*func)(idesc);
-				if (ret & STOP)
-					return (ret);
-			}
+	if (depth == 0)
+		return walk_leaf_extents(dp->i_extent, entries, idesc, func);
+
+	idx = dp->i_extent_idx;
+	for (n = 0; n < entries; n++, idx++) {
+		u_int64_t iblk = letoh32(idx->ei_leaf_lo) |
+		    ((u_int64_t)letoh16(idx->ei_leaf_hi) << 32);
+		struct bufarea *bp;
+		struct ext4fs_extent_header *ceh;
+		u_int16_t centries, cdepth;
+
+		if (iblk >= maxfsblock) {
+			pwarn("EXTENT INDEX BEYOND FILESYSTEM I=%llu\n",
+			    (unsigned long long)idesc->id_number);
+			return (STOP);
 		}
-	} else {
-		idx = dp->i_extent_idx;
-		for (n = 0; n < entries; n++, idx++) {
-			u_int64_t iblk = letoh32(idx->ei_leaf_lo) |
-			    ((u_int64_t)letoh16(idx->ei_leaf_hi) << 32);
-			struct bufarea *bp;
-			u_int16_t centries, cdepth;
-			struct ext4fs_extent_header *ceh;
 
-			if (idesc->id_type == ADDR) {
-				idesc->id_blkno = iblk;
-				idesc->id_numfrags = 1;
-				ret = (*func)(idesc);
-				if (ret & STOP)
-					return (ret);
-			}
+		if (idesc->id_type == ADDR) {
+			idesc->id_blkno = iblk;
+			idesc->id_numfrags = 1;
+			ret = (*func)(idesc);
+			if (ret & STOP)
+				return (ret);
+		}
 
-			bp = getdatablk(iblk, sblock.m_block_size);
-			ceh = (struct ext4fs_extent_header *)bp->b_un.b_buf;
-			if (letoh16(ceh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
-				bp->b_flags &= ~B_INUSE;
-				return (STOP);
-			}
-			centries = letoh16(ceh->eh_entries);
-			cdepth = letoh16(ceh->eh_depth);
-			if (cdepth == 0) {
-				struct ext4fs_extent *cext =
-				    (struct ext4fs_extent *)(ceh + 1);
-				u_int16_t j;
-				for (j = 0; j < centries; j++, cext++) {
-					u_int32_t i;
-					pblk = letoh32(cext->e_start_lo) |
-					    ((u_int64_t)letoh16(cext->e_start_hi) << 32);
-					len = letoh16(cext->e_len);
-					if (len > 32768)
-						len -= 32768;
-					for (i = 0; i < len; i++) {
-						idesc->id_blkno = pblk + i;
-						idesc->id_numfrags = 1;
-						ret = (*func)(idesc);
-						if (ret & STOP) {
-							bp->b_flags &= ~B_INUSE;
-							return (ret);
-						}
-					}
-				}
-			}
+		bp = getdatablk(iblk, sblock.m_block_size);
+		ceh = (struct ext4fs_extent_header *)bp->b_un.b_buf;
+		if (letoh16(ceh->eh_magic) != EXT4FS_EXTENT_HEADER_MAGIC) {
+			pwarn("BAD EXTENT MAGIC IN INDEX BLOCK I=%llu\n",
+			    (unsigned long long)idesc->id_number);
 			bp->b_flags &= ~B_INUSE;
+			return (STOP);
 		}
+		centries = letoh16(ceh->eh_entries);
+		cdepth = letoh16(ceh->eh_depth);
+		if (cdepth != depth - 1) {
+			pwarn("EXTENT DEPTH MISMATCH I=%llu "
+			    "(expected %u got %u)\n",
+			    (unsigned long long)idesc->id_number,
+			    depth - 1, cdepth);
+			bp->b_flags &= ~B_INUSE;
+			return (STOP);
+		}
+		if (centries > letoh16(ceh->eh_max)) {
+			pwarn("EXTENT ENTRIES %u > MAX %u IN INDEX I=%llu\n",
+			    centries, letoh16(ceh->eh_max),
+			    (unsigned long long)idesc->id_number);
+			bp->b_flags &= ~B_INUSE;
+			return (STOP);
+		}
+		if (cdepth == 0) {
+			struct ext4fs_extent *cext =
+			    (struct ext4fs_extent *)(ceh + 1);
+			ret = walk_leaf_extents(cext, centries, idesc, func);
+		} else {
+			pwarn("EXTENT DEPTH > 1 NOT FULLY SUPPORTED I=%llu\n",
+			    (unsigned long long)idesc->id_number);
+			ret = KEEPON;
+		}
+		bp->b_flags &= ~B_INUSE;
+		if (ret & STOP)
+			return (ret);
 	}
 	return (KEEPON);
 }

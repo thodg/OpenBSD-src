@@ -216,6 +216,19 @@ setup(char *dev)
 		}
 	}
 
+	if (sblock.m_feature_ro_compat &
+	    EXT4FS_FEATURE_RO_COMPAT_METADATA_CSUM) {
+		for (i = 0; i < (long)sblock.m_block_group_count; i++) {
+			if (ext4fs_bgd_csum_verify(&sblock,
+			    &sblock.m_gd[i], i) != 0) {
+				pfatal("BAD GROUP DESCRIPTOR CHECKSUM CG #%ld",
+				    i);
+				if (reply("CONTINUE") == 0)
+					errexit("%s\n", "");
+			}
+		}
+	}
+
 	if (fswritefd >= 0)
 		fsck_journal_replay();
 
@@ -316,6 +329,7 @@ readsb(int listerr)
 	    letoh16(fs->sb_block_group_descriptor_size);
 	sblock.m_reserved_bgdt_blocks =
 	    letoh16(fs->sb_reserved_bgdt_blocks);
+	sblock.m_checksum_seed = letoh32(fs->sb_checksum_seed);
 	sblock.m_last_orphan = letoh32(fs->sb_last_orphan);
 	sblock.m_orphan_file_inode = letoh32(fs->sb_orphan_file_inode);
 	sblock.m_journal_inode_number = letoh32(fs->sb_journal_inode_number);

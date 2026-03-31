@@ -92,6 +92,7 @@ pass4(void)
 			break;
 
 		case USTATE:
+		case SSTATE:
 			break;
 
 		default:

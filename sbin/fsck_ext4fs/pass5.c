@@ -122,6 +122,7 @@ pass5(void)
 
 			case FSTATE:
 			case FCLEAR:
+			case SSTATE:
 				nifree--;
 				setbit(ibmap, i);
 				break;
